@@ -4,6 +4,7 @@
 */
 
 #define STB_DXT_IMPLEMENTATION
+#include <string>
 #include "stb_dxt.h"
 
 #include <osg/Texture>
@@ -208,7 +209,7 @@ public:
 
         GLenum compressedPixelFormat;
         int minLevelSize;
-        int highQuality = (quality == ImageProcessor::QUALITY_NORMAL || quality == ImageProcessor::QUALITY_HIGH) ? 1 : 0;
+        int highQuality = (quality == ImageProcessor::PRODUCTION || quality == ImageProcessor::HIGHEST) ? 1 : 0;
 
         switch (compressedFormat)
         {

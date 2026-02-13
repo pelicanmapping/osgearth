@@ -19,6 +19,7 @@ add_subdirectory(vdatum_egm96)
 add_subdirectory(viewpoints)
 add_subdirectory(webp)
 add_subdirectory(zip)
+add_subdirectory(stbdxt)
 
 if(NOT BUILDING_VCPKG_PORT)
     add_subdirectory(gltf)

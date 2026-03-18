@@ -12,6 +12,7 @@ find_package(GDAL REQUIRED)
 find_package(SQLite3 REQUIRED)
 
 # optional
+find_package(Freetype QUIET)
 find_package(geos QUIET)
 find_package(blend2d QUIET)
 find_package(spdlog QUIET)
@@ -79,6 +80,7 @@ set(TARGET_GLSL
     WireLines.glsl
     PhongLighting.glsl
     PointDrawable.glsl
+    SlugText.glsl
     Text.glsl
     Text_legacy.glsl
     ContourMap.glsl
@@ -383,6 +385,8 @@ SET(TARGET_H
     Skins
     Sky
     SkyView
+    SlugFont
+    SlugText
     SpatialReference
     StarData
     StateSetCache
@@ -727,6 +731,8 @@ set(TARGET_SRC
     Skins.cpp
     Sky.cpp
     SkyView.cpp
+    SlugFont.cpp
+    SlugText.cpp
     SpatialReference.cpp
     StateSetCache.cpp
     Status.cpp
@@ -885,6 +891,13 @@ if(blosc_FOUND)
     include_directories(${BLOSC_INCLUDE_DIR})
     string (TOLOWER ${OSGEARTH_DYNAMIC_OR_STATIC} shared_or_static)
     target_link_libraries(${LIB_NAME} PRIVATE blosc_${shared_or_static})
+endif()
+
+# FreeType (for SlugFont)
+if(FREETYPE_FOUND)
+    message(STATUS "Found FreeType")
+    target_include_directories(${LIB_NAME} PRIVATE ${FREETYPE_INCLUDE_DIRS})
+    target_link_libraries(${LIB_NAME} PRIVATE ${FREETYPE_LIBRARIES})
 endif()
 
 # GEOS support?

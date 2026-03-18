@@ -1,0 +1,51 @@
+/* osgEarth
+ * Copyright 2025 Pelican Mapping
+ * MIT License
+ */
+#ifndef OSGEARTH_SLUG_TEXT_H
+#define OSGEARTH_SLUG_TEXT_H 1
+
+#include <osgEarth/Common>
+#include <osgEarth/SlugFont>
+#include <osg/Geode>
+#include <osg/Geometry>
+#include <string>
+
+namespace osgEarth
+{
+    /**
+     * Text node that renders using the Slug algorithm (Lengyel 2017).
+     * Renders text directly from quadratic Bezier curve outlines on the GPU,
+     * producing pixel-accurate results at any scale, rotation, or perspective.
+     */
+    class OSGEARTH_EXPORT SlugText : public osg::Geode
+    {
+    public:
+        SlugText();
+        SlugText(const std::string& text, const std::string& fontPath, float fontSize = 32.0f);
+
+        void setText(const std::string& text);
+        void setFont(const std::string& fontPath);
+        void setFontSize(float pixelsPerEm);
+        void setColor(const osg::Vec4& color);
+
+        const std::string& getText() const { return _text; }
+        const std::string& getFontPath() const { return _fontPath; }
+        float getFontSize() const { return _fontSize; }
+        const osg::Vec4& getColor() const { return _color; }
+
+    protected:
+        virtual ~SlugText();
+
+    private:
+        void compile();
+
+        std::string _text;
+        std::string _fontPath;
+        float _fontSize;
+        osg::Vec4 _color;
+        osg::ref_ptr<SlugFont> _font;
+    };
+}
+
+#endif // OSGEARTH_SLUG_TEXT_H

@@ -80,6 +80,10 @@ namespace osgEarth { namespace Util
         PhongLighting = "PhongLighting.glsl";
         _sources[PhongLighting] = @PhongLighting.glsl@;
 
+        // Slug Text
+        SlugText = "SlugText.glsl";
+        _sources[SlugText] = @SlugText.glsl@;
+
 		// Text
 		Text = "Text.glsl";
 		_sources[Text] = @Text.glsl@;

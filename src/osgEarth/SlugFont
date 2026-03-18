@@ -1,0 +1,85 @@
+/* osgEarth
+ * Copyright 2025 Pelican Mapping
+ * MIT License
+ */
+#ifndef OSGEARTH_SLUG_FONT_H
+#define OSGEARTH_SLUG_FONT_H 1
+
+#include <osgEarth/Common>
+#include <osg/Referenced>
+#include <osg/Texture2D>
+#include <map>
+#include <vector>
+#include <string>
+#include <cstdint>
+
+namespace osgEarth
+{
+    /**
+     * Extracts quadratic Bezier glyph outlines from a TrueType font via FreeType
+     * and packs them into GPU textures for use with the Slug rendering algorithm
+     * (Lengyel 2017).
+     *
+     * Two textures are produced:
+     *  - Curve texture (RGBA16F): Bezier control points
+     *  - Band texture (RGBA16UI): Band headers and curve indices
+     */
+    class OSGEARTH_EXPORT SlugFont : public osg::Referenced
+    {
+    public:
+        SlugFont(const std::string& fontPath);
+
+        struct GlyphData
+        {
+            // Texture location of this glyph's band data
+            int bandTexX = 0, bandTexY = 0;
+            // Band max indexes (horizontal, vertical)
+            int bandMaxX = 0, bandMaxY = 0;
+            // Band transform: scale.xy, offset.xy
+            float bandScaleX = 0, bandScaleY = 0, bandOffsetX = 0, bandOffsetY = 0;
+            // Glyph metrics (in em units, normalized to [0,1])
+            float bearingX = 0, bearingY = 0, width = 0, height = 0, advance = 0;
+        };
+
+        const GlyphData* getGlyph(uint32_t codepoint) const;
+        osg::Texture2D* getCurveTexture() const { return _curveTexture.get(); }
+        osg::Texture2D* getBandTexture() const { return _bandTexture.get(); }
+        bool valid() const { return _valid; }
+
+        static osg::ref_ptr<SlugFont> get(const std::string& fontPath);
+
+        struct CurveData {
+            float x1, y1, x2, y2, x3, y3;
+        };
+
+    protected:
+        virtual ~SlugFont();
+
+    private:
+        void load(const std::string& fontPath);
+        void processGlyph(void* face, uint32_t codepoint);
+        void buildTextures();
+
+        struct BandEntry {
+            int curveCount;
+            std::vector<int> curveIndices;
+        };
+
+        struct GlyphBuildData {
+            GlyphData metrics;
+            std::vector<CurveData> curves;
+            std::vector<BandEntry> hbands;
+            std::vector<BandEntry> vbands;
+        };
+
+        std::map<uint32_t, GlyphBuildData> _glyphBuild;
+        std::map<uint32_t, GlyphData> _glyphs;
+        osg::ref_ptr<osg::Texture2D> _curveTexture;
+        osg::ref_ptr<osg::Texture2D> _bandTexture;
+        bool _valid;
+
+        static const int BAND_TEX_WIDTH = 4096;
+    };
+}
+
+#endif // OSGEARTH_SLUG_FONT_H

@@ -7,6 +7,7 @@
 
 #include <osgEarth/Common>
 #include <osgEarth/SlugFont>
+#include <osg/AutoTransform>
 #include <osg/Geode>
 #include <osg/Geometry>
 #include <string>
@@ -17,8 +18,13 @@ namespace osgEarth
      * Text node that renders using the Slug algorithm (Lengyel 2017).
      * Renders text directly from quadratic Bezier curve outlines on the GPU,
      * producing pixel-accurate results at any scale, rotation, or perspective.
+     *
+     * Inherits from osg::AutoTransform so that setAutoScaleToScreen(true)
+     * keeps the text at a constant pixel size regardless of camera distance.
+     * When auto-scale is off (default), the transform is identity and
+     * behaviour is identical to using a plain Geode.
      */
-    class OSGEARTH_EXPORT SlugText : public osg::Geode
+    class OSGEARTH_EXPORT SlugText : public osg::AutoTransform
     {
     public:
         SlugText();
@@ -28,11 +34,21 @@ namespace osgEarth
         void setFont(const std::string& fontPath);
         void setFontSize(float pixelsPerEm);
         void setColor(const osg::Vec4& color);
+        void setOutlineColor(const osg::Vec4& color);
+        void setOutlineWidth(float pixels);
 
         const std::string& getText() const { return _text; }
         const std::string& getFontPath() const { return _fontPath; }
         float getFontSize() const { return _fontSize; }
         const osg::Vec4& getColor() const { return _color; }
+        const osg::Vec4& getOutlineColor() const { return _outlineColor; }
+        float getOutlineWidth() const { return _outlineWidth; }
+
+        void setAutoScaleToScreen(bool value);
+        bool getAutoScaleToScreen() const { return _autoScaleToScreen; }
+
+        /** Forward getBoundingBox to the internal geode for compatibility. */
+        const osg::BoundingBox& getBoundingBox() const;
 
     protected:
         virtual ~SlugText();
@@ -44,7 +60,11 @@ namespace osgEarth
         std::string _fontPath;
         float _fontSize;
         osg::Vec4 _color;
+        osg::Vec4 _outlineColor;
+        float _outlineWidth;
+        bool _autoScaleToScreen;
         osg::ref_ptr<SlugFont> _font;
+        osg::ref_ptr<osg::Geode> _geode;
     };
 }
 

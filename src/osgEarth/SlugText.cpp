@@ -14,7 +14,10 @@ using namespace osgEarth::Util;
 
 SlugText::SlugText() :
     _fontSize(32.0f),
-    _color(1, 1, 1, 1)
+    _color(1, 1, 1, 1),
+    _outlineColor(0, 0, 0, 1),
+    _outlineWidth(0.0f),
+    _autoScaleToScreen(false)
 {
 }
 
@@ -22,7 +25,10 @@ SlugText::SlugText(const std::string& text, const std::string& fontPath, float f
     _text(text),
     _fontPath(fontPath),
     _fontSize(fontSize),
-    _color(1, 1, 1, 1)
+    _color(1, 1, 1, 1),
+    _outlineColor(0, 0, 0, 1),
+    _outlineWidth(0.0f),
+    _autoScaleToScreen(false)
 {
     compile();
 }
@@ -58,10 +64,51 @@ void SlugText::setColor(const osg::Vec4& color)
     ss->getOrCreateUniform("slug_color", osg::Uniform::FLOAT_VEC4)->set(_color);
 }
 
+void SlugText::setOutlineColor(const osg::Vec4& color)
+{
+    _outlineColor = color;
+    osg::StateSet* ss = getOrCreateStateSet();
+    ss->getOrCreateUniform("slug_outlineColor", osg::Uniform::FLOAT_VEC4)->set(_outlineColor);
+}
+
+void SlugText::setOutlineWidth(float pixels)
+{
+    bool wasEnabled = _outlineWidth > 0.0f;
+    _outlineWidth = pixels;
+    bool isEnabled = _outlineWidth > 0.0f;
+
+    if (wasEnabled != isEnabled)
+    {
+        // Toggling outline on/off requires recompile (quad expansion changes)
+        compile();
+    }
+    else
+    {
+        osg::StateSet* ss = getOrCreateStateSet();
+        ss->getOrCreateUniform("slug_outlineWidth", osg::Uniform::FLOAT)->set(_outlineWidth);
+    }
+}
+
+void SlugText::setAutoScaleToScreen(bool value)
+{
+    _autoScaleToScreen = value;
+    osg::AutoTransform::setAutoScaleToScreen(value);
+    setAutoRotateMode(osg::AutoTransform::ROTATE_TO_SCREEN);
+}
+
+const osg::BoundingBox& SlugText::getBoundingBox() const
+{
+    static osg::BoundingBox empty;
+    return _geode.valid() && _geode->getNumDrawables() > 0
+        ? _geode->getDrawable(0)->getBoundingBox()
+        : empty;
+}
+
 void SlugText::compile()
 {
-    // Clear existing drawables
-    removeDrawables(0, getNumDrawables());
+    // Clear existing children and recreate the internal geode
+    removeChildren(0, getNumChildren());
+    _geode = new osg::Geode();
 
     if (_text.empty() || _fontPath.empty())
         return;
@@ -93,8 +140,10 @@ void SlugText::compile()
     float cursorX = 0.0f;
     float scale = _fontSize;
 
-    // Half-pixel expansion in em-space (for v1, expand quads slightly)
+    // Expand quads in em-space: half-pixel base + outline width
     float expand = 1.0f / scale;
+    if (_outlineWidth > 0.0f)
+        expand += _outlineWidth / scale;
 
     for (char ch : _text)
     {
@@ -175,9 +224,10 @@ void SlugText::compile()
     geom->setTexCoordArray(2, texcoords2.get());
     geom->addPrimitiveSet(indices.get());
 
-    addDrawable(geom.get());
+    _geode->addDrawable(geom.get());
+    addChild(_geode.get());
 
-    // Setup state
+    // Setup state on this node — uniforms/shaders inherit down to geode's geometry
     osg::StateSet* ss = getOrCreateStateSet();
 
     VirtualProgram* vp = VirtualProgram::getOrCreate(ss);
@@ -188,6 +238,8 @@ void SlugText::compile()
     ss->addUniform(new osg::Uniform("slug_curveTexture", 0));
     ss->addUniform(new osg::Uniform("slug_bandTexture", 1));
     ss->getOrCreateUniform("slug_color", osg::Uniform::FLOAT_VEC4)->set(_color);
+    ss->getOrCreateUniform("slug_outlineColor", osg::Uniform::FLOAT_VEC4)->set(_outlineColor);
+    ss->getOrCreateUniform("slug_outlineWidth", osg::Uniform::FLOAT)->set(_outlineWidth);
 
     ss->setTextureAttributeAndModes(0, _font->getCurveTexture(), osg::StateAttribute::ON);
     ss->setTextureAttributeAndModes(1, _font->getBandTexture(), osg::StateAttribute::ON);

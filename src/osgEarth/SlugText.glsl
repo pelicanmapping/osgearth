@@ -29,6 +29,8 @@ void oe_SlugText_VS(inout vec4 vertex)
 uniform sampler2D slug_curveTexture;
 uniform usampler2D slug_bandTexture;
 uniform vec4 slug_color;
+uniform vec4 slug_outlineColor;
+uniform float slug_outlineWidth;
 
 in vec2 slug_texcoord;
 flat in vec4 slug_banding;
@@ -194,7 +196,32 @@ float slug_Render(vec2 renderCoord, vec4 bandTransform, ivec2 glyphLoc, ivec2 ba
 
 void oe_SlugText_FS(inout vec4 color)
 {
-    float coverage = slug_Render(slug_texcoord, slug_banding, slug_glyphLoc, slug_bandMax);
-    if (coverage < 0.001) discard;
-    color = slug_color * coverage;
+    float fill = slug_Render(slug_texcoord, slug_banding, slug_glyphLoc, slug_bandMax);
+
+    if (slug_outlineWidth > 0.0)
+    {
+        if (fill > 0.001)
+        {
+            color = slug_color * fill;
+            return;
+        }
+
+        // Convert pixel outline width to em-space
+        vec2 emsPerPixel = fwidth(slug_texcoord);
+        vec2 outlineEm = slug_outlineWidth * emsPerPixel;
+
+        // Sample at 4 diagonal offsets to detect outline region
+        float outlineCov = slug_Render(slug_texcoord + vec2(-outlineEm.x, -outlineEm.y), slug_banding, slug_glyphLoc, slug_bandMax);
+        outlineCov = max(outlineCov, slug_Render(slug_texcoord + vec2( outlineEm.x, -outlineEm.y), slug_banding, slug_glyphLoc, slug_bandMax));
+        outlineCov = max(outlineCov, slug_Render(slug_texcoord + vec2(-outlineEm.x,  outlineEm.y), slug_banding, slug_glyphLoc, slug_bandMax));
+        outlineCov = max(outlineCov, slug_Render(slug_texcoord + vec2( outlineEm.x,  outlineEm.y), slug_banding, slug_glyphLoc, slug_bandMax));
+
+        if (outlineCov < 0.001) discard;
+        color = slug_outlineColor * outlineCov;
+    }
+    else
+    {
+        if (fill < 0.001) discard;
+        color = slug_color * fill;
+    }
 }

@@ -3,27 +3,22 @@
  * MIT License
  */
 
-// Demo application for SlugText rendering.
-// Renders text using the Slug algorithm (Lengyel 2017) which produces
-// pixel-accurate results at any scale, rotation, or perspective.
+// Demo: side-by-side comparison of SlugText vs osgText::Text.
+// Left column uses the Slug algorithm (resolution-independent curve rendering).
+// Right column uses standard osgText (SDF glyph atlas).
 //
-// Usage: osgearth_slugtext [--font <path>] [--text <string>]
+// Usage: osgearth_slugtext [--font <path.ttf>] [--text <string>]
 
 #include <osgViewer/Viewer>
 #include <osgEarth/SlugText>
 #include <osgEarth/GLUtils>
+#include <osgText/Text>
+#include <osgText/Font>
 #include <osg/MatrixTransform>
 #include <osg/Camera>
 #include <iostream>
 
 using namespace osgEarth;
-
-int usage(const char* name, const char* msg)
-{
-    std::cerr << "Error: " << msg << std::endl;
-    std::cerr << "Usage: " << name << " [--font <path.ttf>] [--text <string>]" << std::endl;
-    return -1;
-}
 
 osg::Camera* createHUDCamera(int width, int height)
 {
@@ -37,6 +32,28 @@ osg::Camera* createHUDCamera(int width, int height)
     return camera;
 }
 
+osg::Geode* createOsgText(const std::string& str, const std::string& fontPath,
+                           float size, const osg::Vec4& color)
+{
+    osgText::Text* text = new osgText::Text();
+    text->setFont(fontPath);
+    text->setCharacterSize(size);
+    text->setColor(color);
+    text->setText(str);
+    text->setAxisAlignment(osgText::Text::XY_PLANE);
+    text->setAlignment(osgText::Text::LEFT_BOTTOM);
+
+    osg::Geode* geode = new osg::Geode();
+    geode->addDrawable(text);
+    return geode;
+}
+
+struct TextRow {
+    std::string str;
+    float size;
+    osg::Vec4 color;
+};
+
 int main(int argc, char** argv)
 {
     osg::ArgumentParser arguments(&argc, argv);
@@ -45,7 +62,6 @@ int main(int argc, char** argv)
     std::string fontPath;
     if (!arguments.read("--font", fontPath))
     {
-        // Try common font paths
 #ifdef _WIN32
         fontPath = "C:/Windows/Fonts/arial.ttf";
 #elif __APPLE__
@@ -55,71 +71,103 @@ int main(int argc, char** argv)
 #endif
     }
 
-    std::string text;
-    if (!arguments.read("--text", text))
-    {
-        text = "Hello, Slug!";
-    }
+    std::string userText;
+    arguments.read("--text", userText);
 
     osgViewer::Viewer viewer(arguments);
 
-    int width = 1280, height = 720;
-    osg::Group* root = new osg::Group();
+    const int width = 1280, height = 720;
+    const float colLeft = 50.0f;
+    const float colRight = width * 0.5f + 30.0f;
+    const float labelSize = 14.0f;
 
-    // Create an orthographic HUD camera for 2D text display
+    osg::Group* root = new osg::Group();
     osg::Camera* hud = createHUDCamera(width, height);
     root->addChild(hud);
 
-    // Large text
+    // Column headers
     {
         auto* mt = new osg::MatrixTransform();
-        mt->setMatrix(osg::Matrix::translate(50, height - 100, 0));
-        auto* st = new SlugText(text, fontPath, 48.0f);
-        st->setColor(osg::Vec4(1, 1, 1, 1));
+        mt->setMatrix(osg::Matrix::translate(colLeft, height - 30, 0));
+        auto* st = new SlugText("SlugText (Bezier curves)", fontPath, 18.0f);
+        st->setColor(osg::Vec4(1, 1, 0.5f, 1));
+        mt->addChild(st);
+        hud->addChild(mt);
+    }
+    {
+        auto* mt = new osg::MatrixTransform();
+        mt->setMatrix(osg::Matrix::translate(colRight, height - 30, 0));
+        mt->addChild(createOsgText("osgText (SDF atlas)", fontPath, 18.0f,
+                                   osg::Vec4(1, 1, 0.5f, 1)));
+        hud->addChild(mt);
+    }
+
+    // Divider line (thin text approximation)
+    {
+        auto* mt = new osg::MatrixTransform();
+        mt->setMatrix(osg::Matrix::translate(width * 0.5f - 5.0f, height - 40, 0));
+        auto* st = new SlugText("|", fontPath, 12.0f);
+        st->setColor(osg::Vec4(0.5f, 0.5f, 0.5f, 1));
         mt->addChild(st);
         hud->addChild(mt);
     }
 
-    // Medium text
+    // Define text rows to compare
+    std::vector<TextRow> rows = {
+        { userText.empty() ? "Hello, Slug!" : userText, 48.0f, osg::Vec4(1, 1, 1, 1) },
+        { "Resolution Independent", 32.0f, osg::Vec4(0.8f, 0.9f, 1.0f, 1.0f) },
+        { "Pixel Perfect at Any Scale", 16.0f, osg::Vec4(1.0f, 0.9f, 0.7f, 1.0f) },
+        { "Small 12px text sample", 12.0f, osg::Vec4(0.9f, 0.9f, 0.9f, 1.0f) },
+        { "BIG", 120.0f, osg::Vec4(1.0f, 0.5f, 0.3f, 0.7f) },
+    };
+
+    float yPos = height - 60;
+
+    for (auto& row : rows)
     {
-        auto* mt = new osg::MatrixTransform();
-        mt->setMatrix(osg::Matrix::translate(50, height - 180, 0));
-        auto* st = new SlugText("Resolution Independent Text", fontPath, 32.0f);
-        st->setColor(osg::Vec4(0.8f, 0.9f, 1.0f, 1.0f));
-        mt->addChild(st);
-        hud->addChild(mt);
+        yPos -= row.size * 1.5f;
+
+        // Left: SlugText
+        {
+            auto* mt = new osg::MatrixTransform();
+            mt->setMatrix(osg::Matrix::translate(colLeft, yPos, 0));
+            auto* st = new SlugText(row.str, fontPath, row.size);
+            st->setColor(row.color);
+            mt->addChild(st);
+            hud->addChild(mt);
+        }
+
+        // Right: osgText
+        {
+            auto* mt = new osg::MatrixTransform();
+            mt->setMatrix(osg::Matrix::translate(colRight, yPos, 0));
+            mt->addChild(createOsgText(row.str, fontPath, row.size, row.color));
+            hud->addChild(mt);
+        }
     }
 
-    // Small text
-    {
-        auto* mt = new osg::MatrixTransform();
-        mt->setMatrix(osg::Matrix::translate(50, height - 240, 0));
-        auto* st = new SlugText("Pixel Perfect at Any Scale", fontPath, 16.0f);
-        st->setColor(osg::Vec4(1.0f, 0.9f, 0.7f, 1.0f));
-        mt->addChild(st);
-        hud->addChild(mt);
-    }
-
-    // 3D perspective text (rotated)
+    // Rotated text comparison
+    yPos -= 80;
+    float rotAngle = osg::DegreesToRadians(15.0);
     {
         auto* mt = new osg::MatrixTransform();
         osg::Matrix m;
-        m.makeRotate(osg::DegreesToRadians(15.0), osg::Vec3(0, 0, 1));
-        m.setTrans(osg::Vec3(50, height - 350, 0));
+        m.makeRotate(rotAngle, osg::Vec3(0, 0, 1));
+        m.setTrans(osg::Vec3(colLeft, yPos, 0));
         mt->setMatrix(m);
-        auto* st = new SlugText("Rotated Text", fontPath, 36.0f);
+        auto* st = new SlugText("Rotated 15deg", fontPath, 28.0f);
         st->setColor(osg::Vec4(0.5f, 1.0f, 0.5f, 1.0f));
         mt->addChild(st);
         hud->addChild(mt);
     }
-
-    // Very large text to show resolution independence
     {
         auto* mt = new osg::MatrixTransform();
-        mt->setMatrix(osg::Matrix::translate(50, 80, 0));
-        auto* st = new SlugText("BIG", fontPath, 200.0f);
-        st->setColor(osg::Vec4(1.0f, 0.5f, 0.3f, 0.5f));
-        mt->addChild(st);
+        osg::Matrix m;
+        m.makeRotate(rotAngle, osg::Vec3(0, 0, 1));
+        m.setTrans(osg::Vec3(colRight, yPos, 0));
+        mt->setMatrix(m);
+        mt->addChild(createOsgText("Rotated 15deg", fontPath, 28.0f,
+                                   osg::Vec4(0.5f, 1.0f, 0.5f, 1.0f)));
         hud->addChild(mt);
     }
 

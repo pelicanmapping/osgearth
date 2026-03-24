@@ -1481,6 +1481,18 @@ BuildGeometryFilter::tileAndBuildPolygon(
             // for geographic data we need to project into 2D before tessellating:
             if (outputSRS->isGeographic())
             {
+                bool useGnomonic = true;
+                Polygon* polygon = dynamic_cast<Polygon*>(proj.get());
+                if (polygon)
+                {
+                    double area = fabs(polygon->getSignedArea2D());
+                    // Only use gnomonic projection if the polygon is geographically large enough to warrant it.
+                    if (area <= 0.05)
+                    {
+                        useGnomonic = false;
+                        plane = Tessellator::PLANE_AUTO;
+                    }
+                }
                 osg::Vec3d geo;
                 osg::BoundingBoxd ecef_bb;
 
@@ -1513,21 +1525,24 @@ BuildGeometryFilter::tileAndBuildPolygon(
                     ref_y = y - fmod(y, skin_res->imageHeight().value());
                 }
 
-                const osg::Vec3d& center = ecef_bb.center();
-
-                GeometryIterator proj_iter(proj.get(), true);
-                while (proj_iter.hasMore())
+                if (useGnomonic)
                 {
-                    Geometry* part = proj_iter.next();
-                    for (osg::Vec3d& p : *part)
+                    const osg::Vec3d& center = ecef_bb.center();
+
+                    GeometryIterator proj_iter(proj.get(), true);
+                    while (proj_iter.hasMore())
                     {
-                        // The gnomonic equation won't provide any variation in y values if all of the coordinates are on the equator, so
-                        // adjust the point slightly up from the equator if all points lie on the equator.
-                        if (allOnEquator)
+                        Geometry* part = proj_iter.next();
+                        for (osg::Vec3d& p : *part)
                         {
-                            p.z() += 0.0000001;
+                            // The gnomonic equation won't provide any variation in y values if all of the coordinates are on the equator, so
+                            // adjust the point slightly up from the equator if all points lie on the equator.
+                            if (allOnEquator)
+                            {
+                                p.z() += 0.0000001;
+                            }
+                            ecef_to_gnomonic(p, center, outputSRS->getEllipsoid());
                         }
-                        ecef_to_gnomonic(p, center, outputSRS->getEllipsoid());
                     }
                 }
             }

@@ -678,6 +678,9 @@ namespace WEEJOBS_NAMESPACE
         //! Wait for all threads to exit (after calling stop_threads)
         inline void join_threads();
 
+        //! Blocks until all pending work is finished.
+        inline void finish_work();
+
         std::atomic<bool> _can_steal_work = { true };
         std::vector<detail::job> _queue;
         mutable std::mutex _queue_mutex; // protect access to the queue
@@ -1042,6 +1045,15 @@ namespace WEEJOBS_NAMESPACE
         }
 
         _threads.clear();
+    }
+
+    //! Blocks until all pending work is finished.
+    inline void jobpool::finish_work()
+    {
+        while (_metrics.pending > 0 || _metrics.running > 0 || _metrics.postprocessing > 0)
+        {
+            std::this_thread::yield();
+        }
     }
 
     // steal a job from another jobpool's queue (other than "thief").

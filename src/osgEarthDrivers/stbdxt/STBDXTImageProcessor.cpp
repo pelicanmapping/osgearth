@@ -5,6 +5,7 @@
 
 #define STB_DXT_IMPLEMENTATION
 #include <string>
+#include <string.h>
 #include "stb_dxt.h"
 
 #include <osg/Texture>
@@ -13,7 +14,7 @@
 #include <osg/GLU>
 #include <osgEarth/ImageUtils>
 #include <stdlib.h>
-#include <string.h>
+
 
 using namespace osgEarth;
 using namespace osgEarth::Util;

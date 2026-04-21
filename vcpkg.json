@@ -1,11 +1,12 @@
 {
   "name": "osgearth",
-  "version-string": "3.7.3",
+  "version-string": "3.8.0",
   "port-version": 1,
-  "description": "osgEarth - 3D Maps and Terrain - Copyright 2025 Pelican Mapping",
+  "description": "osgEarth - 3D Maps and Terrain - Copyright 2026 Pelican Mapping",
   "homepage": "https://github.com/gwaldron/osgearth",
   "supports": "!(x86 | wasm32)",
   "dependencies": [
+    "benchmark",
     "blend2d",
     "draco",
     {

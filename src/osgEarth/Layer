@@ -455,10 +455,6 @@ namespace osgEarth
         //! mutable layer hints for the subclass to optionally access
         Hints& layerHints();
 
-        //! MapNode will call this function when terrain resources are available.
-        OE_DEPRECATED("Override prepareForRendering() instead")
-        virtual void setTerrainResources(TerrainResources*) { }
-
     private:
         const std::string& _layerName;
         UID _uid;
@@ -475,7 +471,7 @@ namespace osgEarth
         std::vector<osg::ref_ptr<LayerShader> > _shaders;
         mutable Threading::ReadWriteMutex _inuse_mutex;
 
-        //! Prepares the layer for rendering if necessary.
+        //! Prepares the layer for rendering if necessary.  
         void invoke_prepareForRendering(TerrainEngine*);
 
     protected:

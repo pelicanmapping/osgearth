@@ -16,12 +16,12 @@ Demonstrates how to select a style name using javascript.
         </filters>
     </OGRFeatures>
 
-    <FeatureModel name="countries" features="country-data" pickable="true">        
+    <TiledFeatureModel name="countries" features="country-data" pickable="true">        
         <styles>        
             <style type="text/css">
                 base { 
-                    altitude-clamping: terrain-drape;
-                    render-backface-culling: false;
+                    render-depth-test: false;
+                    render-clip-plane: 0;
                 }
                     
                 p1 : base { 
@@ -49,15 +49,13 @@ Demonstrates how to select a style name using javascript.
                 }
             </style>
 
-            <script language="javascript">
-              <![CDATA[
+            <script><![CDATA[
                 function between(val_as_string, low, high) {
                     var v = parseFloat(val_as_string);
                     return low <= v && v < high;
                 }
-              ]]>
-            </script>
+            ]]></script>
         </styles>        
-    </FeatureModel>
+    </TiledFeatureModel>
 
 </map>

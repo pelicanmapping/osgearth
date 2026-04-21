@@ -8,7 +8,7 @@
 #include <ogr_api.h>
 
 #ifndef OSGEARTH_LIBRARY
-#error OgrUtils is an internal-only header
+//#error OgrUtils is an internal-only header
 #endif
 
 namespace osgEarth { namespace Util

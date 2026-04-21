@@ -56,7 +56,7 @@ namespace osgEarth {
         extern OSGEARTH_EXPORT std::string trimAndCompress(const std::string& in);
 
         //! Returns a lower case character, taking a fast path for ASCII values.
-        inline char toLower(char input) {
+        inline char toLower(unsigned char input) {
             return (input < 0x80) ? input | ((input >= 'A' && input <= 'Z') ? 0x20 : 0x00) : std::tolower(input);
         }
 
@@ -150,9 +150,6 @@ namespace osgEarth {
         //! return NAN is it failes.
         extern OSGEARTH_EXPORT std::pair<double, int> parseDoubleAndIndex(const std::string& str);
 
-        //! Parse a string into a long long, return NAN if it fails.
-        extern OSGEARTH_EXPORT long long parseLongLong(const std::string& str);
-
         //! Joins a collection of strings into a single string, separated by the given delimiter.
         extern OSGEARTH_EXPORT std::string joinStrings(const StringVector& input, char delim);
 
@@ -208,78 +205,52 @@ namespace osgEarth {
             return temp;
         }
 
-        // template specialization for integers (to handle hex)
-#define AS_INT_DEC_OR_HEX(TYPE) \
-        template<> inline TYPE as<TYPE>(const std::string& str, const TYPE& dv) { \
-            auto value = parseDouble(str); \
-            return std::isnan(value) ? dv : (TYPE)value; }
+        template<> inline long long as<long long>(const std::string& str, const long long& defaultValue) {
+            char* end = nullptr;
+            auto value = std::strtoll(str.c_str(), &end, 0);
+            return (str.c_str() == end) ? defaultValue : value;
+        }
 
-        AS_INT_DEC_OR_HEX(int);
-        AS_INT_DEC_OR_HEX(unsigned);
-        AS_INT_DEC_OR_HEX(short);
-        AS_INT_DEC_OR_HEX(unsigned short);
-        AS_INT_DEC_OR_HEX(long);
-        AS_INT_DEC_OR_HEX(unsigned long);
+        template<> inline int as<int>(const std::string& str, const int& defaultValue) {
+            return static_cast<int>(as<long long>(str, static_cast<long long>(defaultValue)));
+        }
+        template<> inline unsigned as<unsigned>(const std::string& str, const unsigned& defaultValue) {
+            return static_cast<unsigned>(as<long long>(str, static_cast<long long>(defaultValue)));
+        }
+        template<> inline short as<short>(const std::string& str, const short& defaultValue) {
+            return static_cast<short>(as<long long>(str, static_cast<long long>(defaultValue)));
+        }
+        template<> inline unsigned short as<unsigned short>(const std::string& str, const unsigned short& defaultValue) {
+            return static_cast<unsigned short>(as<long long>(str, static_cast<long long>(defaultValue)));
+        }
+        template<> inline long as<long>(const std::string& str, const long& defaultValue) {
+            return static_cast<long>(as<long long>(str, static_cast<long long>(defaultValue)));
+        }
+        template<> inline unsigned long as<unsigned long>(const std::string& str, const unsigned long& defaultValue) {
+            return static_cast<unsigned long>(as<long long>(str, static_cast<long long>(defaultValue)));
+        }
+        template<> inline unsigned long long as<unsigned long long>(const std::string& str, const unsigned long long& defaultValue) {
+            return static_cast<unsigned long long>(as<long long>(str, static_cast<unsigned long long>(defaultValue)));
+        }
 
         // template specialization for a bool
-        template<> inline bool
-            as<bool>(const std::string& str, const bool& default_value)
+        template<> inline bool as<bool>(const std::string& str, const bool& default_value)
         {
-            std::string temp = toLower(str);
-            return
-                temp == "true" || temp == "yes" || temp == "on" ? true :
-                temp == "false" || temp == "no" || temp == "off" ? false :
+            return ci_equals(str, "true") || ci_equals(str, "yes") || ci_equals(str, "on") ? true :
+                ci_equals(str, "false") || ci_equals(str, "no") || ci_equals(str, "off") ? false :
                 default_value;
         }
 
-        template<> inline osg::Vec3f
-            as<osg::Vec3f>(const std::string& str, const osg::Vec3f& default_value)
+        template<> inline osg::Vec3f as<osg::Vec3f>(const std::string& str, const osg::Vec3f& default_value)
         {
             return stringToVec3f(str, default_value);
         }
 
         // template specialization for string
-        template<> inline std::string
-            as<std::string>(const std::string& str, const std::string& default_value)
+        template<> inline std::string as<std::string>(const std::string& str, const std::string& default_value)
         {
             return str;
         }
-
-        // snips a substring and parses it.
-        template<typename T> inline bool
-            as(const std::string& in, unsigned start, unsigned len, T default_value)
-        {
-            std::string buf;
-            std::copy(in.begin() + start, in.begin() + start + len, std::back_inserter(buf));
-            return as<T>(buf, default_value);
-        }
-
-#if 0
-        // converts a primitive to a string
-        template<typename T> inline std::string
-            toString(const T& value)
-        {
-            std::stringstream out;
-            //out << std::setprecision(20) << std::fixed << value;
-            out << std::setprecision(20) << value;
-            std::string outStr;
-            outStr = out.str();
-            return outStr;
-        }
-
-        // template speciallization for a bool to print out "true" or "false"
-        template<> inline std::string
-            toString<bool>(const bool& value)
-        {
-            return value ? "true" : "false";
-        }
-
-        template<> inline std::string
-            toString<osg::Vec3f>(const osg::Vec3f& value)
-        {
-            return vec3fToString(value);
-        }
-#endif
 
         inline std::string toString(bool value)
         {

@@ -2,9 +2,13 @@ name: windows-external-project
 
 on: [push, workflow_dispatch]
 
+permissions:
+  packages: write
+
 env:
-  VCPKG_BINARY_SOURCES : "clear;x-gha,readwrite"
-  VCPKG_VERSION: 'master'
+  FEED_URL: https://nuget.pkg.github.com/gwaldron/index.json
+  VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/gwaldron/index.json,readwrite"
+  VCPKG_VERSION: '2026.01.16'
 
 jobs:
 
@@ -16,21 +20,14 @@ jobs:
         os: ['windows-latest']
         include:
           - os: 'windows-latest'
-            triplet: 'x64-windows'
+            triplet: 'x64-windows-release'
             mono: ''
             VCPKG_WORKSPACE: 'c:/vcpkg_own'
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         submodules: recursive
-
-    - name: Export GitHub Actions cache environment variables
-      uses: actions/github-script@v7
-      with:
-        script: |
-          core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
     - name: Cloning vcpkg main branch (windows)
       shell: 'bash'
@@ -38,10 +35,27 @@ jobs:
         cmake -E make_directory ${{ matrix.VCPKG_WORKSPACE }}
         cd ${{ matrix.VCPKG_WORKSPACE }}
         git clone https://github.com/microsoft/vcpkg
+        cd vcpkg
+        git checkout ${{ env.VCPKG_VERSION }}
+        cd ..
         ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
         echo "set(VCPKG_BUILD_TYPE release)" >> ./vcpkg/triplets/x64-windows.cmake
         echo "set(osg_OPENGL_PROFILE GL3)" >> ./vcpkg/triplets/x64-windows.cmake
         ${{ matrix.VCPKG_WORKSPACE }}/vcpkg/vcpkg version
+
+    - name: Add NuGet sources
+      shell: pwsh
+      run: |
+        .$(${{ matrix.VCPKG_WORKSPACE }}/vcpkg/vcpkg fetch nuget) `
+          sources add `
+          -Source "${{ env.FEED_URL }}" `
+          -StorePasswordInClearText `
+          -Name GitHubPackages `
+          -UserName "gwaldron" `
+          -Password "${{ secrets.GITHUB_TOKEN }}"
+        .$(${{ matrix.VCPKG_WORKSPACE }}/vcpkg/vcpkg fetch nuget) `
+          setapikey "${{ secrets.GITHUB_TOKEN }}" `
+          -Source "${{ env.FEED_URL }}"
 
     - name: Create Build Environment
       run: |
@@ -51,9 +65,9 @@ jobs:
       shell: bash
       working-directory: ${{ runner.workspace }}/build
       run: |
-        cmake $GITHUB_WORKSPACE/share/ExternalProject -DCMAKE_BUILD_TYPE=release -DCMAKE_TOOLCHAIN_FILE=${{ matrix.VCPKG_WORKSPACE }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_MANIFEST_DIR=$GITHUB_WORKSPACE/share/ExternalProject
+        cmake $GITHUB_WORKSPACE/share/ExternalProject -DCMAKE_BUILD_TYPE=release -DCMAKE_TOOLCHAIN_FILE=${{ matrix.VCPKG_WORKSPACE }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_MANIFEST_DIR=$GITHUB_WORKSPACE/share/ExternalProject -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
 
     - name: Build
       working-directory: ${{ runner.workspace }}/build
       shell: bash
-      run: cmake --build . --config release
+      run: cmake --build . --config release --parallel

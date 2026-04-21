@@ -757,16 +757,17 @@ FeatureRasterizer::FeatureRasterizer(
         double pixelSizeS = extent.width() / (double)width;
         double pixelSizeT = extent.height() / (double)height;
 
-        _extent = GeoExtent(
-            extent.getSRS(),
+        _bounds = Bounds(
             extent.xMin() - pixelSizeS * (double)_bufferPixels,
             extent.yMin() - pixelSizeT * (double)_bufferPixels,
+            0.0,
             extent.xMax() + pixelSizeS * (double)_bufferPixels,
-            extent.yMax() + pixelSizeT * (double)_bufferPixels);
+            extent.yMax() + pixelSizeT * (double)_bufferPixels,
+            0.0);
     }
     else
     {
-        _extent = _originalExtent;
+        _bounds = _originalExtent.bounds();
     }
 
     // Allocate the image and initialize it to the background color
@@ -791,13 +792,13 @@ FeatureRasterizer::FeatureRasterizer(
 
 FeatureRasterizer::FeatureRasterizer(osg::Image* image, const GeoExtent& extent) :
     _image(image),
-    _extent(extent),
     _originalExtent(extent),
     _width(image ? image->s() : 0),
     _height(image ? image->t() : 0)
 {
     // disable buffering for a re-allocated image.
     _bufferPixels = 0;
+    _bounds = extent.bounds();
 }
 
 MapboxGLGlyphManager* FeatureRasterizer::getGlyphManager() const
@@ -846,12 +847,12 @@ FeatureRasterizer::render_blend2d(
     // pixel.  The y-axis is positive down.
 
     RenderFrame frame;
-    frame.xmin = _extent.xMin();
-    frame.ymin = _extent.yMin();
-    frame.xmax = _extent.xMax();
-    frame.ymax = _extent.yMax();
-    frame.xf = (double)_image->s() / _extent.width();
-    frame.yf = (double)_image->t() / _extent.height();
+    frame.xmin = _bounds.xMin();
+    frame.ymin = _bounds.yMin();
+    frame.xmax = _bounds.xMax();
+    frame.ymax = _bounds.yMax();
+    frame.xf = (double)_image->s() / (_bounds.xMax() - _bounds.xMin());
+    frame.yf = (double)_image->t() / (_bounds.yMax() - _bounds.yMin());
 
     // set up the render target:
     BLImage buf;
@@ -908,19 +909,19 @@ FeatureRasterizer::render_blend2d(
                     // by varying degrees depending on location on the globe. Someday we will
                     // address this but not today.
 
-                    double lineWidth_map_south = _extent.getSRS()->transformDistance(
+                    double lineWidth_map_south = _originalExtent.getSRS()->transformDistance(
                         lineWidth,
-                        _extent.getSRS()->getUnits(),
-                        _extent.yMin());
+                        _originalExtent.getSRS()->getUnits(),
+                        _originalExtent.yMin());
 
-                    double lineWidth_map_north = _extent.getSRS()->transformDistance(
+                    double lineWidth_map_north = _originalExtent.getSRS()->transformDistance(
                         lineWidth,
-                        _extent.getSRS()->getUnits(),
-                        _extent.yMax());
+                        _originalExtent.getSRS()->getUnits(),
+                        _originalExtent.yMax());
 
                     double lineWidth_map = std::min(lineWidth_map_south, lineWidth_map_north);
 
-                    double pixelSize_map = _extent.height() / (double)_image->t();
+                    double pixelSize_map = _originalExtent.height() / (double)_image->t();
 
                     lineWidth_px = (lineWidth_map / pixelSize_map);
 
@@ -941,18 +942,18 @@ FeatureRasterizer::render_blend2d(
 
                 if (outlineWidth.getUnits() != Units::PIXELS)
                 {
-                    double lineWidth_map_south = _extent.getSRS()->transformDistance(
+                    double lineWidth_map_south = _originalExtent.getSRS()->transformDistance(
                         outlineWidth,
-                        _extent.getSRS()->getUnits(),
-                        _extent.yMin());
+                        _originalExtent.getSRS()->getUnits(),
+                        _originalExtent.yMin());
 
-                    double lineWidth_map_north = _extent.getSRS()->transformDistance(
+                    double lineWidth_map_north = _originalExtent.getSRS()->transformDistance(
                         outlineWidth,
-                        _extent.getSRS()->getUnits(),
-                        _extent.yMax());
+                        _originalExtent.getSRS()->getUnits(),
+                        _originalExtent.yMax());
 
                     double lineWidth_map = std::min(lineWidth_map_south, lineWidth_map_north);
-                    double pixelSize_map = _extent.height() / (double)_image->t();
+                    double pixelSize_map = _originalExtent.height() / (double)_image->t();
                     outlineWidth_px = (lineWidth_map / pixelSize_map);
 
                     // enfore a minimum width of one pixel.
@@ -1086,12 +1087,12 @@ FeatureRasterizer::render_agglite(
 
     // Converts coordinates to image space (s,t):
     RenderFrame frame;
-    frame.xmin = _extent.xMin();
-    frame.ymin = _extent.yMin();
-    frame.xmax = _extent.xMax();
-    frame.ymax = _extent.yMax();
-    frame.xf = (double)_image->s() / _extent.width();
-    frame.yf = (double)_image->t() / _extent.height();
+    frame.xmin = _bounds.xMin();
+    frame.ymin = _bounds.yMin();
+    frame.xmax = _bounds.xMax();
+    frame.ymax = _bounds.yMax();
+    frame.xf = (double)_image->s() / (_bounds.xMax() - _bounds.xMin());
+    frame.yf = (double)_image->t() / (_bounds.yMax() - _bounds.yMin());
 
     // sort into bins, making a copy for lines that require buffering.
     FeatureList polygons;
@@ -1186,7 +1187,7 @@ FeatureRasterizer::render_agglite(
     {
         // We are buffering in the features native extent, so we need to use the
         // transformed extent to get the proper "resolution" for the image
-        GeoExtent transformedExtent = _extent.transform(featureSRS);
+        GeoExtent transformedExtent = _originalExtent.transform(featureSRS);
 
         double trans_xf = (double)_image->s() / transformedExtent.width();
         double trans_yf = (double)_image->t() / transformedExtent.height();
@@ -1205,7 +1206,7 @@ FeatureRasterizer::render_agglite(
         // now run the buffer operation on all lines:
         BufferFilter buffer;
 
-        GeoExtent imageExtentInFeatureSRS = _extent.transform(featureSRS);
+        GeoExtent imageExtentInFeatureSRS = _originalExtent.transform(featureSRS);
         double pixelWidth = imageExtentInFeatureSRS.width() / (double)_image->s();
         double lineWidth_px = pixelWidth;
 
@@ -1237,7 +1238,7 @@ FeatureRasterizer::render_agglite(
                             // latitude of the tile's centroid.
                             double lineWidthM = lineWidth.as(Units::METERS);
                             double mPerDegAtEquatorInv = 360.0 / (featureSRS->getEllipsoid().getRadiusEquator() * 2.0 * osg::PI);
-                            GeoPoint ll = _extent.getCentroid();
+                            GeoPoint ll = _originalExtent.getCentroid();
                             lineWidth_px = lineWidthM * mPerDegAtEquatorInv * cos(osg::DegreesToRadians(ll.y()));
                         }
                     }
@@ -1260,10 +1261,10 @@ FeatureRasterizer::render_agglite(
 
     // Transform the features into the map's SRS:
     for (auto& polygon : polygons)
-        polygon->transform(_extent.getSRS());
+        polygon->transform(_originalExtent.getSRS());
 
     for (auto& line : lines)
-        line->transform(_extent.getSRS());
+        line->transform(_originalExtent.getSRS());
 
     // set up the AGG renderer:
     agg::rendering_buffer rbuf(
@@ -1277,7 +1278,7 @@ FeatureRasterizer::render_agglite(
 
     // construct an extent for cropping the geometry to our tile.
     // extend just outside the actual extents so we don't get edge artifacts:
-    GeoExtent cropExtent = GeoExtent(_extent);
+    GeoExtent cropExtent = GeoExtent(_originalExtent);
     cropExtent.scale(1.1, 1.1);
     double cropXMin, cropYMin, cropXMax, cropYMax;
     cropExtent.getBounds(cropXMin, cropYMin, cropXMax, cropYMax);
@@ -1286,7 +1287,7 @@ FeatureRasterizer::render_agglite(
     // we must clamp the scaled extent back to a legal range.
     if (cropExtent.crossesAntimeridian())
     {
-        GeoPoint centroid = _extent.getCentroid();
+        GeoPoint centroid = _originalExtent.getCentroid();
         if (centroid.x() < 0.0) // tile is east of antimeridian
         {
             cropXMin = -180.0;
@@ -1375,11 +1376,11 @@ FeatureRasterizer::render(const FeatureList& features, const Style& style, Filte
     OE_SOFT_ASSERT_AND_RETURN(featureSRS != nullptr, void());
 
     // Transform to map SRS:
-    if (!featureSRS->isHorizEquivalentTo(_extent.getSRS()))
+    if (!featureSRS->isHorizEquivalentTo(_originalExtent.getSRS()))
     {
         OE_PROFILING_ZONE_NAMED("Transform");
         for (auto& feature : features)
-            feature->transform(_extent.getSRS());
+            feature->transform(_originalExtent.getSRS());
     }
 
 #ifdef USE_BLEND2D

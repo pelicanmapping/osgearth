@@ -265,6 +265,7 @@ void
 StyleSheet::init()
 {
     Layer::init();
+    setCachePolicy(CachePolicy::NO_CACHE);
 }
 
 void

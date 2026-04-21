@@ -4,11 +4,11 @@ Since osgEarth is a free open source SDK, the code is available to anyone and we
 
 ## GitHub Repository
 
-Use the [osgEarth GitHub repository](https://github.com/gwaldron/osgearth) to access the source, download releases, and post bug reports.
+Use the [osgEarth GitHub repository](https://github.com/pelicanmapping/osgearth) to access the source, download releases, and post bug reports.
 
 ## Discussion Forum
 
-Join the [osgEarth Discussion Forum](https://github.com/gwaldron/osgearth/discussions) to interact with other users. Please read and follow these guidelines for using the forum. FOLLOWING THESE GUIDELINES will make it MUCH MORE LIKELY that someone will respond and try to help:
+Join the [osgEarth Discussion Forum](https://github.com/pelicanmapping/osgearth/discussions) to interact with other users. Please read and follow these guidelines for using the forum. FOLLOWING THESE GUIDELINES will make it MUCH MORE LIKELY that someone will respond and try to help:
 
 * Sign up for an account and use your real name. You can participate anonymously, but using your real name helps build a stronger community. Sign your posts too!
 * Limit yourself to one topic per post. Asking multiple questions in one post makes it too hard to keep track of responses.

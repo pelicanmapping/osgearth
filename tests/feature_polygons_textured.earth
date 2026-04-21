@@ -19,7 +19,7 @@ Demonstrates how to select a style name using javascript.
     <FeatureModel name="countries" features="country-data" pickable="true">
         <styles>
             <library name="assets">
-                <skin name="flag_us">
+                <skin name="grid">
                     <url>../data/reference_grid.jpg</url>
                     <tiled>true</tiled>
                     <image_width>1000000</image_width>
@@ -31,8 +31,8 @@ Demonstrates how to select a style name using javascript.
             <style type="text/css">
                 us {
                     select: feature.properties.name === 'United Kingdom';
-                    skin-library: assets;
-                    skin: flag_us;
+                    skin-library: "assets";
+                    skin: "grid";
                     altitude-clamping: terrain-drape;
                     render-max-tess-angle: 2.0;
                 }

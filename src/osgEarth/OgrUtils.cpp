@@ -466,7 +466,7 @@ OGRFeatureFactory::createFeature(OGRFeatureH handle) const
             {
                 if (IsFieldSet( handle, i ))
                 {
-                    long long value = OGR_F_GetFieldAsInteger(handle, i);
+                    std::int64_t value = OGR_F_GetFieldAsInteger(handle, i);
                     feature->set( name, value );
                 }
                 else if (keepNullValues)
@@ -480,7 +480,7 @@ OGRFeatureFactory::createFeature(OGRFeatureH handle) const
             {
                 if (IsFieldSet(handle, i))
                 {
-                    long long value = OGR_F_GetFieldAsInteger64(handle, i);
+                    std::int64_t value = OGR_F_GetFieldAsInteger64(handle, i);
                     feature->set(name, value);
                 }
                 else if (keepNullValues)

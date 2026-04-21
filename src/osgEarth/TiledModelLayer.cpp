@@ -12,6 +12,8 @@
 #include "NetworkMonitor"
 #include <osg/BlendFunc>
 
+#define LC "[" << className() << "] \"" << getName() << "\": "
+
 using namespace osgEarth;
 
 void TiledModelLayer::Options::fromConfig(const Config& conf)
@@ -274,6 +276,13 @@ TiledModelLayer::addedToMap(const Map* map)
 
     // re-create the graph if necessary.
     create();
+
+    // tell the user about the selected profiles
+    double width, height;
+    getProfile()->getTileDimensions(getMinLevel(), width, height);
+    auto* srs = getProfile()->getSRS();
+    auto tileSize = 1.4142 * srs->transformDistance(Distance(height, srs->getUnits()), Units::METERS);
+    OE_INFO << LC << "min_level = " << getMinLevel() << ", effective range = " << (int)(tileSize * getRangeFactor()) << "m; profile = " << getProfile()->getSRS()->getName() << std::endl;
 }
 
 // called by the map when this layer is removed

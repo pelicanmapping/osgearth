@@ -16,10 +16,13 @@ Demonstrates how to select a style name using javascript.
         </filters>
     </OGRFeatures>
     
-    <FeatureModel name="countries" features="country-data">        
+    <TiledFeatureModel name="countries" features="country-data">        
         <styles>        
             <style type="text/css">
-                base { altitude-clamping: terrain-drape; }
+                base {
+                    render-depth-test: false;
+                    render-clip-plane: 0;
+                }
                 p1 : base { fill: #ffff80; }
                 p2 : base { fill: #80ffff; }
                 p3 : base { fill: #ff80ff; }
@@ -29,8 +32,7 @@ Demonstrates how to select a style name using javascript.
             
             <script language="javascript">
               <![CDATA[
-                function getStyleClass()
-                {
+                function getStyleClass() {
                     var pop = parseInt(feature.properties.pop);
                     if      ( pop <= 14045470 )  return "p1";
                     else if ( pop <= 43410900 )  return "p2";
@@ -43,6 +45,6 @@ Demonstrates how to select a style name using javascript.
             
             <selector class_expr="getStyleClass()"/>
         </styles>        
-    </FeatureModel>
+    </TiledFeatureModel>
     
 </map>

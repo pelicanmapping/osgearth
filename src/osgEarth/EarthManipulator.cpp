@@ -2638,7 +2638,9 @@ EarthManipulator::zoom( double dx, double dy, osg::View* in_view )
         return;
     }
 
-    if (_settings->getZoomToMouse() == false || in_view == NULL)
+    // When _ga_t0 == nullptr, that means the action came from a non-mouse event
+    // (like a keypress) in which case we'll bypass zoom-to-mouse.
+    if (_settings->getZoomToMouse() == false || in_view == NULL || _ga_t0 == nullptr)
     {
         recalculateCenterFromLookVector();
         double scale = 1.0f + dy;

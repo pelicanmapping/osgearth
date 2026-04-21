@@ -3,7 +3,7 @@
     "version-string": "1.0",
     "port-version": 1,
     "description": "osgEarth - External Project Test",
-    "homepage": "https://github.com/gwaldron/osgearth",
+    "homepage": "https://github.com/pelicanmapping/osgearth",
     "supports": "!(x86 | wasm32)",
     "dependencies": [ "osgearth" ]
 }

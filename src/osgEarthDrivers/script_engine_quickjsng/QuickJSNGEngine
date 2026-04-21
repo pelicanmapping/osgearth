@@ -1,0 +1,128 @@
+/* osgEarth
+ * Copyright 2025 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/ScriptEngine>
+#include <osgEarth/Script>
+#include <osgEarth/Feature>
+#include "quickjs.h"
+
+namespace osgEarth { namespace Drivers { namespace QJS
+{
+    using namespace osgEarth;
+
+    /**
+     * JavaScript engine built on the QuickJS-NG embeddable Javascript
+     * interpreter. https://github.com/quickjs-ng/quickjs
+     *
+     * Implementation notes.
+     *
+     * Each thread maintains its own isolated JS runtime + context.
+     *
+     * When you create a new ScriptEngine, you can optionally pass in a Script as
+     * part of the Options. This script gets compiled and installed in the global
+     * JS namespace and stays resident for the life of the engine.
+     *
+     * When you call run() with an expression, this expression can include not only
+     * the expression itself (which evaluates to some result) but can also include
+     * its own functions, variables, and so on. These ALSO get placed in the global
+     * namespace. So, any time the running function changes, the data in the gloal
+     * JS namespace gets overwritten.
+     *
+     * Because of this, you cannot declare "const" objects. Because if the same
+     * script gets re-activated, the engine will try to re-assign an existing const
+     * object and fail. Solution: use "var" instead of "const" at your top-level
+     * namespace.
+     */
+    class QuickJSNGEngine : public osgEarth::ScriptEngine
+    {
+    public:
+        /** Construct the engine */
+        QuickJSNGEngine(const ScriptEngineOptions& options);
+
+        /** Report language support */
+        bool supported(std::string lang) override {
+            return osgEarth::ci_equals(lang, "javascript");
+        }
+
+        /** Run a javascript code snippet. */
+        ScriptResult run(
+            const std::string& code,
+            osgEarth::Feature* feature,
+            osgEarth::FilterContext const* context) override;
+
+        bool run(
+            const std::string& code,
+            const FeatureList& features,
+            std::vector<ScriptResult>& results,
+            FilterContext const* context) override;
+
+    protected:
+
+        // per-thread context.
+        struct Context
+        {
+            Context() = default;
+            ~Context();
+            void initialize(const ScriptEngineOptions&);
+            std::string _functionSource;
+            JSRuntime* _runtime = nullptr;
+            JSContext* _context = nullptr;
+            JSValue _function;
+            JSValue _logFunction;
+            JSValue _globalObj;
+            JSValue _featureObj;
+            JSValue _geometryObj;
+            JSValue _propertiesObj;
+            JSValue _typeStrings[64];
+            JSAtom _atom_id, _atom_type, _atom_properties;
+            std::unordered_map<std::string, JSAtom> _propertyAtoms;
+            //std::unordered_map<std::string, JSValue> _stringValues;
+            std::unordered_map<std::string, JSValue> _functions;
+            bool _failed = false;
+            Feature* _loadedFeature = nullptr;
+
+            bool compile(const std::string& code);
+
+            void setFeature(const Feature* feature);
+
+            //! gets an Atom from the cache OR creates a new one
+            inline JSAtom getPropertyAtom(const std::string& name) {
+                auto it = _propertyAtoms.find(name);
+                if (it != _propertyAtoms.end())
+                    return it->second;
+                else
+                {
+                    auto atom = JS_NewAtom(_context, name.front() == '.' ? name.substr(1).c_str() : name.c_str());
+                    _propertyAtoms[name] = atom;
+                    return _propertyAtoms[name];
+                }
+            }
+
+            //! gets a string value from the cache OR creates a new one
+            inline JSValue getOrCreateStringValue(const std::string& str) {
+                // benchmarked: faster than using a string cache.
+                return JS_NewString(_context, str.c_str());
+#if 0
+                auto it = _stringValues.find(str);
+                if (it != _stringValues.end())
+                    return JS_DupValue(_context, it->second);
+                else
+                {
+                    _stringValues[str] = JS_NewString(_context, str.c_str());
+                    return JS_DupValue(_context, _stringValues[str]);
+                }
+#endif
+            }
+
+            std::vector<JSAtom> _previousKeys;
+        };
+
+        PerThread<Context> _contexts;
+
+        const ScriptEngineOptions _options;
+    };
+
+} } } // namespace osgEarth::Drivers::Duktape

@@ -61,7 +61,7 @@ namespace osgEarth { namespace KML
             _defaultTextSymbol->halo() = Stroke(0.3f, 0.3f, 0.3f, 1.0f);
 
             _defaultIconSymbol = new IconSymbol();
-            _defaultIconSymbol->url().mutable_value().setLiteral("https://github.com/gwaldron/osgearth/blob/master/data/placemark32.png?raw=true");
+            _defaultIconSymbol->url().mutable_value().setLiteral("https://github.com/pelicanmapping/osgearth/blob/master/data/placemark32.png?raw=true");
         }
     
         virtual ~KMLOptions() { }

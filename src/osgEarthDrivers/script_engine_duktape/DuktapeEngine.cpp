@@ -5,7 +5,6 @@
 #include "DuktapeEngine"
 #include "JSGeometry"
 #include <osgEarth/StringUtils>
-#include <osgEarth/GeometryUtils>
 #include <osgEarth/Metrics>
 
 #undef  LC
@@ -179,7 +178,7 @@ namespace
                         }
                         else // ATTRTYPE_STRING or others
                         {
-                            duk_push_string(ctx, a.second.getString().c_str()); // [global] [feature] [name]
+                            duk_push_string(ctx, a.second.getAsString().c_str()); // [global] [feature] [name]
                         }
 
                         duk_put_prop_string(ctx, feature_i, a.first.substr(1).c_str());   // [global] [feature] [properties]
@@ -208,7 +207,7 @@ namespace
                             }
                             else // ATTRTYPE_STRING or others
                             {
-                                duk_push_string(ctx, a.second.getString().c_str()); // [global] [feature] [name]
+                                duk_push_string(ctx, a.second.getAsString().c_str()); // [global] [feature] [name]
                             }
 
                             duk_put_prop_string(ctx, props_i, a.first.c_str());     // [global] [feature] [properties]
@@ -360,60 +359,54 @@ DuktapeEngine::compile(Context& c, const std::string& code, ScriptResult& result
 {
     duk_context* ctx = c._ctx;
 
-    if (code != c._bytecodeSource)
+    if (code == c._bytecodeSource)
     {
-        c._bytecodeSource = code;
-        c._errorCount = 0u;
-
-        if (duk_pcompile_string(ctx, 0, code.c_str()) != 0) // [function|error]
+        if (c._failed)
         {
-            std::string resultString = duk_safe_to_string(ctx, -1);
-            OE_WARN << LC << "Compile error: " << resultString << std::endl;
-            c._errorCount++;
-            duk_pop(ctx); // []
-            result = ScriptResult("", false, resultString); // return error.
+            // this code caused a previous compile error, so bail out.
+            // []
             return false;
         }
-
-        // [function]
-
-        // convert JS function to bytecode:
-        duk_dump_function(ctx); // [buffer]
-
-        duk_size_t size;
-        void* bytecode = duk_get_buffer(ctx, 0, &size);
-        if (bytecode == nullptr)
+        else
         {
-            // error. remove the buffer and return.
-            duk_pop(ctx); // []
-            OE_WARN << LC << "Allocation error; cannot continue" << std::endl;
-            result = ScriptResult("", false, "Allocation error"); // return error
-            c._errorCount++;
-            return false;
+            // function is already compiled and atop the stack, good to go.
+            // [function]
+            return true;
         }
+    }
 
-        if (c._bytecode) delete[] c._bytecode;
-        c._bytecode = new unsigned char[size];
-        ::memcpy(c._bytecode, (unsigned char*)bytecode, size);
-        c._bytecodeSize = size;
-    }
-    else if (c._errorCount == 0u)
+    if (code.empty())
     {
-        void* buf = duk_push_buffer(ctx, (duk_size_t)c._bytecodeSize, (duk_bool_t)0); // [buffer]
-        ::memcpy(buf, c._bytecode, c._bytecodeSize);
-    }
-    else
-    {
-        // this code caused a previous compile error, so bail out.
         return false;
     }
 
-    // [buffer]
+    if (!c._bytecodeSource.empty())
+    {
+        // [function]
+        // remove the old compiled function from atop the stack.
+        duk_pop(ctx); // []
+    }
 
-    // convert bytecode to a function object:
-    duk_load_function(ctx); // [function]
+    c._bytecodeSource = code;
 
-    return true;
+    if (duk_pcompile_string(ctx, 0, code.c_str()) == 0)
+    {
+        // compile succeeded, function is atop the stack and ready to use.
+        // [function]
+        c._failed = false;
+        return true;
+    }
+
+    else
+    {
+        // [error]
+        std::string resultString = duk_safe_to_string(ctx, -1);
+        OE_WARN << LC << "Compile error: " << resultString << std::endl;
+        c._failed = true;
+        duk_pop(ctx); // []
+        result = ScriptResult("", false, resultString); // return error.
+        return false;
+    }
 }
 
 bool
@@ -440,17 +433,20 @@ DuktapeEngine::run(const std::string& code, const FeatureList& features, std::ve
 
     if (!compile(c, code, result)) // [function | null]
     {
+        // []
         for (auto& f : features)
             results.push_back(result);
         return false;
     }
 
+    // [function]
     for (auto& feature : features)
     {
         // Load the next feature into the global object:
         setFeature(c._ctx, feature.get(), exposeGeometryAPI);
 
-        // Duplicate the function on the top since we'll be calling it multiple times
+        // Duplicate the function on the top since it gets consumed by pcall and
+        // we will presumably be calling it multiple times
         duk_dup_top(ctx); // [function function]
 
         // Run the script:
@@ -461,8 +457,10 @@ DuktapeEngine::run(const std::string& code, const FeatureList& features, std::ve
         if (rc != DUK_EXEC_SUCCESS)
         {
             OE_WARN << LC << "Runtime error: " << resultString << std::endl;
-            c._errorCount++;
+            c._failed = true;
+            duk_pop(ctx); // []
             results.emplace_back(EMPTY_STRING, false, resultString); // error
+            return false;
         }
         else
         {
@@ -470,8 +468,8 @@ DuktapeEngine::run(const std::string& code, const FeatureList& features, std::ve
         }
     }
 
-    // Pop the function, clearing the stack
-    duk_pop(ctx); // []
+    // [function]
+    // Leave the function atop the context stack, awaiting the next call.
 
     return true;
 }
@@ -493,28 +491,35 @@ DuktapeEngine::run(const std::string& code, Feature* feature, FilterContext cons
 
     // compile the function:
     ScriptResult result;
-    if (!compile(c, code, result)) // [function]
+    if (!compile(c, code, result))
     {
+        // []
         return result;
     }
 
     // load the feature into the global namespace:
+    // [function]
 	if ( feature != c._feature.get() )
     {
 		setFeature(ctx, feature, exposeGeometryAPI);
         c._feature = feature;
 	}
 
+    // Duplicate the function on the top since it gets consumed by pcall and
+    // we will presumably be calling it multiple times
+    duk_dup_top(ctx); // [function function]
+
     std::string resultString;
 
-    duk_int_t rc = duk_pcall(ctx, 0); // [result]
+    duk_int_t rc = duk_pcall(ctx, 0); // [function result]
     resultString = duk_safe_to_string(ctx, -1);
-    duk_pop(ctx); // []
+    duk_pop(ctx); // [function]
 
     if (rc != DUK_EXEC_SUCCESS)
     {
         OE_WARN << LC << "Runtime error: " << resultString << std::endl;
-        c._errorCount++;
+        c._failed = true;
+        duk_pop(ctx); // []
         return ScriptResult(EMPTY_STRING, false, resultString); // error
     }
 

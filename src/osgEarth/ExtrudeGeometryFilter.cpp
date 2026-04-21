@@ -58,9 +58,14 @@ namespace
 
 //------------------------------------------------------------------------
 
-ExtrudeGeometryFilter::ExtrudeGeometryFilter()
+ExtrudeGeometryFilter::ExtrudeGeometryFilter() :
+    _mergeGeometry(true),
+    _wallAngleThresh_deg(60.0),
+    _styleDirty(true),
+    _makeStencilVolume(false),
+    _gpuClamping(false)
 {
-    _cosWallAngleThresh = cos( _wallAngleThresh_deg );
+    _cosWallAngleThresh = cos(_wallAngleThresh_deg);
 }
 
 void
@@ -214,15 +219,13 @@ ExtrudeGeometryFilter::buildStructure(
     FilterContext& cx)
 {
     bool makeECEF = false;
-    //osg::ref_ptr<const SpatialReference> inputSRS;
     osg::ref_ptr<const SpatialReference> mapSRS;
     unsigned numElevations = 0, numCorners = 0, numFaces = 0;
 
     if ( cx.isGeoreferenced() )
     {
-       //srs      = cx.extent()->getSRS();
-       mapSRS   = cx.getSession()->getMapSRS();
-       makeECEF = cx.getSession()->isMapGeocentric();
+       mapSRS   = cx.session()->getMapSRS();
+       makeECEF = cx.session()->isMapGeocentric();
     }
 
     // whether this is a closed polygon structure.
@@ -560,7 +563,7 @@ ExtrudeGeometryFilter::buildWallGeometry(
     bool madeGeom = true;
 
     // 6 verts per face total (3 triangles)
-    unsigned numWallVerts = structure.getNumPoints();
+    unsigned numWallVerts = 6 * structure.getNumPoints();
 
     const double defaultSpan = 100.0;
     double texWidthM = wallSkin ? wallSkin->imageWidth().getOrUse(defaultSpan) : defaultSpan;
@@ -981,10 +984,6 @@ ExtrudeGeometryFilter::buildOutlineGeometry(const Structure& structure)
     const float cosMinAngle = cos(osg::DegreesToRadians(_outlineSymbol->creaseAngle().get()));
 
     osg::ref_ptr<LineDrawable> lines = new LineDrawable(GL_LINES);
-
-    // if the user requested legacy lines:
-    if (_outlineSymbol->useGLLines() == true)
-        lines->setUseGPU(false);
     
     const optional<Stroke>& stroke = _outlineSymbol->stroke();
     if (stroke.isSet())
@@ -1499,8 +1498,21 @@ ExtrudeGeometryFilter::push( FeatureList& input, FilterContext& context )
 
     // parent geometry with a delocalizer (if necessary)
     osg::Group* group = createDelocalizeGroup();
+    group->setName("ExtrudeGeometryFilter::Delocalizer");
 
     unsigned int numDrawables = 0;
+
+#if 0
+    osg::Group* oqn  = 0;
+    if (osgEarth::OcclusionQueryNodeFactory::_occlusionFactory) {
+       oqn = osgEarth::OcclusionQueryNodeFactory::_occlusionFactory->createQueryNode();
+       group->addChild(oqn);
+    }
+    if (!oqn) {
+       oqn = group;
+    }
+#endif
+    
     for( SortedGeodeMap::iterator i = _geodes.begin(); i != _geodes.end(); ++i )
     {
         group->addChild( i->second.get() );
@@ -1533,4 +1545,15 @@ ExtrudeGeometryFilter::push( FeatureList& input, FilterContext& context )
     }
 
     return group;
+}
+
+
+
+REGISTER_OBJECT_WRAPPER(ExtrudeGeometryFilterNode,
+    new ExtrudeGeometryFilterNode,
+    osgEarth::ExtrudeGeometryFilterNode,
+    "osg::Node osgEarth::ExtrudeGeometryFilterNode")
+{
+    ADD_OBJECT_SERIALIZER(_extrusionGroup, osg::Group, nullptr);
+    ADD_MATRIX_SERIALIZER(_xform, osg::Matrixd::identity());
 }

@@ -46,14 +46,15 @@ public:
         fin.seekg(0, fin.end);
         int length = fin.tellg();
         fin.seekg(0, fin.beg);
-        char* data = new char[length];
-        fin.read(data, length);
+
+        std::unique_ptr<char[]> data(new char[length]);
+        fin.read(data.get(), length);
 
         uint32 infoArr[8];
 
         lerc_status hr(0);
 
-        hr = lerc_getBlobInfo((const unsigned char*)(data), length, infoArr, NULL, 8, 0);
+        hr = lerc_getBlobInfo((const unsigned char*)(data.get()), length, infoArr, NULL, 8, 0);
         if (hr)
         {
             OE_WARN << LC << "Failed to get blob info error = " << hr << std::endl;
@@ -158,7 +159,7 @@ public:
 
         // Decode the image
         unsigned int bandOffset = 0;
-        hr = lerc_decode((const unsigned char*)(data), length, 0, numDims, width, height, numBands, dataType, (void*)output);
+        hr = lerc_decode((const unsigned char*)(data.get()), length, 0, numDims, width, height, numBands, dataType, (void*)output);
         if (hr)
         {
             delete[]output;

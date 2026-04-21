@@ -410,14 +410,13 @@ main(int argc, char** argv)
     osg::ref_ptr<ImageLayer> output = dynamic_cast<ImageLayer*>(layer.get());
     if (!output.valid())
     {
-        OE_WARN << "Failed to create output layer" << std::endl;
-        return -1;
+        return usage("Failed to create output layer");
     }
 
     output->setReadOptions(dbo.get());
     Status outputStatus = output->openForWriting();
     if (outputStatus.isError())
-    {
+    {        
         OE_WARN << "Error initializing output: " << outputStatus.message() << std::endl;
         return -1;
     }

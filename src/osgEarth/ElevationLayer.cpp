@@ -255,7 +255,7 @@ ElevationLayer::assembleHeightField(const TileKey& key, ProgressCallback* progre
             auto mosaic = new osg::HeightField();
             mosaic->allocate(cols, rows);
             auto& heights = mosaic->getHeightList();
-            for(int i=0; i<cols*rows; ++i)
+            for(unsigned i=0; i<cols*rows; ++i)
                 heights[i] = NO_DATA_VALUE;
 
             // Working set of points. it's much faster to xform an entire vector all at once.
@@ -301,9 +301,9 @@ ElevationLayer::assembleHeightField(const TileKey& key, ProgressCallback* progre
             }
 
             // Mosaic our sources into a single output image.
-            for (int row = 0; row < rows; ++row)
+            for (unsigned row = 0; row < rows; ++row)
             {
-                for (int col = 0; col < cols; ++col)
+                for (unsigned col = 0; col < cols; ++col)
                 {
                     int i = row * cols + col;
                     auto& h = mosaic->getHeight(col, row);

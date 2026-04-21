@@ -277,6 +277,9 @@ struct CreateTileHandler : public osgGA::GUIEventHandler
         // disable skirts:
         myOptions.heightFieldSkirtRatio() = 0.0f;
 
+        // disable tessellation:
+        myOptions.gpuTessellation() = false;
+
         TerrainTileModelFactory factory(myOptions);
 
         osg::ref_ptr<TerrainTileModel> model =
@@ -400,7 +403,7 @@ int main(int argc, char** argv)
     osgViewer::CompositeViewer viewer(arguments);
 
     MapNodeHelper helper;
-    osg::Node* earth = helper.load(arguments, &viewer);
+    auto earth = helper.load(arguments, &viewer);
     s_mapNode = MapNode::findMapNode(earth);
 
     osgViewer::View* main_view = new osgViewer::View();
@@ -421,6 +424,7 @@ int main(int argc, char** argv)
     s_tile_view->setCameraManipulator(new osgGA::TrackballManipulator());
     GLUtils::setLineWidth(s_tile_view->getCamera()->getOrCreateStateSet(), 2.0f, osg::StateAttribute::OVERRIDE);
     GLUtils::setLineSmooth(s_tile_view->getCamera()->getOrCreateStateSet(), osg::StateAttribute::OVERRIDE);
+    GLUtils::setPointSmooth(s_tile_view->getCamera()->getOrCreateStateSet(), osg::StateAttribute::OVERRIDE);
     viewer.addView(s_tile_view);
 
     osg::Group* root2 = new osg::Group();

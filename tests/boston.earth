@@ -13,27 +13,16 @@ to extruded buildings.
     
     <xi:include href="readymap_elevation.xml"/>
       
-    <FeatureModel name="Buildings" max_range="20000" pickable="true">
-         
-        <OGRFeatures name="buildings">
+    <TiledFeatureModel name="Buildings" pickable="true">
+
+        <OGRFeatures name="buildings-data">
             <url>../data/boston_buildings_utm19.shp</url>
             <filters>
-			    <resample min_length="2.5"/>
+                <resample min_length="2.5"/>
             </filters>
         </OGRFeatures>
-        
-        <!--
-         ! The "layout" element activates tiling and paging of the feature set. If you
-         ! omit the layout element, the entire feature set will render as one pre-loaded
-         ! model (no tiling or paging).
-         !  
-         ! Each "level" is a level of detail for features, and should select a style
-         ! to use for that level. It also can specify min and max camera ranges, in meters.
-         -->
-        
-        <layout tile_size="500">
-            <level name="default" max_range="20000" style="buildings"/>
-        </layout>
+
+        <min_level>3</min_level>
         
         <styles>
             <library name="us_resources">
@@ -42,76 +31,77 @@ to extruded buildings.
             
             <style type="text/css">
                 buildings {
-                    extrusion-height:        3.5 * Math.max(feature.properties.story_ht_, 1);
-                    extrusion-flatten:       true;
-                    extrusion-wall-style:    building-wall;
+                    extrusion-height: 3.5 * Math.max(feature.properties.story_ht_, 1);
+                    extrusion-flatten: true;
+                    extrusion-wall-style: building-wall;
                     extrusion-wall-gradient: 0.5;
-                    extrusion-roof-style:    building-rooftop;
-                    altitude-clamping:       terrain;
-                    altitude-technique:      map;
-                    altitude-binding:        vertex;
+                    extrusion-roof-style: building-rooftop;
+                    altitude-clamping: terrain;
+                    altitude-technique: map;
+                    altitude-binding: vertex;
                 }            
                 building-wall {
-                    skin-library:     us_resources;
-                    skin-tags:        building;
+                    skin-library: us_resources;
+                    skin-tags: building;
                     skin-random-seed: 1;
                 }
                 building-rooftop {
-                    skin-library:     us_resources;
-                    skin-tags:        rooftop;
-                    skin-tiled:       true;
+                    skin-library: us_resources;
+                    skin-tags: rooftop;
+                    skin-tiled: true;
                     skin-random-seed: 1;
                 }
             </style>
         </styles>   
-    </FeatureModel>
+    </TiledFeatureModel>    
     
-    
-    <FeatureModel name="Streets" features="streets-data">
-        <layout crop_features="true" tile_size="1000">
-            <level max_range="5000"/>
-        </layout>        
+    <TiledFeatureModel name="Streets">
+        <OGRFeatures name="streets-data">
+            <url>../data/boston-scl-utm19n-meters.shp</url>
+            <filters>
+                <resample min_length="25" max_length="25"/>
+            </filters>
+        </OGRFeatures>
+        <min_level>3</min_level>
         <styles>
             <style type="text/css">
                 default {
-                    stroke:                       #131313;
-                    stroke-width:                 7.5m;
-                    stroke-linejoin:              round;
-                    stroke-linecap:               round;
-                    altitude-clamping:            terrain;
-                    render-depth-offset-min-bias: 3.6;
-                    render-transparent:           true;
+                    stroke: #131313;
+                    stroke-width: 7.5m;
+                    stroke-linejoin: round;
+                    stroke-linecap: round;
+                    altitude-clamping: terrain;
+                    render-depth-offset: 10m;
+                    x-render-depth-offset-min-bias: 3.6;
+                    render-transparent: true;
                 }
             </style>
         </styles>        
-    </FeatureModel>
+    </TiledFeatureModel>
 	    
-    <FeatureModel name="Parks" enabled="true">
+    <TiledFeatureModel name="Parks" enabled="true">
         <OGRFeatures name="parks">
             <url>../data/boston-parks.shp</url>
-        </OGRFeatures>        
-        
-        <layout tile_size="1000">
-            <level max_range="2000"/>
-        </layout>
+        </OGRFeatures>    
+        <min_level>3</min_level>    
         
         <feature_indexing enabled="false"/>
         
         <styles>
             <style type="text/css">
                 default {
-                   model:                  "../data/loopix/tree4.osgb";
-				   model-scale:            0.15 + 0.1*Math.random();
-                   model-placement:        random;
-                   model-density:          3000;
-				   model-heading:          Math.random() * 360.0;
-                   altitude-clamping:      terrain;
-                   render-transparent:     true;
-				   render-min-alpha:       0.15;
+                   model: "../data/loopix/tree4.osgb";
+				   model-scale: 0.15 + 0.1*Math.random();
+                   model-placement: random;
+                   model-density: 3000;
+				   model-heading: Math.random() * 360.0;
+                   altitude-clamping: terrain;
+                   render-transparent: true;
+				   render-min-alpha: 0.15;
                 }
             </style>
         </styles>        
-    </FeatureModel>
+    </TiledFeatureModel>
     
     <viewpoints time="1.0" home="0">
         <viewpoint name="Boston Overview" heading="24.261" height="0" lat="42.34425" long="-71.076262" pitch="-21.6" range="3450"/>
@@ -120,13 +110,5 @@ to extruded buildings.
         <viewpoint name="Boston Downtown 2" heading="-128.5" lat="42.3582" long="-71.0546" height="0" pitch="-19" range="1620" />
         <viewpoint name="Boston Street Level" heading="-145.64081" lat="42.364015" long="-71.054149" pitch="-9.701" range="144.95"/>
     </viewpoints>
-  
-    
-    <OGRFeatures name="streets-data">
-        <url>../data/boston-scl-utm19n-meters.shp</url>
-        <filters>
-            <resample min_length="25" max_length="25"/>
-        </filters>
-    </OGRFeatures>
-    
+
 </map>

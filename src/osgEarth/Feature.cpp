@@ -171,15 +171,9 @@ Feature::set(const std::string& name, double value)
 }
 
 void
-Feature::set(const std::string& name, long long value)
+Feature::set(const std::string& name, std::int64_t value)
 {
-    _attrs[toLower(name)].emplace<long long>(value);
-}
-
-void
-Feature::set(const std::string& name, int value)
-{
-    _attrs[toLower(name)].emplace<long long>(static_cast<long long>(value));
+    _attrs[toLower(name)].emplace<std::int64_t>(value);
 }
 
 void
@@ -216,28 +210,28 @@ std::string
 Feature::getString( const std::string& name ) const
 {
     auto i = _attrs.find(toLower(name));
-    return i != _attrs.end()? i->second.getString() : EMPTY_STRING;
+    return i != _attrs.end() ? i->second.getAsString({}) : EMPTY_STRING;
 }
 
 double
 Feature::getDouble( const std::string& name, double defaultValue ) const
 {
     auto i = _attrs.find(toLower(name));
-    return i != _attrs.end()? i->second.getDouble(defaultValue) : defaultValue;
+    return i != _attrs.end()? i->second.getAsDouble(defaultValue) : defaultValue;
 }
 
-long long
-Feature::getInt( const std::string& name, long long defaultValue ) const
+std::int64_t
+Feature::getInt( const std::string& name, std::int64_t defaultValue ) const
 {
     auto i = _attrs.find(toLower(name));
-    return i != _attrs.end()? i->second.getInt(defaultValue) : defaultValue;
+    return i != _attrs.end()? i->second.getAsInt(defaultValue) : defaultValue;
 }
 
 bool
 Feature::getBool( const std::string& name, bool defaultValue ) const
 {
     auto i = _attrs.find(toLower(name));
-    return i != _attrs.end()? i->second.getBool(defaultValue) : defaultValue;
+    return i != _attrs.end()? i->second.getAsBool(defaultValue) : defaultValue;
 }
 
 bool
@@ -246,174 +240,6 @@ Feature::isSet(const std::string& name) const
     auto i = _attrs.find(toLower(name));
     return i != _attrs.end() ? i->second.getType() != ATTRTYPE_UNSPECIFIED : false;
 }
-
-#if 0
-double
-Feature::eval(const NumericExpression& expr, FilterContext const* context)
-{
-    NumericExpression temp(expr);
-    return eval(temp, context);
-}
-
-double
-Feature::eval( NumericExpression& expr, FilterContext const* context )
-{
-    const NumericExpression::Variables& vars = expr.variables();
-    for (NumericExpression::Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-    {
-        double val = 0.0;
-        AttributeTable::const_iterator ai = _attrs.find(toLower(i->first));
-        if (ai != _attrs.end())
-        {
-            val = ai->second.getDouble(0.0);
-        }
-        else if (context && context->getSession())
-        {
-            //No attr found, look for script
-            ScriptEngine* engine = context->getSession()->getScriptEngine();
-            if (engine)
-            {
-                ScriptResult result = engine->run(i->first, this, context);
-                if (result.success())
-                    val = result.asDouble();
-                //else {
-                //    OE_WARN << LC << "Feature Script error on '" << expr.expr() << "': " << result.message() << std::endl;
-                //}
-            }
-        }
-
-        expr.set(*i, val);
-    }
-
-    return expr.eval();
-}
-
-double
-Feature::eval(const NumericExpression& expr, Session* session)
-{
-    NumericExpression temp(expr);
-    return eval(temp, session);
-}
-
-double
-Feature::eval(NumericExpression& expr, Session* session)
-{
-    const NumericExpression::Variables& vars = expr.variables();
-    for( NumericExpression::Variables::const_iterator i = vars.begin(); i != vars.end(); ++i )
-    {
-        double val = 0.0;
-        AttributeTable::const_iterator ai = _attrs.find(toLower(i->first));
-        if (ai != _attrs.end())
-        {
-            val = ai->second.getDouble(0.0);
-        }
-        else if (session)
-        {
-            //No attr found, look for script
-            ScriptEngine* engine = session->getScriptEngine();
-            if (engine)
-            {
-                ScriptResult result = engine->run(i->first, this);
-                if (result.success())
-                    val = result.asDouble();
-                //else {
-                //    OE_WARN << LC << "Feature Script error on '" << expr.expr() << "': " << result.message() << std::endl;
-                //}
-            }
-        }
-
-        expr.set( *i, val );
-    }
-
-    return expr.eval();
-}
-
-std::string
-Feature::eval(const StringExpression& expr, FilterContext const* context)
-{
-    StringExpression temp(expr);
-    return eval(temp, context);
-}
-
-const std::string&
-Feature::eval(StringExpression& expr, FilterContext const* context)
-{
-    const StringExpression::Variables& vars = expr.variables();
-    for (StringExpression::Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-    {
-        std::string val = "";
-        AttributeTable::const_iterator ai = _attrs.find(toLower(i->first));
-        if (ai != _attrs.end())
-        {
-            val = ai->second.getString();
-        }
-        else if (context && context->getSession())
-        {
-            //No attr found, look for script
-            ScriptEngine* engine = context->getSession()->getScriptEngine();
-            if (engine)
-            {
-                ScriptResult result = engine->run(i->first, this, context);
-                if (result.success())
-                    val = result.asString();
-                else
-                {
-                    // Couldn't execute it as code, just take it as a string literal.
-                    val = i->first;
-                    //OE_DEBUG << LC << "Feature Script error on '" << expr.expr() << "': " << result.message() << std::endl;
-                }
-            }
-        }
-
-        expr.set(*i, val);
-    }
-
-    return expr.eval();
-}
-
-std::string
-Feature::eval(const StringExpression& expr, Session* session)
-{
-    StringExpression temp(expr);
-    return eval(temp, session);
-}
-
-const std::string&
-Feature::eval(StringExpression& expr, Session* session)
-{
-    const StringExpression::Variables& vars = expr.variables();
-    for( StringExpression::Variables::const_iterator i = vars.begin(); i != vars.end(); ++i )
-    {
-        std::string val = "";
-        AttributeTable::const_iterator ai = _attrs.find(toLower(i->first));
-        if (ai != _attrs.end())
-        {
-            val = ai->second.getString();
-        }
-        else if (session)
-        {
-            //No attr found, look for script
-            ScriptEngine* engine = session->getScriptEngine();
-            if (engine)
-            {
-                ScriptResult result = engine->run(i->first, this);
-                if (result.success())
-                    val = result.asString();
-                else
-                {
-                    // Couldn't execute it as code, just take it as a string literal.
-                    val = i->first;
-                    //OE_DEBUG << LC << "Feature Script error on '" << expr.expr() << "': " << result.message() << std::endl;
-                }
-            }
-        }
-
-        expr.set( *i, val );
-    }
-
-    return expr.eval();
-}
-#endif
 
 bool
 Feature::getWorldBound(const SpatialReference* srs,
@@ -547,8 +373,8 @@ Feature::getGeoJSON(bool includeNulls) const
             props[attr.first] = value.get<std::string>();
         else if (value.is<double>())
             props[attr.first] = value.get<double>();
-        else if (value.is<long long>())
-            props[attr.first] = static_cast<int>(value.get<long long>());
+        else if (value.is<std::int64_t>())
+            props[attr.first] = static_cast<int>(value.get<std::int64_t>());
         else if (value.is<bool>())
             props[attr.first] = value.get<bool>();
         else if (includeNulls)
@@ -642,7 +468,11 @@ osgEarth::evaluateExpression(const std::string& expr, Feature* feature, const Fi
         }
     }
 
-    OE_SOFT_ASSERT_AND_RETURN(context.session(), {});
+    if (!context.session())
+    {
+        OE_WARN << LC << "An expression could not be resolved to its intended type: " << expr << std::endl;
+        return {};
+    }
 
     auto* engine = context.session()->getScriptEngine();
     OE_SOFT_ASSERT_AND_RETURN(engine, {});
@@ -651,8 +481,6 @@ osgEarth::evaluateExpression(const std::string& expr, Feature* feature, const Fi
 
     if (result.success())
         return result.asString();
-
-    OE_WARN << LC << "Feature Script error on '" << expr << "': " << result.message() << std::endl;
 
     return {};
 }

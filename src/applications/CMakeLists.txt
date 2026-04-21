@@ -88,7 +88,7 @@ if(NOT OSGEARTH_BUILD_PLATFORM_IPHONE)
         add_subdirectory(osgearth_overlayviewer)
         add_subdirectory(osgearth_windows)
         add_subdirectory(osgearth_tests)
-        
+
         if(OSGEARTH_BUILD_LEGACY_CONTROLS_API)
             add_subdirectory(osgearth_shadercomp)
             
@@ -102,7 +102,13 @@ if(NOT OSGEARTH_BUILD_PLATFORM_IPHONE)
         endif()
     endif()
 
-    add_subdirectory(osgearth_cpp14_check)
+    if(OSGEARTH_BUILD_BENCHMARKS)
+        set(TARGET_DEFAULT_LABEL_PREFIX "Benchmark")
+        set(TARGET_DEFAULT_APPLICATION_FOLDER "Benchmarks")
+        add_subdirectory(osgearth_benchmarks)
+    endif()
+
+    # add_subdirectory(osgearth_cpp14_check)
 
 else()
 

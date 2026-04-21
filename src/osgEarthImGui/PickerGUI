@@ -166,7 +166,7 @@ namespace osgEarth
                         ImGuiLTable::Text("FID", "%" PRIu64, _pickedFeature->getFID());
                         for (auto& attr : _pickedFeature->getAttrs())
                         {
-                            ImGuiLTable::Text(attr.first.c_str(), "%s", attr.second.getString().c_str());
+                            ImGuiLTable::Text(attr.first.c_str(), "%s", attr.second.getAsString().c_str());
                         }
                         ImGuiLTable::End();
                     }

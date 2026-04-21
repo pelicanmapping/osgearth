@@ -367,6 +367,7 @@ namespace osgEarth { namespace TMS
         static TileMap* create(
             const std::string& url,
             const Profile* profile,
+            unsigned maxDataLevel,
             const DataExtentList& dataExtents,
             const std::string& format,
             int tile_width,
@@ -468,6 +469,7 @@ namespace osgEarth { namespace TMS
             osg::ref_ptr<const Profile>& profile,
             const std::string& format,
             bool isCoverage,
+            unsigned maxDataLevel,
             DataExtentList& out_dataExtents,
             const osgDB::Options* readOptions);
 

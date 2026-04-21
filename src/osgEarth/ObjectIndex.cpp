@@ -148,7 +148,7 @@ ObjectIndex::tagDrawable(osg::Drawable* drawable, ObjectID id) const
     {
         line->setVertexAttribArray(_attribLocation, ids);
         auto size = line->size();
-        for (int i = 0; i < size; ++i)
+        for (int i = 0; i < (int)size; ++i)
             line->pushVertexAttrib(ids.get(), id);
     }
 }

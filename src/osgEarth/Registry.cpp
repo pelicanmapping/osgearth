@@ -11,6 +11,7 @@
 #include "GLUtils"
 #include "Chonk"
 #include "MemoryUtils"
+#include "ScriptEngine"
 
 #include <osg/ArgumentParser>
 #include <osgText/Font>
@@ -30,6 +31,9 @@
 using namespace osgEarth;
 
 #define LC "[Registry] "
+
+// define the threading library singleton
+WEEJOBS_INSTANCE;
 
 void osgEarth::initialize()
 {
@@ -88,6 +92,7 @@ namespace
 Registry::Registry() :
     _terrainEngineDriver("rex"),
     _cacheDriver("filesystem"),
+    _scriptEngineDriver("qjs"),
     _overrideCachePolicyInitialized(false),
     _maxVertsPerDrawable(UINT_MAX),
     _maxImageDimension(INT_MAX)
@@ -116,7 +121,6 @@ Registry::Registry() :
 #endif
 
     // Redirect GDAL/OGR console errors to our own handler
-    //CPLPushErrorHandler(myCPLErrorHandler);
     CPLSetErrorHandler(myCPLErrorHandler);
 
     // Set the GDAL shared block cache size. This defaults to 5% of
@@ -168,6 +172,8 @@ Registry::Registry() :
     osgDB::Registry::instance()->addArchiveExtension( "kmz" );
     osgDB::Registry::instance()->addArchiveExtension( "3tz");
     osgDB::Registry::instance()->addFileExtensionAlias( "3tz", "zip" );
+    osgDB::Registry::instance()->addFileExtensionAlias("glb", "gltf");
+    osgDB::Registry::instance()->addFileExtensionAlias("b3dm", "gltf");
     osgDB::Registry::instance()->addMimeTypeExtensionMapping( "application/vnd.google-earth.kml+xml", "kml" );
     osgDB::Registry::instance()->addMimeTypeExtensionMapping( "application/vnd.google-earth.kml+xml; charset=utf8", "kml");
     osgDB::Registry::instance()->addMimeTypeExtensionMapping( "application/vnd.google-earth.kmz",     "kmz" );
@@ -237,7 +243,7 @@ Registry::Registry() :
     }
 
     // register the system stock Units.
-    Units::registerAll( this );
+    //Units::registerAll( this );
 
     // register the chonk bin with OSG
     osgUtil::RenderBin::addRenderBinPrototype(
@@ -249,6 +255,14 @@ Registry::Registry() :
     {
         _maxImageDimension = as<unsigned>(maxDim, UINT_MAX);
         OE_INFO << LC << "Setting max texture size from environment = " << _maxImageDimension << std::endl;
+    }
+
+    // set a script engine to use from an env var.
+    const char* scriptEngine = ::getenv(OSGEARTH_ENV_SCRIPT_ENGINE);
+    if (scriptEngine)
+    {
+        _scriptEngineDriver = scriptEngine;
+        OE_INFO << LC << "Script engine set from environment: " << _scriptEngineDriver << std::endl;
     }
 }
 
@@ -296,11 +310,12 @@ namespace
 Registry*
 Registry::instance()
 {
-    std::call_once(g_registry_once, []() {
-        g_registry = new Registry();
-        g_registry_created = true;
-        g_registry_destroyed = false;
-        std::atexit(destroyRegistry);
+    std::call_once(g_registry_once, []() 
+        {
+            g_registry = new Registry();
+            g_registry_created = true;
+            g_registry_destroyed = false;
+            std::atexit(destroyRegistry);
         });
 
     if (g_registry_destroyed)
@@ -312,17 +327,6 @@ Registry::instance()
     {
         OE_HARD_ASSERT(false, "Registry::instance() called recursively. Contact support.");
     }
-
-    //// Create registry the first time through, explicitly rather than depending on static object
-    //// initialization order, which is undefined in c++ across separate compilation units.  An
-    //// explicit hook is registered to tear it down on exit.  atexit() hooks are run on exit in
-    //// the reverse order of their registration during setup.
-    //if (!g_registry && !g_registry_created)
-    //{
-    //    g_registry_created = true;
-    //    g_registry = new Registry();
-    //    std::atexit(destroyRegistry);
-    //}
 
     return g_registry;
 }
@@ -345,6 +349,9 @@ Registry::releaseGLObjects(osg::State* state) const
 void
 Registry::release()
 {
+    // shut down running jobs:
+    WEEJOBS_NAMESPACE::instance().shutdown();
+
     // GL resources (all GCs):
     releaseGLObjects(NULL);
 
@@ -359,39 +366,10 @@ Registry::release()
 
     // Shared object index
     _objectIndex = nullptr;
-}
 
-const Profile*
-Registry::getGlobalGeodeticProfile() const
-{
-    // DEPRECATED
-    static osg::ref_ptr<const Profile> p = Profile::create(Profile::GLOBAL_GEODETIC);
-    return p.get();
-}
-
-
-const Profile*
-Registry::getGlobalMercatorProfile() const
-{
-    // DEPRECATED
-    static thread_local osg::ref_ptr<const Profile> p = Profile::create(Profile::SPHERICAL_MERCATOR);
-    return p.get();
-}
-
-
-const Profile*
-Registry::getSphericalMercatorProfile() const
-{
-    // DEPRECATED
-    static thread_local osg::ref_ptr<const Profile> p = Profile::create(Profile::SPHERICAL_MERCATOR);
-    return p.get();
-}
-
-const Profile*
-Registry::getNamedProfile( const std::string& name ) const
-{
-    // DEPRECATED
-    return Profile::create(name);
+    // Dereference all registered singletons
+    _singletons.clear();
+    _namedSingletons.clear();
 }
 
 osg::ref_ptr<SpatialReference>
@@ -692,13 +670,15 @@ Registry::cloneOrCreateOptions(const osgDB::Options* input)
 void
 Registry::registerUnits(const UnitsType& prototype)
 {
-    //std::lock_guard<std::mutex> lock(_regMutex);
     _unitsVector.push_back(prototype);
 }
 
 UnitsType
 Registry::getUnits(const std::string& name) const
 {
+    static std::once_flag s_once;
+    std::call_once(s_once, []() { Units::registerAll(Registry::instance()); });
+
     std::lock_guard<std::mutex> lock(_regMutex);
     for (auto& units : _unitsVector)
     {

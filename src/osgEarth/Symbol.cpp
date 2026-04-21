@@ -3,6 +3,7 @@
  * MIT License
  */
 #include <osgEarth/Symbol>
+#include <osgEarth/Registry>
 #include <mutex>
 
 using namespace osgEarth;
@@ -11,10 +12,11 @@ SymbolRegistry*
 SymbolRegistry::instance()
 {
     static std::once_flag s_once;
-    static SymbolRegistry* s_singleton = nullptr;
+    static osg::ref_ptr<SymbolRegistry> s_singleton;
 
     std::call_once(s_once, []() {
         s_singleton = new SymbolRegistry();
+        Registry::instance()->registerSingleton(s_singleton.get());
     });
 
     return s_singleton;

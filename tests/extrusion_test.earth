@@ -41,7 +41,7 @@ osgEarth Sample - Annotations
                 fill: #ff0000af;
                 stroke: #ffff00;
                 stroke-width: 3px;
-                extrusion-height: "-3000";
+                extrusion-height: -3000;
                 text-content: "negative_up";
                 text-align: center-center;
             </style>
@@ -68,7 +68,7 @@ osgEarth Sample - Annotations
                 fill: #ff0000af;
                 stroke: #ffff00;
                 stroke-width: 3px;
-                extrusion-height: "-3000";
+                extrusion-height: -3000m;
                 extrusion-direction: down;
                 text-content: "negative_down";
                 text-align: center-center;

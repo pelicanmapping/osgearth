@@ -246,6 +246,14 @@ namespace osgEarth
         //! @return tile key containing the point
         TileKey createTileKey(const GeoPoint& point, unsigned level) const;
 
+        //! Gets the tile keys that are within the specified radius of the input tile key at the same LOD.
+        //! @param x X coordinate of the center point, in the profile's SRS
+        //! @param y Y coordinate of the center point, in the profile's SRS
+        //! @param level LOD at which to find tile keys
+        //! @param radiusMeters Radius in meters within which to find tile keys
+        //! @return vector of tile keys within the specified radius
+        std::vector<TileKey> getTileKeysWithinRadius(double x, double y, unsigned level, double radiusMeters) const;
+
         /**
          * Returns a readable description of the profile.
          */

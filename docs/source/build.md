@@ -13,7 +13,7 @@ Pull down the source from GitHub and create a ```build``` folder for your out-of
 
 ```
 mkdir osgearth && cd osgearth
-git clone --recurse-submodules https://github.com/gwaldron/osgearth.git repo
+git clone --recurse-submodules https://github.com/pelicanmapping/osgearth.git repo
 ```
 
 This will clone the repository into a folder called `repo` and pull down any submodules.

@@ -377,8 +377,8 @@ Status
 XYZFeatureSource::insert(const TileKey& key, const FeatureList& features, bool overwrite)
 {
     OE_SOFT_ASSERT_AND_RETURN(key.valid(), Status::AssertionFailure);
-    OE_SOFT_ASSERT_AND_RETURN(key.getLOD() >= getMinLevel(), Status::ConfigurationError);
-    OE_SOFT_ASSERT_AND_RETURN(key.getLOD() <= getMaxLevel(), Status::ConfigurationError);
+    OE_SOFT_ASSERT_AND_RETURN((int)key.getLOD() >= getMinLevel(), Status::ConfigurationError);
+    OE_SOFT_ASSERT_AND_RETURN((int)key.getLOD() <= getMaxLevel(), Status::ConfigurationError);
     OE_SOFT_ASSERT_AND_RETURN(ci_equals(options().format().value(), "json"), Status::ConfigurationError);
 
     auto url = createURL(Query(key));

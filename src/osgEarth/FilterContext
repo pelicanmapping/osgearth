@@ -101,6 +101,7 @@ namespace osgEarth { namespace Util
         [[deprecated]] optional<GeoExtent>& extent() { return _workingExtent; }
         [[deprecated]] const optional<GeoExtent>& extent() const { return workingExtent(); }
         [[deprecated]] const FeatureProfile* profile() const { return featureProfile(); }
+        [[deprecated]] void setProfile(const FeatureProfile* value) { setFeatureProfile(value); }
         [[deprecated]] const SpatialReference* getOutputSRS() const { return outputSRS(); }
         [[deprecated]] Session* getSession() { return session(); }
         [[deprecated]] const Session* getSession() const { return session(); }

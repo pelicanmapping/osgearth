@@ -922,11 +922,14 @@ GeoExtent::width(const UnitsType& units) const
     }
     else
     {
-        std::vector<osg::Vec3d> points = { { xMin(), yMin(), 0 }, { xMax(), yMax(), 0 } };
-        double d = GeoMath::distance(points, getSRS()->getEllipsoid().getRadiusEquator());
-        double h = height(Units::METERS);
-        double m = sqrt(d * d - h * h);
-        return Units::convert(Units::METERS, units, m);
+        std::vector<osg::Vec3d> pointsS = { { xMin(), yMin(), 0 }, { xMax(), yMin(), 0 } };
+        std::vector<osg::Vec3d> pointsN = { { xMin(), yMax(), 0 }, { xMax(), yMax(), 0 } };
+        double dS = GeoMath::distance(pointsS, getSRS()->getEllipsoid().getRadiusEquator());
+        double dN = GeoMath::distance(pointsN, getSRS()->getEllipsoid().getRadiusEquator());
+        return Units::convert(Units::METERS, units, std::max(dS, dN));
+        //double h = height(Units::METERS);
+        //double m = sqrt(d * d - h * h);
+        //return Units::convert(Units::METERS, units, m);
     }
 }
 
@@ -934,11 +937,15 @@ double
 GeoExtent::height(const UnitsType& units) const
 {
     if (!isValid())
+    {
         return 0.0;
-    else if (getSRS()->isProjected()) {
+    }
+    else if (getSRS()->isProjected())
+    {
         return Units::convert(getSRS()->getUnits(), units, width());
     }
-    else {
+    else
+    {
         return Distance(
             getSRS()->getEllipsoid().longitudinalDegreesToMeters(height(), 0.0),
             Units::METERS).as(units);

@@ -23,7 +23,7 @@ namespace osgEarth { namespace Drivers { namespace Duktape
         DuktapeScriptEngineDriver()
         {
             supportsExtension(
-                "osgearth_scriptengine_javascript", "osgEarth Duktape JavaScript Engine" );
+                "osgearth_scriptengine_javascript_duktape", "osgEarth Duktape JavaScript Engine" );
         }
 
         const char* className() const
@@ -40,6 +40,6 @@ namespace osgEarth { namespace Drivers { namespace Duktape
         }
     };
 
-    REGISTER_OSGPLUGIN(osgearth_scriptengine_javascript, DuktapeScriptEngineDriver)
+    REGISTER_OSGPLUGIN(osgearth_scriptengine_javascript_duktape, DuktapeScriptEngineDriver)
 
 } } } // namespace osgEarth::Drivers::Duktape

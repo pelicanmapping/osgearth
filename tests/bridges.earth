@@ -2,10 +2,6 @@
 
     <libraries>osgEarthProcedural</libraries>
 
-    <options>
-        <cache type="rocksdb" path="cache" />
-    </options>
-
             <XYZFeatures name="data:osm-highway-patches">
                 <url>D:/data/osm-patches/{z}/{x}/{y}.json</url>
                 <min_level>14</min_level>
@@ -30,20 +26,13 @@
         </patch>
     </XYZFeatures>
 
-<!--
-
-    <CompositeFeatures name="data:osm-highway">
-        <note>This must come before the layers that use it, for now</note>
-        <layers>
-            <features>data:osm-highway-patches</features>
-            <features>data:osm-highway-original</features>
-        </layers>
-    </CompositeFeatures>
--->
-
-    <TMSElevation name="Elevation MAK Earth">
-        <url>http://vr-theworld.com/vr-theworld/tiles/1.0.0/149/</url>
-    </TMSElevation>
+    <XYZElevation name="MapZen global elevation (S3)">
+        <url>https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png</url>
+        <elevation_encoding>terrarium</elevation_encoding>
+        <max_level>13</max_level>
+        <stitch_edges>true</stitch_edges>
+        <vdatum>egm96</vdatum>
+    </XYZElevation>
 
     <FlattenedElevation name="Road flattening" min_level="14" max_data_level="14" open="true">
         <features>data:osm-highway</features>
@@ -56,9 +45,10 @@
         <buffer_width>24.0</buffer_width>
     </FlattenedElevation>
 
-    <TMSImage name="Worldwide High Resolution Imagery">
-        <url>http://vr-theworld.com/vr-theworld/tiles/1.0.0/142/</url>
-    </TMSImage>
+    <ArcGISServerImage name="World Imagery">
+        <url>https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/</url>
+        <nodata_image>https://services.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/100/0/0.jpeg</nodata_image>
+    </ArcGISServerImage>
 
     <gdaldem name="Hill Shade" blend="modulate" opacity="0.25" caching="false">
         <processing>hillshade</processing>

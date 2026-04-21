@@ -42,22 +42,6 @@ osgEarth::Util::parseDouble(const std::string& input)
         return value;
 }
 
-long long
-osgEarth::Util::parseLongLong(const std::string& input)
-{
-    if (input.length() == 0)
-        return NAN;
-
-    auto* str = input.c_str();
-    char* end = nullptr;
-    errno = 0;
-    long long value = std::strtoll(str, &end, 10);
-    if (str == end || errno == ERANGE)
-        return NAN;
-    else
-        return value;
-}
-
 std::pair<bool, double>
 osgEarth::Util::isValidNumber(const std::string& input)
 {

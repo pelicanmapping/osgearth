@@ -71,6 +71,8 @@ void oe_phong_fragment(inout vec4 color)
     // https://en.wikibooks.org/wiki/GLSL_Programming/GLUT/Multiple_Lights
 
     vec3 N = normalize(vp_Normal);
+    // V is the normalized vertex-to-camera vector.
+    vec3 V = -normalize(oe_phong_vertexView3);
 
     float shine = clamp(osg_FrontMaterial.shininess, 1.0, 128.0);
     vec3 surfaceSpecularity = osg_FrontMaterial.specular.rgb;
@@ -90,9 +92,6 @@ void oe_phong_fragment(inout vec4 color)
 
             // L is the normalized camera-to-light vector.
             vec3 L = normalize(osg_LightSource[i].position.xyz);
-
-            // V is the normalized vertex-to-camera vector.
-            vec3 V = -normalize(oe_phong_vertexView3);
 
             // point or spot light:
             if (osg_LightSource[i].position.w != 0.0)

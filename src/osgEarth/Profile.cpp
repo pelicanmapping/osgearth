@@ -87,10 +87,10 @@ ProfileOptions::getConfig() const
 
         if ( _bounds.isSet() )
         {
-            conf.set( "xmin", toString(_bounds->xMin()) );
-            conf.set( "ymin", toString(_bounds->yMin()) );
-            conf.set( "xmax", toString(_bounds->xMax()) );
-            conf.set( "ymax", toString(_bounds->yMax()) );
+            conf.set( "xmin", _bounds->xMin() );
+            conf.set( "ymin", _bounds->yMin() );
+            conf.set( "xmax", _bounds->xMax() );
+            conf.set( "ymax", _bounds->yMax() );
         }
 
         conf.set( "num_tiles_wide_at_lod_0", _numTilesWideAtLod0 );
@@ -483,8 +483,11 @@ std::string
 Profile::toString() const
 {
     const SpatialReference* srs = _extent.getSRS();
+
+    int p = 8;
+        
     return Stringify()
-        << std::setprecision(16)
+        << std::setprecision(p)
         << "[srs=" << srs->getName() << ", min=" << _extent.xMin() << "," << _extent.yMin()
         << " max=" << _extent.xMax() << "," << _extent.yMax()
         << " ar=" << _numTilesWideAtLod0 << ":" << _numTilesHighAtLod0
@@ -612,6 +615,65 @@ Profile::getLevelOfDetailForHorizResolution( double resolution, int tileSize ) c
     return level;
 }
 
+std::vector<TileKey>
+Profile::getTileKeysWithinRadius(double x, double y, unsigned level, double radiusMeters) const
+{
+    auto centerKey = createTileKey(x, y, level);
+    if (!centerKey.valid())
+        return {};
+
+    std::vector<TileKey> results;
+
+    double tileWidth, tileHeight;
+    getTileDimensions(level, tileWidth, tileHeight);
+
+    unsigned numWide, numHigh;
+    getNumTiles(level, numWide, numHigh);
+
+    // Convert radiusMeters from meters to the profile SRS units
+    double radiusSRS = getSRS()->transformDistance(
+        Distance(radiusMeters, Units::METERS),
+        getSRS()->getUnits(),
+        y);
+
+    // Determine how many tiles the radius spans in each direction
+    int dx = (int)std::ceil(radiusSRS / tileWidth);
+    int dy = (int)std::ceil(radiusSRS / tileHeight);
+
+    double twest = (double)numWide * ((x - radiusSRS) - _extent.xMin()) / _extent.width();
+    double teast = (double)numWide * ((x + radiusSRS) - _extent.xMin()) / _extent.width();
+
+    int txmin = (int)std::floor(twest);
+    int txmax = (int)std::floor(teast);
+
+    double tsouth = (double)numHigh * ((y - radiusSRS) - _extent.yMin()) / _extent.height();
+    double tnorth = (double)numHigh * ((y + radiusSRS) - _extent.yMin()) / _extent.height();
+
+    int tymin = (int)std::floor(tsouth);
+    int tymax = (int)std::floor(tnorth);
+
+    for (int tx = txmin; tx <= txmax; ++tx)
+    {
+        for(int ty = tymin; ty <= tymax; ++ty)
+        {
+            if (ty < 0 || ty >= (int)numHigh)
+                continue;
+
+            if (tx < 0 || tx >= (int)numWide)
+            {
+                if (getSRS()->isGeographic())
+                    tx = ((tx % (int)numWide) + (int)numWide) % (int)numWide;
+                else
+                    continue;
+            }
+
+            results.emplace_back(TileKey(level, (unsigned)tx, (unsigned)ty, this));
+        }
+    }
+
+    return results;
+}
+
 TileKey
 Profile::createTileKey( double x, double y, unsigned int level ) const
 {
@@ -627,12 +689,6 @@ Profile::createTileKey( double x, double y, unsigned int level ) const
 
         if (_numTilesHighAtLod0 == 0u || ((tilesY / _numTilesHighAtLod0) != (1 << (unsigned)level)))
             return TileKey::INVALID;
-
-        //if (((_numTilesWideAtLod0 != 0) && ((tilesX / _numTilesWideAtLod0) != (1 << (unsigned int) level))) ||
-        //    ((_numTilesHighAtLod0 != 0) && ((tilesY / _numTilesHighAtLod0) != (1 << (unsigned int) level))))
-        //{	// check for overflow condition
-        //    return (TileKey::INVALID);
-        //}
 
         double rx = (x - _extent.xMin()) / _extent.width();
         int tileX = osg::clampBelow( (unsigned int)(rx * (double)tilesX), tilesX-1 );

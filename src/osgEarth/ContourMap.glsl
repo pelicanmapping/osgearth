@@ -14,7 +14,7 @@ out vec4 oe_layer_tilec;
 #pragma include RexEngine.GL4.glsl
 
   uint64_t oe_terrain_getElevationHandle();
-vec2 oe_terrain_getElevationCoord(in vec2);
+vec2 oe_terrain_getElevationCoords(in vec2);
 vec2 oe_terrain_getElevationMinMax();
 
 out vec2 oe_elev_coord;
@@ -23,7 +23,7 @@ flat out vec2 oe_elev_min_max;
 
 void oe_contour_vertex(inout vec4 not_used)
 {
-    oe_elev_coord = oe_terrain_getElevationCoord(oe_layer_tilec.st);
+    oe_elev_coord = oe_terrain_getElevationCoords(oe_layer_tilec.st);
     oe_elev_tex = oe_terrain_getElevationHandle();
     oe_elev_min_max = oe_terrain_getElevationMinMax();
 

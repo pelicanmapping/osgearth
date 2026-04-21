@@ -13,19 +13,20 @@
 
 namespace osgEarth
 {
-    /** TODO: refactor into GeometryCompiler::Options */
+    using namespace osgEarth;
+
     class OSGEARTH_EXPORT GeometryCompilerOptions
     {
     public:
         /**
-         * Set the global default values for the options.
-         */
+        * Set the global default values for the options.
+        */
         static void setDefaults(const GeometryCompilerOptions& defaults);
 
     public:
         /**
-         * Construct new copiler options, optionally deserializing them
-         */
+        * Construct new copiler options, optionally deserializing them
+        */
         GeometryCompilerOptions(const ConfigOptions& conf =ConfigOptions());
 
     public:
@@ -52,6 +53,9 @@ namespace osgEarth
         /** Whether to enabled draw-instancing for model substitution */
         optional<bool>& instancing() { return _instancing; }
         const optional<bool>& instancing() const { return _instancing; }
+
+        optional<FilterUsage>& filterUsage() { return _filterUsage; }
+        const optional<FilterUsage>& filterUsage() const { return _filterUsage; }
 
         /** Whether to ignore the altitude filter (e.g. if you plan to do auto-clamping layer) */
         optional<bool>& ignoreAltitudeSymbol() { return _ignoreAlt; }
@@ -110,6 +114,7 @@ namespace osgEarth
         optional<StringExpression>     _featureNameExpr;
         optional<bool>                 _clustering;
         optional<bool>                 _instancing;
+        optional<FilterUsage>          _filterUsage;
         optional<ResampleFilter::ResampleMode> _resampleMode;
         optional<double>               _resampleMaxLength;
         optional<bool>                 _ignoreAlt;
@@ -126,13 +131,13 @@ namespace osgEarth
         static GeometryCompilerOptions s_defaults;
 
     public:
-       GeometryCompilerOptions(bool); // internal
+        GeometryCompilerOptions(bool); // internal
     };
 
 
     /**
-     * Compiles a collection of features against a style.
-     */
+    * Compiles a collection of features against a style.
+    */
     class OSGEARTH_EXPORT GeometryCompiler
     {
     public:
@@ -142,9 +147,9 @@ namespace osgEarth
 
         /** Constructs a new compiler with preconfigured options. */
         GeometryCompiler( const GeometryCompilerOptions& options );
-        
+
         virtual ~GeometryCompiler() { }
-        
+
         /** Access the options read-only */
         const GeometryCompilerOptions& options() const { return _options; }
 

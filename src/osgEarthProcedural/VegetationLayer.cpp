@@ -1323,20 +1323,20 @@ VegetationLayer::getAssetPlacements(
     // after loading the biome map.
     if (loadBiomesOnDemand)
     {
+        std::lock_guard<std::mutex> lock(_assets.mutex());
+
         if (checkForNewAssets() == true)
         {
             _newAssets.join(progress);
             AssetsByGroup newAssets = _newAssets.release();
             if (!newAssets.empty())
             {
-                std::lock_guard<std::mutex> lock(_assets.mutex());
                 _assets = std::move(newAssets);
             }
         }
 
         // make a shallow copy of assets list safely
         {
-            std::lock_guard<std::mutex> lock(_assets.mutex());
             auto iter = _assets.find(group);
             if (iter == _assets.end())
             {

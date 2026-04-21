@@ -1,12 +1,12 @@
 <map name="Demo: point-model substitution">
                   
-    <OGRFeatures name="points">
+    <OGRFeatures name="points-data">
         <url>../data/points.shp</url>
     </OGRFeatures>
                
-    <FeatureModel name="points" features="points">                
+    <FeatureModel name="points" features="points-data">                
         <styles>
-            <style type="text/css">
+            <style>
                 points {
                    model: "../data/red_flag.osg";
                    model-scale: 2500;
@@ -17,7 +17,7 @@
     
     <xi:include href="readymap_imagery.xml"/>
 	
-    <viewpoints home="0" time="1">
+    <viewpoints home="0" time="0">
         <viewpoint name="Models" lat="25.311" long="-80.807" pitch="-21" range="177351"/>
     </viewpoints>
   

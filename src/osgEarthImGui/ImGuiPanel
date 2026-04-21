@@ -313,6 +313,15 @@ namespace ImGuiLTable
         ImGui::Text(format, args...);
     }
 
+    static void TextUnformatted(const char* label, const char* value)
+    {
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(label);
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::TextUnformatted(value);
+    }
+
     static void Section(const char* label)
     {
         ImGui::TableNextColumn();

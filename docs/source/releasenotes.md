@@ -1,5 +1,15 @@
 # Release Notes
 
+## Version 3.8 (March 2026)
+
+Release Highlights:
+
+* New: QuickJS JavaScript engine, adding support for ES6 and higher performance
+* New: PMTiles Layer
+* New: Decals (to project arbitrary textures on the terrain)
+* New: Superluminal Performance API integration
+* New: ImGuiPreview widget for viewing a 3D model in ImGui
+
 ## Version 3.7.2 (April 2025)
 
 Bug fix and minor feature release:

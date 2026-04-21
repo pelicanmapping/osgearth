@@ -18,7 +18,7 @@ and a custom selector.
         </filters>
     </OGRFeatures>
     
-    <FeatureModel name="countries" features="country-data">
+    <TiledFeatureModel name="countries" features="country-data">
         <styles>            
             <script language="javascript">
             <![CDATA[       
@@ -33,7 +33,7 @@ and a custom selector.
                 
                 function init() {                
                     for(var i=0; i<g_colors.length; ++i) {
-                        g_styles.push( "{fill:" + g_colors[i] + ";altitude-clamping:terrain-drape;}");
+                        g_styles.push( "{fill:" + g_colors[i] + "; render-depth-test: false; render-clip-plane: 0;}"); //altitude-clamping:terrain-drape;}");
                     }
                 }
                 init();
@@ -42,6 +42,6 @@ and a custom selector.
             
             <selector style_expr="g_styles[feature.id % g_colors.length]"/>
         </styles>        
-    </FeatureModel>
+    </TiledFeatureModel>
     
 </map>

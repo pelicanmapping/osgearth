@@ -1166,7 +1166,8 @@ namespace
             bufferLen = 4096, index = 0;
             if ( HttpQueryInfo(hRequest, HTTP_QUERY_LAST_MODIFIED, buffer, &bufferLen, &index) )
             {
-                response.setLastModified(as<long>(std::string(buffer, bufferLen), 0L));
+                DateTime dt(std::string(buffer, bufferLen));
+                response.setLastModified(dt.asTimeStamp());
             }
 
             if ( statusCode == 200 )

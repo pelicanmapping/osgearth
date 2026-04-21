@@ -375,7 +375,8 @@ main(int argc, char** argv)
             nameSymbol->pixelOffset() = osg::Vec2s(0, -trackImage->t() / 3);
             nameSymbol->alignment() = TextSymbol::ALIGN_CENTER_BOTTOM;
             nameSymbol->halo() = Color::Black;
-            nameSymbol->content() = { "Hello, TrackNode" };
+            std::string labelFieldName = "name";
+            nameSymbol->content()->setLiteral({ "Hello, TrackNode" });
             nameSymbol->size() = 18.0f;
             TrackNodeFieldSchema trackSchema;
             trackSchema["name"] = { nameSymbol, true };

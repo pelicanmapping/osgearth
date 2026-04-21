@@ -401,7 +401,7 @@ LifeMapLayer::createImageImplementation(
     ep->getTile(key, true, elevTile, &_workingSet, progress);
 
     // ensure we have a normal map for slopes and curvatures:
-    if (elevTile.valid() && getTerrainWeight() > 0.0f)
+    if (elevTile.valid() && getTerrainWeight() > 0.0f && _terrainOptions.getUseNormalMaps())
     {
         elevTile->generateNormalMap(map.get(), _terrainOptions.getNormalMapTileSize(),
             &_workingSet, progress);

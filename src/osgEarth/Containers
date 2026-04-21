@@ -52,7 +52,7 @@ namespace osgEarth { namespace Util
                     return _container[i].second;
                 }
             }
-            _container.resize(_container.size()+1);
+            _container.emplace_back();
             _container.back().first = key;
             return _container.back().second;
         }
@@ -723,6 +723,14 @@ namespace osgEarth { namespace Util
                     break;
                 }
             }
+        }
+
+        template<typename FUNC>
+        void forEach(FUNC&& func)
+        {
+            osgEarth::Threading::ScopedReadLock lock(_mutex);
+            for (auto& entry : _data)
+                func(entry.first, entry.second);
         }
 
     private:

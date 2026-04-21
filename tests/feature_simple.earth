@@ -12,16 +12,16 @@ OSG geometry out of it.
         <url>../data/usa.shp</url>
     </OGRFeatures>
     
-    <FeatureModel name="US States" features="US-Data">
+    <TiledFeatureModel name="US States" features="US-Data">
         <styles>
             <style type="text/css">
                 states {
-                   stroke:          #ffff00; 
-                   stroke-width:    2px;
+                   stroke: #ffff00; 
+                   stroke-width: 2px;
                    render-depth-offset: true;
                 }                    
             </style>
         </styles>        
-    </FeatureModel>
+    </TiledFeatureModel>
     
 </map>

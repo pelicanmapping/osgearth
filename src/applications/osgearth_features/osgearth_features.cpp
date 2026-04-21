@@ -16,7 +16,7 @@
 
 #include <osgEarth/Style>
 #include <osgEarth/OGRFeatureSource>
-#include <osgEarth/FeatureModelLayer>
+#include <osgEarth/TiledFeatureModelLayer>
 #include <osgEarth/FeatureImageLayer>
 
 using namespace osgEarth;
@@ -168,7 +168,7 @@ int main(int argc, char** argv)
 
     else
     {
-        FeatureModelLayer* layer = new FeatureModelLayer();
+        auto* layer = new TiledFeatureModelLayer();
         layer->setFeatureSource(features);
 
         StyleSheet* styleSheet = new StyleSheet();
@@ -207,7 +207,7 @@ int main(int argc, char** argv)
         sheet->addStyle(labelStyle);
 
         // and configure a model layer:
-        FeatureModelLayer* fml = new FeatureModelLayer();
+        auto* fml = new TiledFeatureModelLayer();
         fml->setName("Labels");
         fml->setFeatureSource(features);
         fml->setStyleSheet(sheet);

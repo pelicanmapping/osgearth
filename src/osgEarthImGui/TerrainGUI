@@ -256,8 +256,8 @@ namespace osgEarth
                         {
                             if (_sample->elevation().getValue() == NO_DATA_VALUE)
                             {
-                                ImGuiLTable::Text("Elevation:", "0.0m");
-                                ImGuiLTable::Text("Resolution:", "n/a (NO DATA)");
+                                ImGuiLTable::TextUnformatted("Elevation:", "0.0m");
+                                ImGuiLTable::TextUnformatted("Resolution:", "n/a (NO DATA)");
                             }
                             else
                             {
@@ -288,8 +288,8 @@ namespace osgEarth
                         }
                         else
                         {
-                            ImGuiLTable::Text("Elevation:", "...");
-                            ImGuiLTable::Text("Resolution:", "...");
+                            ImGuiLTable::TextUnformatted("Elevation:", "...");
+                            ImGuiLTable::TextUnformatted("Resolution:", "...");
                         }
                         if (fabs(_ax - _x) > 5 || fabs(_ay - _y) > 5)
                         {

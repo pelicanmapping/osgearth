@@ -149,11 +149,6 @@ DebugImageLayer::openImplementation()
 
     _color = osgEarth::htmlColorToVec4f(options().colorCode().get());
 
-    //if (!getProfile())
-    //{
-    //    setProfile( Profile::create(Profile::GLOBAL_GEODETIC) );
-    //}
-
     return Status::NoError;
 }
 
@@ -238,26 +233,19 @@ DebugImageLayer::createImageImplementation(const TileKey& key, ProgressCallback*
 
     // next render the tile key text:
     std::stringstream buf;
-    if (options().invertY() == true)
-    {
-        //Print out a TMS key for the TileKey
-        unsigned int tileX, tileY;
-        key.getTileXY(tileX, tileY);
-        unsigned int numRows, numCols;
-        key.getProfile()->getNumTiles(key.getLevelOfDetail(), numCols, numRows);
-        tileY = numRows - tileY - 1;
-        buf << "Y=" << tileY << "\nX=" << tileX << "\nLOD=" << key.getLOD();
-    }
-    else
-    {
-        buf << "Y=" << key.getTileY() << "\nX=" << key.getTileX() << "\nLOD=" << key.getLOD();
-    }
+    //Print out a TMS key for the TileKey
+    unsigned int tileX, tileY;
+    key.getTileXY(tileX, tileY);
+    unsigned int numRows, numCols;
+    key.getProfile()->getNumTiles(key.getLevelOfDetail(), numCols, numRows);
+    auto tmsY = numRows - tileY - 1;
+    buf << "\nTMS-Y: " << tmsY << "\nXYZ-Y: " << tileY << "\nX: " << tileX << "\nLOD: " << key.getLOD();
 
     const GeoExtent& e = key.getExtent();
 
     buf << std::fixed << std::setprecision(1) 
-        << "\nH=" << e.height(Units::METERS)
-        << "m\nW=" << e.width(Units::METERS)
+        << "\nH: " << e.height(Units::METERS)
+        << "m\nW: " << e.width(Units::METERS)
         << "m";
 
     std::string text;
@@ -265,7 +253,7 @@ DebugImageLayer::createImageImplementation(const TileKey& key, ProgressCallback*
 
     unsigned x = 10, y = 10;
 
-    int res = 32;
+    int res = 24;
     osgText::FontResolution resolution(res, res);
     for (unsigned i = 0; i < text.length(); ++i)
     {
@@ -273,6 +261,10 @@ DebugImageLayer::createImageImplementation(const TileKey& key, ProgressCallback*
         {
             y += res + 10;
             x = 10;
+        }
+        else if (text[i] == ' ')
+        {
+            x += res / 2;
         }
         else if (_font.valid())
         {

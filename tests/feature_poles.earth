@@ -14,17 +14,18 @@ This tests the rendering of features close to the poles.
         </geometry>
     </OGRFeatures>
 
-    <FeatureModel name="North polar polygon" features="north-geom">
+    <TiledFeatureModel name="North polar polygon" features="north-geom">
         <styles>
             <style type="text/css">
                 default {
                    fill: #ff00ff6f;
                    stroke: #ffffff;  
-                   altitude-clamping: terrain-drape;
+                   render-depth-test: false;
+                   render-clip-plane: 0;
                 }                    
             </style>
         </styles>        
-    </FeatureModel>
+    </TiledFeatureModel>
     
     <OGRFeatures name="south-geom">
         <geometry>
@@ -32,16 +33,17 @@ This tests the rendering of features close to the poles.
         </geometry>
     </OGRFeatures>
 
-    <FeatureModel name="South polar polygon" features="south-geom">
+    <TiledFeatureModel name="South polar polygon" features="south-geom">
         <styles>
             <style type="text/css">
                 default {
                    fill: #ff00ff6f;
                    stroke: #ffffff;
-                   altitude-clamping: terrain-drape;
+                   render-depth-test: false;
+                   render-clip-plane: 0;
                 }                    
             </style>
         </styles>
-    </FeatureModel>
+    </TiledFeatureModel>
   
 </map>

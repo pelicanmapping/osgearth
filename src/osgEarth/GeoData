@@ -399,7 +399,7 @@ namespace osgEarth
         //! East-to-west span of the extent
         inline double width() const { return _width; }
 
-        //! East-to-est span in specified units
+        //! Maximum east-to-west span in specified units
         double width(const UnitsType& units) const;
 
         //! North-to-south span of the extent

@@ -9,6 +9,7 @@ osgEarth Sample - Per-layer GLSL shader injection
           <![CDATA[
             #pragma vp_function cycle_monochrome, fragment
             uniform float osg_FrameTime;
+            uniform vec3 oe_Camera;
             
             vec3 rgb_to_ycbcr(in vec3 rgb)
             {
@@ -23,14 +24,12 @@ osgEarth Sample - Per-layer GLSL shader injection
             
             void cycle_monochrome(inout vec4 color)
             {
-                float line = (0.5*(1.0+sin(2.0*osg_FrameTime)))*10.0;
-                float d = gl_FragCoord.x - gl_FragCoord.y*line;
-                if (abs(d) < 3.0)
-                {
-                    color.rgb = vec3(1,0,0);
+                float t =  0.5 * (sin(osg_FrameTime) + 1.0);
+                float y = float(gl_FragCoord.y) / float(oe_Camera.y);
+                if (abs(y-t) < 0.001) {
+                    color = vec4(1,1,0,1);
                 }
-                else if (d < 0.0)
-                {
+                else if (t > y) {
                     vec3 ycbcr = rgb_to_ycbcr(color.rgb);
                     ycbcr[1] = ycbcr[2] = 0.0;
                     color.rgb = ycbcr_to_rgb(ycbcr.xyz);

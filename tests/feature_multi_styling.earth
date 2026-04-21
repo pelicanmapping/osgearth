@@ -54,8 +54,7 @@ themselves afterwards for a nice outlining effect.
             </style>
             <script><![CDATA[
                 function is_major() {
-                    var v = feature.properties.highway;
-                    return v === 'trunk' || v === 'primary' || v === 'motorway' || v === 'secondary' || v === 'tertiary';
+                    return ['trunk', 'primary', 'motorway', 'secondary', 'tertiary'].includes(feature.properties.highway);  
                 }
               ]]>
             </script>

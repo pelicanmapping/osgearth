@@ -1131,7 +1131,7 @@ BridgeLayer::createTileImplementation(const TileKey& key, ProgressCallback* prog
             if (progress && progress->isCanceled())
                 return;
 
-            OE_NOTICE << "Style name " << in_style.getName() << std::endl;
+            //OE_NOTICE << "Style name " << in_style.getName() << std::endl;
 
             // clamp ground-connection points to the terrain and interpolate midpoints:
             clampRoads(network, in_style, key.getExtent(), _session->getMap()->getElevationPool(), progress);

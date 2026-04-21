@@ -15,9 +15,6 @@
 #   include <pthread.h>
 #endif
 
-// define the threading library singleton
-WEEJOBS_INSTANCE;
-
 using namespace osgEarth;
 
 void osgEarth::setThreadName(const std::string& name)

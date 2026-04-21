@@ -487,9 +487,8 @@ namespace osgEarth
                 }
                 else if (child.get("preset", preset_name))
                 {
-                    const Config& p = presets.get(preset_name);
-                    Config temp = child;
-                    temp.merge(p);
+                    Config temp = presets.get(preset_name);
+                    temp.merge(child);
                     output[value.get()] = T(temp);
                 }
                 else

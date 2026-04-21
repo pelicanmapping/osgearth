@@ -16,7 +16,6 @@ osgEarth Sample - OpeSstreetMap.
         <min_level>14</min_level>
         <max_level>14</max_level>
         <features>data:osm</features>
-        <additive>false</additive>
         <styles>
             <style type="text/css"><![CDATA[
                 poi {

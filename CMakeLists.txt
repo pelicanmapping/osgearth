@@ -13,17 +13,17 @@ endif()
 project(
     OSGEARTH
     DESCRIPTION "osgEarth SDK"
-    HOMEPAGE_URL "https://github.com/gwaldron/osgearth"
+    HOMEPAGE_URL "https://github.com/pelicanmapping/osgearth"
     LANGUAGES CXX C)
 
 # SDK version number
 set(OSGEARTH_MAJOR_VERSION 3)
-set(OSGEARTH_MINOR_VERSION 7)
-set(OSGEARTH_PATCH_VERSION 3)
+set(OSGEARTH_MINOR_VERSION 8)
+set(OSGEARTH_PATCH_VERSION 0)
 set(OSGEARTH_VERSION ${OSGEARTH_MAJOR_VERSION}.${OSGEARTH_MINOR_VERSION}.${OSGEARTH_PATCH_VERSION})
 
 # Increment this each time the ABI changes
-set(OSGEARTH_SOVERSION 182)
+set(OSGEARTH_SOVERSION 186)
 
 # Forces a build that complies with the C++14 API and uses polyfills to do so
 # for C++17 types like variant, optional, and string_view.
@@ -95,6 +95,8 @@ mark_as_advanced(OSGEARTH_BUILD_DOCS)
 
 option(OSGEARTH_BUILD_TESTS "Build the osgEarth unit tests" OFF)
 mark_as_advanced(OSGEARTH_BUILD_TESTS)
+option(OSGEARTH_BUILD_BENCHMARKS "Build the osgEarth benchmarks" OFF)
+mark_as_advanced(OSGEARTH_BUILD_BENCHMARKS)
 
 option(OSGEARTH_BUILD_PROCEDURAL_NODEKIT "Build the procedural terrain nodekit (osgEarthProcedural)" OFF)
 mark_as_advanced(OSGEARTH_BUILD_PROCEDURAL_NODEKIT)
@@ -110,6 +112,9 @@ mark_as_advanced(OSGEARTH_BUILD_ZIP_PLUGIN)
 
 option(OSGEARTH_ENABLE_PROFILING "Enable profiling with Tracy" OFF)
 mark_as_advanced(OSGEARTH_ENABLE_PROFILING)
+
+option(OSGEARTH_ENABLE_S3 "Enable S3 support" OFF)
+mark_as_advanced(OSGEARTH_ENABLE_S3)
 
 option(OSGEARTH_ASSUME_SINGLE_GL_CONTEXT "Assume the use of a single GL context for all GL objects (advanced)" OFF)
 mark_as_advanced(OSGEARTH_ASSUME_SINGLE_GL_CONTEXT)

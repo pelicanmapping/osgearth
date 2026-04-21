@@ -327,7 +327,7 @@ SimplePager::createChildNode(const TileKey& key, ProgressCallback* progress)
         pagedNode->setRadius(tileRadius);
 
         // Install a cluster-culling callback for geocentric data:
-        if (_mapProfile->getSRS()->isGeographic())
+        if (_clusterCullingEnabled && _mapProfile->getSRS()->isGeographic())
         {
             const GeoExtent& ccExtent = key.getExtent();
             if (ccExtent.isValid())

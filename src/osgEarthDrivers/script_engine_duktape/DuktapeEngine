@@ -51,9 +51,8 @@ namespace osgEarth { namespace Drivers { namespace Duktape
             void initialize(const ScriptEngineOptions&, bool);
             osg::ref_ptr<Feature> _feature;
             std::string _bytecodeSource;
+            bool _failed = false;
             duk_context* _ctx = nullptr;
-            unsigned char* _bytecode = nullptr;
-            unsigned _bytecodeSize = 0u;
             unsigned _errorCount = 0u;
         };
 

@@ -178,7 +178,7 @@ Session::initScriptEngine()
         {
             // If the stylesheet has no script set, create a default JS engine
             // This enables the use of "inline" scripting in Expression values
-            _styleScriptEngine = ScriptEngineFactory::create("javascript", "", true);
+            _styleScriptEngine = ScriptEngineFactory::create("javascript");
         }
     }
 }

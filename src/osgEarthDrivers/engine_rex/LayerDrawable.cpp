@@ -195,6 +195,9 @@ LayerDrawableNVGL::refreshRenderState()
             for (int i = 0; i < 4; ++i)
                 buf.tileKey[i] = tile._keyValue[i];
 
+            // Tile span in meters
+            buf.tileSpan = tile._key->getExtent().height(Units::METERS);
+
             // Color sampler and matrix:
             buf.colorIndex = -1;
             buf.parentIndex = -1;

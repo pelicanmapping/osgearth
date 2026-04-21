@@ -43,9 +43,9 @@ ScriptEngineOptions::getConfig() const
 
     if (_script.isSet())
     {
-      if (!_script->getCode().empty()) conf.set("script_code", _script->getCode());
-      if (!_script->getLanguage().empty()) conf.set("script_language", _script->getLanguage());
-      if (!_script->getName().empty()) conf.set("script_name", _script->getName());
+        if (!_script->getCode().empty()) conf.set("script_code", _script->getCode());
+        if (!_script->getLanguage().empty()) conf.set("script_language", _script->getLanguage());
+        if (!_script->getName().empty()) conf.set("script_name", _script->getName());
     }
 
     return conf;
@@ -77,45 +77,56 @@ ScriptEngineFactory*
 ScriptEngineFactory::instance()
 {
     static std::once_flag s_once;
-    static ScriptEngineFactory* s_singleton = nullptr;
+    static osg::ref_ptr<ScriptEngineFactory> s_singleton;
 
     std::call_once(s_once, []() {
         s_singleton = new ScriptEngineFactory();
+        Registry::instance()->registerSingleton(s_singleton.get());
     });
 
     return s_singleton;
 }
 
-ScriptEngine*
-ScriptEngineFactory::create( const std::string& language, const std::string& engineName, bool quiet)
+namespace
 {
-  ScriptEngineOptions opts;
-  opts.setDriver(language + (engineName.empty() ? "" : (std::string("_") + engineName)));
-
-  return create(opts, quiet);
+    std::string makeDriverName(const std::string& language, const std::string& engineName)
+    {
+        if (engineName.empty())
+            return language + "_" + Registry::instance()->getScriptEngineDriverName();
+        else
+            return language + "_" + engineName;
+    }
 }
 
 ScriptEngine*
-ScriptEngineFactory::create( const Script& script, const std::string& engineName, bool quiet)
+ScriptEngineFactory::create(const std::string& language, const std::string& engineName, bool quiet)
 {
-  ScriptEngineOptions opts;
-  opts.setDriver(script.getLanguage() + (engineName.empty() ? "" : (std::string("_") + engineName)));
-  opts.script() = script;
-
-  return create(opts, quiet);
+    ScriptEngineOptions opts;
+    opts.setDriver(makeDriverName(language, engineName));
+    return create(opts, quiet);
 }
 
 ScriptEngine*
-ScriptEngineFactory::createWithProfile( const Script& script, const std::string& profile, const std::string& engineName, bool quiet)
+ScriptEngineFactory::create(const Script& script, const std::string& engineName, bool quiet)
 {
-  ScriptEngineOptions opts;
-  opts.setDriver(script.getLanguage() + (engineName.empty() ? "" : (std::string("_") + engineName)));
-  opts.script() = script;
+    ScriptEngineOptions opts;
+    opts.setDriver(makeDriverName(script.getLanguage(), engineName));
+    opts.script() = script;
 
-  ScriptEngine* e = create(opts, quiet);
-  if ( e )
-      e->setProfile( profile );
-  return e;
+    return create(opts, quiet);
+}
+
+ScriptEngine*
+ScriptEngineFactory::createWithProfile(const Script& script, const std::string& profile, const std::string& engineName, bool quiet)
+{
+    ScriptEngineOptions opts;
+    opts.setDriver(makeDriverName(script.getLanguage(), engineName));
+    opts.script() = script;
+
+    ScriptEngine* e = create(opts, quiet);
+    if (e)
+        e->setProfile(profile);
+    return e;
 }
 
 ScriptEngine*

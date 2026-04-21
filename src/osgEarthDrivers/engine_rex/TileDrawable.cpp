@@ -5,13 +5,10 @@
 #include "TileDrawable"
 #include "EngineContext"
 
-#include <osg/Version>
-#include <osg/KdTree>
-#include <iterator>
 #include <osgEarth/Registry>
-#include <osgEarth/Capabilities>
 #include <osgEarth/ImageUtils>
 #include <osgEarth/Math>
+#include <osg/KdTree>
 
 using namespace osg;
 using namespace osgEarth::REX;
@@ -149,7 +146,7 @@ TileDrawable::setElevationRaster(Texture::Ptr image, const osg::Matrixf& scaleBi
     // Make a temporary geometry to build kdtrees on and copy the shape over
     if (_geom->getDrawElements()->getMode() != GL_PATCHES)
     {
-        osg::ref_ptr< osg::Geometry > tempGeom = new osg::Geometry;
+        osg::ref_ptr<osg::Geometry> tempGeom = new osg::Geometry;
         osg::Vec3Array* tempVerts = new osg::Vec3Array;
         tempVerts->reserve(_mesh.size());
         for (unsigned int i = 0; i < _mesh.size(); i++)
@@ -159,11 +156,15 @@ TileDrawable::setElevationRaster(Texture::Ptr image, const osg::Matrixf& scaleBi
         tempGeom->setVertexArray(tempVerts);
         tempGeom->addPrimitiveSet(_geom->getDrawElements());
 
-        osg::ref_ptr< osg::KdTreeBuilder > kdTreeBuilder = new osg::KdTreeBuilder();
-        tempGeom->accept(*kdTreeBuilder.get());
-        if (tempGeom->getShape())
-        {
-            setShape(tempGeom->getShape());
+        osg::ref_ptr<osg::KdTreeBuilder> kdTreeBuilder = osgDB::Registry::instance()->getKdTreeBuilder();
+        if (kdTreeBuilder)
+        {            
+            kdTreeBuilder = kdTreeBuilder->clone();
+            tempGeom->accept(*kdTreeBuilder);
+            if (tempGeom->getShape())
+            {
+                setShape(tempGeom->getShape());
+            }
         }
     }
 

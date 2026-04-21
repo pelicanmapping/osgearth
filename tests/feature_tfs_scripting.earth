@@ -8,33 +8,23 @@ osgEarth Sample - TFS
         <format>json</format>
     </TFSFeatures>
     
-    <FeatureModel name="buildings" features="buildings-data">
-        <layout>        
-            <tile_size_factor>5.0</tile_size_factor>
-        </layout>
-
+    <TiledFeatureModel name="buildings" features="buildings-data">
         <styles>                
             <style type="text/css">
                 b1 {
-                    extrusion-height:  15;
-                    extrusion-flatten: true;
+                    extrusion-height:  15m;
                     fill:              #ff7f2f;
                     altitude-clamping: terrain;
-                    altitude-resolution: 0.1;
                 }
                 b2 {
-                    extrusion-height:  30;
-                    extrusion-flatten: true;
+                    extrusion-height:  30m;
                     fill:              #2f7fff;
                     altitude-clamping: terrain;
-                    altitude-resolution: 0.1;
                 }
                 b3 {
-                    extrusion-height:  45;
-                    extrusion-flatten: true;
+                    extrusion-height:  45m;
                     fill:              #ff2f7f;
                     altitude-clamping: terrain;
-                    altitude-resolution: 0.1;
                 }
             </style>
 
@@ -52,9 +42,7 @@ osgEarth Sample - TFS
                 ]]>
             </script>
         </styles>  
-
-        <lighting>true</lighting>
-    </FeatureModel>
+    </TiledFeatureModel>
 
     <xi:include href="readymap_imagery.xml"/>
 

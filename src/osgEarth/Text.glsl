@@ -178,6 +178,9 @@ vec4 textColor(vec2 src_texCoord)
         origin += delta_ty;
     }
 
+    if (total_color.a == 0.0)
+        return vec4(0.0, 0.0, 0.0, 0.0);
+
     total_color.rgb /= total_color.a;
     total_color.a *= scale;
 
@@ -233,7 +236,7 @@ vec4 textColor(vec2 src_texCoord)
 #else
 
     float alpha = TEXTURE(glyphTexture, src_texCoord).ALPHA;
-    if (alpha==0.0) vec4(0.0, 0.0, 0.0, 0.0);
+    if (alpha==0.0) return vec4(0.0, 0.0, 0.0, 0.0);
     return vec4(vertexColor.rgb, vertexColor.a * alpha);
 
 #endif

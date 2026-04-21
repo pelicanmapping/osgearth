@@ -1,0 +1,68 @@
+/* osgEarth
+ * Copyright 2025 Pelican Mapping
+ * MIT License
+ */
+#ifndef OSGEARTH_DRIVER_CACHE_SQLITE3
+#define OSGEARTH_DRIVER_CACHE_SQLITE3 1
+
+#include <osgEarth/Common>
+#include <osgEarth/Cache>
+
+namespace osgEarth { namespace Drivers
+{
+    using namespace osgEarth;
+
+    /**
+     * Serializable options for the SQLite3Cache.
+     */
+    class SQLite3CacheOptions : public CacheOptions
+    {
+    public:
+        SQLite3CacheOptions( const ConfigOptions& options =ConfigOptions() )
+            : CacheOptions( options )
+        {
+            setDriver( "sqlite3" );
+            fromConfig( _conf );
+        }
+
+        virtual ~SQLite3CacheOptions() { }
+
+    public:
+        //! Location of the cache files
+        OE_OPTION(std::string, rootPath);
+
+        //! Number of threads to devote to background cache writing
+        OE_OPTION(unsigned, threads, 1u);
+
+        //! Tiemout (milliseconds) when trying to local a db
+        OE_OPTION(unsigned, busyTimeout, 5000u);
+
+        //! Whether to use a separate .db for each CacheBin
+        OE_OPTION(bool, separateBins, true);
+
+    public:
+        virtual Config getConfig() const {
+            Config conf = ConfigOptions::getConfig();
+            conf.set("path", rootPath() );
+            conf.set("threads", threads() );
+            conf.set("busy_timeout", busyTimeout() );
+            conf.set("separate_bins", separateBins() );
+            return conf;
+        }
+        virtual void mergeConfig( const Config& conf ) {
+            ConfigOptions::mergeConfig( conf );
+            fromConfig( conf );
+        }
+
+    private:
+        void fromConfig( const Config& conf ) {
+            conf.get("path", rootPath() );
+            conf.get("threads", threads() );
+            conf.get("busy_timeout", busyTimeout() );
+            conf.get("separate_bins", separateBins() );
+        }
+    };
+
+} } // namespace osgEarth::Drivers
+
+#endif // OSGEARTH_DRIVER_CACHE_SQLITE3

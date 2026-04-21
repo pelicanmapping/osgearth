@@ -78,7 +78,12 @@ macro(add_osgearth_plugin)
     
     # We always need these so just link them here.
     target_link_libraries(${MY_TARGET} PRIVATE osgEarth ${OPENSCENEGRAPH_LIBRARIES} ${MY_LIBRARIES})
-    
+
+    if(SuperluminalAPI_FOUND)
+        #message(STATUS "Found SuperLuminalAPI.")
+        target_link_libraries(${MY_TARGET} PRIVATE SuperluminalAPI)    
+    endif()
+
     # Install any public headers
     if (MY_PUBLIC_HEADERS)
         install(FILES ${MY_PUBLIC_HEADERS} DESTINATION include/osgEarthDrivers/${MY_TARGET_SUFFIX})
@@ -121,6 +126,11 @@ macro(add_osgearth_app)
         
     # We always need these so just link them here.
     target_link_libraries(${MY_TARGET} PRIVATE osgEarth ${OPENSCENEGRAPH_LIBRARIES} ${MY_LIBRARIES})
+
+    if(SuperluminalAPI_FOUND)
+        #message(STATUS "Found SuperLuminalAPI.")
+        target_link_libraries(${MY_TARGET} PRIVATE SuperluminalAPI)    
+    endif()
     
     set_target_properties(${MY_TARGET} PROPERTIES PROJECT_LABEL "${MY_TARGET}")
     
@@ -204,13 +214,18 @@ macro(add_osgearth_library)
     else()
         target_link_libraries(${MY_TARGET} PRIVATE ${OPENSCENEGRAPH_LIBRARIES} ${MY_LIBRARIES})
     endif()
+
     if(MY_PUBLIC_LIBRARIES)
         target_link_libraries(${MY_TARGET} PUBLIC ${MY_PUBLIC_LIBRARIES})
     endif()
     
-    # profiler:
     if(Tracy_FOUND)
         target_link_libraries(${MY_TARGET} PUBLIC Tracy::TracyClient)
+    endif()
+
+    if(SuperluminalAPI_FOUND)
+        #message(STATUS "Found SuperLuminalAPI.")
+        target_link_libraries(${MY_TARGET} PRIVATE SuperluminalAPI)    
     endif()
     
     # soversions - append SO version to shared object files on unix (e.g., osgearth.so.123)

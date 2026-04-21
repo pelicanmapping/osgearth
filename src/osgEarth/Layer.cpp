@@ -454,13 +454,6 @@ void
 Layer::invoke_prepareForRendering(TerrainEngine* engine)
 {
     prepareForRendering(engine);
-
-    // deprecation path; call this in case some older layer is still
-    // implementing it.
-    if (engine)
-    {
-        setTerrainResources(engine->getResources());
-    }
 }
 
 void

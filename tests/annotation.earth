@@ -243,6 +243,23 @@ osgEarth Sample - Annotations
         </feature>
         <label text="Antimeridian polygon" lat="-30" long="-180"/>
 
+		<feature name="Vertical Polygon">
+			<srs>wgs84</srs>
+			<geometry>
+				POLYGON((
+					123.4903 41.6061 195,
+					123.4906 41.6056 195,
+					123.4906 41.6056 390,
+					123.4903 41.6061 390
+				))
+			</geometry>
+			<style>
+                fill: #ff0000;
+                stroke: #00ff00;
+                stroke-width: 2px;
+			</style>
+		</feature>
+        <label text="Vertical Polygon" lat="41.606" long="123.49045"/>
 
     </Annotations>
 </map>

@@ -357,11 +357,11 @@ namespace osgEarth { namespace MVT
                         }
                         else if (value.has_int_value())
                         {
-                            oeFeature->set(key, (long long)value.int_value());
+                            oeFeature->set(key, value.int_value());
                         }
                         else if (value.has_sint_value())
                         {
-                            oeFeature->set(key, (long long)value.sint_value());
+                            oeFeature->set(key, value.sint_value());
                         }
                         else if (value.has_string_value())
                         {
@@ -369,7 +369,7 @@ namespace osgEarth { namespace MVT
                         }
                         else if (value.has_uint_value())
                         {
-                            oeFeature->set(key, (long long)value.uint_value());
+                            oeFeature->set(key, (std::int64_t)value.uint_value());
                         }
 
                         // Special path for getting heights from our test dataset.

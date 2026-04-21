@@ -9,6 +9,10 @@
 #include <osgEarth/Config>
 #include <osgEarth/Feature>
 
+#ifndef OSGEARTH_ENV_SCRIPT_ENGINE
+#define OSGEARTH_ENV_SCRIPT_ENGINE "OSGEARTH_SCRIPT_ENGINE"
+#endif
+
 namespace osgEarth {
     namespace Util
     {
@@ -120,7 +124,7 @@ namespace osgEarth {
 
         //--------------------------------------------------------------------
 
-        class OSGEARTH_EXPORT ScriptEngineFactory
+        class OSGEARTH_EXPORT ScriptEngineFactory : public osg::Referenced
         {
         public:
             static ScriptEngineFactory* instance();
@@ -131,7 +135,7 @@ namespace osgEarth {
             static ScriptEngine* create(const ScriptEngineOptions& options, bool quiet = false);
 
         protected:
-            ScriptEngineFactory() {}
+            ScriptEngineFactory() = default;
 
             std::vector<std::string> _failedDrivers;
         };

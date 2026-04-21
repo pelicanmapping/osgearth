@@ -50,6 +50,7 @@ namespace
          *        the object.
          */
         FileSystemCache( const CacheOptions& options );
+        ~FileSystemCache() override;
 
     public: // Cache interface
 
@@ -202,6 +203,12 @@ namespace
 
         // create a thread pool dedicated to asynchronous cache writes
         setNumThreads(_options.threads().get());
+    }
+
+    FileSystemCache::~FileSystemCache()
+    {
+        // Wait for all jobs to finish
+        _pool->finish_work();
     }
 
     void

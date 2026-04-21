@@ -83,7 +83,7 @@ namespace osgEarth
     };
 
     /** Union of attribute values. The order here must match that of AttributeType. */
-    using AttributeUnion = std::variant<std::monostate, std::string, double, long long, bool>;
+    using AttributeUnion = std::variant<std::monostate, std::string, double, std::int64_t, bool>;
 
     /**
     * A value of an attribute in a feature.
@@ -92,37 +92,58 @@ namespace osgEarth
     */
     struct OSGEARTH_EXPORT AttributeValue : public AttributeUnion
     {
-        inline std::string getString() const {
+        inline const std::string& getString() const {
+            static const std::string not_a_string;
+            OE_SOFT_ASSERT(is<std::string>(), "Attribute value is not a string; consider using getAsString instead");
+            return is<std::string>() ? get<std::string>() : not_a_string;
+        }
+
+        inline std::string getAsString(const std::string& defaultValue = {}) const {
             return
                 is<std::string>() ? get<std::string>() :
                 is<double>() ? std::to_string(get<double>()) :
-                is<long long>() ? std::to_string(get<long long>()) :
+                is<std::int64_t>() ? std::to_string(get<std::int64_t>()) :
                 is<bool>() ? (get<bool>() ? "true" : "false") :
-                std::string{};
+                defaultValue;
         }
 
-        inline double getDouble(double defaultValue = 0.0) const {
+        inline double getDouble() const {
+            OE_SOFT_ASSERT(is<double>(), "Attribute value is not a double; consider using getAsDouble instead");
+            return is<double>() ? get<double>() : 0.0;
+        }
+
+        inline double getAsDouble(double defaultValue = 0.0) const {
             return
                 is<double>() ? get<double>() :
-                is<long long>() ? static_cast<double>(get<long long>()) :
+                is<std::int64_t>() ? static_cast<double>(get<std::int64_t>()) :
                 is<std::string>() ? std::atof(get<std::string>().c_str()) :
                 is<bool>() ? (get<bool>() ? 1.0 : 0.0) :
                 defaultValue;
         }
 
-        inline long long getInt(long long defaultValue = 0) const {
+        inline std::int64_t getInt() const {
+            OE_SOFT_ASSERT(is<std::int64_t>(), "Attribute value is not an int; consider using getAsInt instead");
+            return is<std::int64_t>() ? get<std::int64_t>() : 0LL;
+        }
+
+        inline std::int64_t getAsInt(std::int64_t defaultValue = 0) const {
             return
-                is<long long>() ? get<long long>() :
-                is<double>() ? static_cast<long long>(get<double>()) :
+                is<std::int64_t>() ? get<std::int64_t>() :
+                is<double>() ? static_cast<std::int64_t>(get<double>()) :
                 is<std::string>() ? std::atoll(get<std::string>().c_str()) :
                 is<bool>() ? (get<bool>() ? 1LL : 0LL) :
                 defaultValue;
         }
 
-        inline bool getBool(bool defaultValue = false) const {
+        inline bool getBool() const {
+            OE_SOFT_ASSERT(is<bool>(), "Attribute value is not a bool; consider using getAsBool instead");
+            return is<bool>() ? get<bool>() : false;
+        }
+
+        inline bool getAsBool(bool defaultValue = false) const {
             return
                 is<bool>() ? get<bool>() :
-                is<long long>() ? (get<long long>() != 0LL) :
+                is<std::int64_t>() ? (get<std::int64_t>() != 0LL) :
                 is<double>() ? (get<double>() != 0.0) :
                 is<std::string>() ? Util::ci_equals(get<std::string>(), "true") || get<std::string>() == "on" || get<std::string>() == "1" :
                 defaultValue;
@@ -208,8 +229,12 @@ namespace osgEarth
         void set(const std::string& name, const std::string& value);
         void set(const std::string& name, const char* value);
         void set(const std::string& name, double value);
-        void set(const std::string& name, int value);
-        void set(const std::string& name, long long value);
+        void set(const std::string& name, std::int64_t value);
+        void set(const std::string& name, int value) { set(name, static_cast<std::int64_t>(value)); }
+        void set(const std::string& name, unsigned int value) { set(name, static_cast<std::int64_t>(value)); }
+        void set(const std::string& name, short value) { set(name, static_cast<std::int64_t>(value)); }
+        void set(const std::string& name, unsigned short value) { set(name, static_cast<std::int64_t>(value)); }
+        void set(const std::string& name, unsigned long value) { set(name, static_cast<std::int64_t>(value)); }
         void set(const std::string& name, bool value);
         void set(const std::string& name, const AttributeValue& value);
 
@@ -223,7 +248,7 @@ namespace osgEarth
 
         std::string getString( const std::string& name ) const;
         double getDouble( const std::string& name, double defaultValue =0.0 ) const;
-        long long getInt( const std::string& name, long long defaultValue =0 ) const;
+        std::int64_t getInt( const std::string& name, std::int64_t defaultValue =0 ) const;
         bool getBool( const std::string& name, bool defaultValue =false ) const;
 
         //! Index of the names attribute (for fast access)
@@ -237,7 +262,7 @@ namespace osgEarth
         inline double getDouble(int index) const {
             return _attrs.at(index).getDouble();
         }
-        inline long long getInt(int index) const {
+        inline std::int64_t getInt(int index) const {
             return _attrs.at(index).getInt();
         }
         inline bool getBool(int index) const {
@@ -256,22 +281,6 @@ namespace osgEarth
         /** Geodetic interpolation method. */
         optional<GeoInterpolation>& geoInterp() { return _geoInterp; }
         const optional<GeoInterpolation>& geoInterp() const { return _geoInterp; }
-
-        /** populates the variables of an expression with attribute values and evals the expression. */
-        //double eval(const NumericExpression& expr, const FilterContext* context);
-        //double eval(NumericExpression& expr, const FilterContext* context);
-
-        //double eval(const NumericExpression& expr, Session* session);
-        //double eval(NumericExpression& expr, Session* session);
-
-        ///** populates the variables of an expression with attribute values and evals the expression. */
-        //std::string eval(const StringExpression& expr, const FilterContext* context);
-        //const std::string& eval(StringExpression& expr, const FilterContext* context);
-
-        //std::string eval(const StringExpression& expr, Session* session);
-        //const std::string& eval(StringExpression& expr, Session* session);
-
-        //std::string eval(const std::string& expr, const FilterContext* context) const;
 
     public:
         //! Gets a GeoJSON representation of this Feature.

@@ -59,7 +59,7 @@ namespace osgEarth
             };
 
         private:
-            GeoExtent _extent;
+            Bounds    _bounds;
             GeoExtent _originalExtent;
             unsigned _width = 0, _height = 0;
             osg::ref_ptr< osg::Image > _image;

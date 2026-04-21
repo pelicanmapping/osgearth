@@ -2,6 +2,10 @@ name: macosx-x64
 
 on: [push, pull_request, workflow_dispatch]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Release
@@ -51,6 +55,7 @@ jobs:
           -DCMAKE_CXX_STANDARD_REQUIRED:BOOL=ON \
           -DOSGEARTH_BUILD_LEGACY_SPLAT_NODEKIT=ON \
           -DOSGEARTH_BUILD_PROCEDURAL_NODEKIT=ON \
+          -DOSGEARTH_ENABLE_S3=OFF \
           -DOSGEARTH_BUILD_TESTS=OFF \
           -GXcode -DVCPKG_MANIFEST_DIR=$GITHUB_WORKSPACE
 
@@ -66,7 +71,7 @@ jobs:
     - name: Build
       working-directory: ${{ runner.workspace }}/build
       shell: bash
-      run: cmake --build . --config $BUILD_TYPE
+      run: cmake --build . --config $BUILD_TYPE --parallel
 
     - name: 'Upload cmake build log artifact'
       uses: actions/upload-artifact@v4

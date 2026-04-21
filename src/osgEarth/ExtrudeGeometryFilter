@@ -8,7 +8,6 @@
 #include <osgEarth/Filter>
 #include <osgEarth/Expression>
 #include <osgEarth/Style>
-#include <osg/Geode>
 #include <vector>
 #include <list>
 
@@ -213,3 +212,60 @@ namespace osgEarth { namespace Util
         osg::Drawable* buildOutlineGeometry(const Structure& structure);
     };
 } }
+
+namespace osgEarth
+{
+    /**
+    * Container Node for storing information about extruded geometry
+    * without rendering it. An app can invoke the ExtrudeGeometryFilter
+    * with FilterUsage=... to collect this information.
+    */
+    class ExtrudeGeometryFilterNode : public osg::Node
+    {
+    public:
+        //struct ModelSymbol
+        //{
+        //    URI instanceURI;
+        //    osg::Matrixd xform;
+        //};
+
+        //! Default construct
+        ExtrudeGeometryFilterNode() = default;
+
+        //! Construct with members
+        ExtrudeGeometryFilterNode(osg::Group* extrusionGroup, const osg::Matrixd& xform) :
+            _extrusionGroup(extrusionGroup), _xform(xform) { }
+
+        //! Copy construct
+        ExtrudeGeometryFilterNode(const ExtrudeGeometryFilterNode& rhs, const osg::CopyOp& copyop) :
+            osg::Node(rhs, copyop),
+            _extrusionGroup(rhs._extrusionGroup),
+            _xform(rhs._xform) { }
+
+        META_Node(osgEarth, ExtrudeGeometryFilterNode);
+
+        const osg::Matrixd& xform() const { return _xform; }
+        void set_xform(const osg::Matrixd& xform) { _xform = xform; } // for serializer
+        const osg::Matrixd& get_xform() const { return _xform; } // for serializer
+
+        const osg::Group* extrusionGroup() const { return _extrusionGroup.get(); }
+        void set_extrusionGroup(osg::Group* group) { _extrusionGroup = group; }
+        const osg::Group* get_extrusionGroup() const { return _extrusionGroup.get(); } // for serializer
+
+        void clearExtrusionGroup() {
+            _extrusionGroup = 0;
+        }
+
+    public: // osg::Node
+
+        osg::BoundingSphere computeBound() const override {
+            return _extrusionGroup.valid() ? _extrusionGroup->computeBound() : osg::BoundingSphere();
+        }
+
+    private:
+
+        osg::ref_ptr<osg::Group> _extrusionGroup;
+        osg::Matrixd _xform;
+    };
+}
+

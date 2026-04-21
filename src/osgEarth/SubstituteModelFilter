@@ -2,9 +2,7 @@
  * Copyright 2025 Pelican Mapping
  * MIT License
  */
-
-#ifndef OSGEARTHFEATURES_SUBSTITUTE_MODEL_FILTER_H
-#define OSGEARTHFEATURES_SUBSTITUTE_MODEL_FILTER_H 1
+#pragma once
 
 #include <osgEarth/Common>
 #include <osgEarth/Feature>
@@ -46,11 +44,17 @@ namespace osgEarth { namespace Util
         void setFeatureNameExpr( const StringExpression& expr ) { _featureNameExpr = expr; }
         const StringExpression& getFeatureNameExpr() const { return _featureNameExpr; }
 
+        //! In PARAMETRIC mode, tells the filter to generate separate node data and matrices for input, instead of
+        //! creating a fully optimized renderable output.
+        void setFilterUsage(FilterUsage usage) { _filterUsage = usage; }
+        FilterUsage getFilterUsage(void) const{ return _filterUsage; }
+
     public:
         /** Processes a new feature list */
         virtual osg::Node* push( FeatureList& input, FilterContext& context );
 
     protected:
+        FilterUsage                   _filterUsage;
         Style                         _style;
         bool                          _cluster;
         bool                          _useDrawInstanced;
@@ -68,4 +72,60 @@ namespace osgEarth { namespace Util
     };
 } }
 
-#endif // OSGEARTHFEATURES_SUBSTITUTE_MODEL_FILTER_H
+namespace osgEarth
+{
+    /**
+    * Container Node for storing information about extruded geometry
+    * without rendering it. An app can invoke the ExtrudeGeometryFilter
+    * with FilterUsage=... to collect this information.
+    */
+    class OSGEARTH_EXPORT SubstituteModelFilterNode : public osg::Node
+    {
+    public:
+        struct ModelSymbol
+        {
+            URI instanceURI;
+            osg::Matrixd xform;
+        };
+
+        SubstituteModelFilterNode() = default;
+
+        SubstituteModelFilterNode(const SubstituteModelFilterNode& rhs, const osg::CopyOp& copyop) :
+            osg::Node(rhs, copyop),
+            _instanced(rhs._instanced),
+            _clustered(rhs._clustered),
+            _modelSymbolList(rhs._modelSymbolList) { }
+
+        META_Node(osgEarth, SubstituteModelFilterNode);
+
+
+        typedef std::list<ModelSymbol> ModelSymbolList;
+
+        ModelSymbolList& modelSymbolList()
+        {
+            return _modelSymbolList;
+        }
+        const ModelSymbolList& modelSymbolList() const
+        {
+            return _modelSymbolList;
+        }
+        bool getInstanced(void) const { return _instanced; }
+        void setInstanced(bool instanced) { _instanced = instanced; }
+
+        bool getClustered(void) const { return _clustered; }
+        void setClustered(bool clustered) { _clustered = clustered; }
+
+        osg::BoundingSphere computeBound() const override {
+            osg::BoundingSphere bs;
+            for (auto& entry : _modelSymbolList) {
+                bs.expandBy(osg::Vec3d(0, 0, 0) * entry.xform);
+            }
+            return bs;
+        }
+
+    private:
+        bool _instanced = false;
+        bool _clustered = false;
+        ModelSymbolList _modelSymbolList;
+    };
+}

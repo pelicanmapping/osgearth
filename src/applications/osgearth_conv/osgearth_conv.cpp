@@ -477,22 +477,6 @@ main(int argc, char** argv)
         return -1;
     }
 
-    // collect output configuration:
-    bool compress = false;
-    Config outConf;
-    while (args.read("--out", key, value))
-    {
-        outConf.set(key, value);
-
-        // special case: turn on compression when using dds at the output format
-        // and disable the built-in image flipping logic
-        if (key == "format" && value == "dds")
-        {
-            compress = true;
-            //dbo->setOptionString("ddsNoAutoFlipWrite " + dbo->getOptionString());
-        }
-    }
-    outConf.key() = outConf.value("driver");
 
     // are we changing profiles?
     osg::ref_ptr<const Profile> outputProfile = input->getProfile();
@@ -510,9 +494,95 @@ main(int argc, char** argv)
         isSameProfile = outputProfile->isHorizEquivalentTo(input->getProfile());
     }
 
+
+    // set the manual extents, if specified:
+    double minlat, minlon, maxlat, maxlon;
+    optional<GeoExtent> userExtent;
+    while (args.read("--extents", minlat, minlon, maxlat, maxlon))
+    {
+        userExtent = GeoExtent(SpatialReference::get("wgs84"), minlon, minlat, maxlon, maxlat);
+        if (userExtent->isInvalid())
+            userExtent.clear();
+    }
+
+
+
+
+    // Set the level limits:
+    unsigned minLevel = ~0;
+    bool minLevelSet = args.read("--min-level", minLevel);
+
+    unsigned maxLevel = 0;
+    bool maxLevelSet = args.read("--max-level", maxLevel);
+
+
+    std::vector<DataExtent> extentsToVisit;
+    optional<unsigned> minLevelToVisit;
+    optional<unsigned> maxLevelToVisit;
+
+    // figure out the max source level:
+    if (!minLevelSet || !maxLevelSet)
+    {
+        DataExtentList dataExtents;
+        input->getDataExtents(dataExtents);
+        for (auto& de : dataExtents)
+        {
+            if (!maxLevelSet && de.maxLevel().isSet() && de.maxLevel().get() > maxLevel)
+                maxLevel = de.maxLevel().get();
+
+            if (!minLevelSet && de.minLevel().isSet() && de.minLevel().get() < minLevel)
+                minLevel = de.minLevel().get();
+
+            if (!userExtent.isSet())
+            {
+                extentsToVisit.emplace_back(de);
+            }
+        }
+    }
+
+    if (minLevel < ~0)
+    {
+        minLevelToVisit = minLevel;
+    }
+
+    if (maxLevel > 0)
+    {
+        maxLevel = outputProfile->getEquivalentLOD(input->getProfile(), maxLevel);
+        maxLevelToVisit = maxLevel;
+    }
+
+
+
+
+
+
+
+
+
+    // collect output configuration:
+    bool compress = false;
+    Config outConf;
+    while (args.read("--out", key, value))
+    {
+        outConf.set(key, value);
+
+        // special case: turn on compression when using dds at the output format
+        // and disable the built-in image flipping logic
+        if (key == "format" && value == "dds")
+        {
+            compress = true;
+        }
+    }
+    outConf.key() = outConf.value("driver");
+
     // set the output profile.
     ProfileOptions profileOptions = outputProfile->toProfileOptions();
     outConf.add("profile", profileOptions.getConfig());
+
+    if (maxLevelToVisit.isSet())
+    {
+        outConf.set("max_data_level", maxLevelToVisit.value());
+    }
 
     // open the output tile source:
     auto layer = Layer::create(ConfigOptions(outConf));
@@ -539,6 +609,10 @@ main(int argc, char** argv)
     OE_NOTICE << LC << "TO:\n"
         << outConf.toJSON(true)
         << std::endl;
+
+
+
+
 
     // create the visitor.
     osg::ref_ptr<TileVisitor> visitor;
@@ -573,15 +647,6 @@ main(int argc, char** argv)
             threaded_writer));
     }
 
-    // set the manual extents, if specified:
-    double minlat, minlon, maxlat, maxlon;
-    GeoExtent userExtent;
-    while (args.read("--extents", minlat, minlon, maxlat, maxlon))
-    {
-        userExtent = GeoExtent(SpatialReference::get("wgs84"), minlon, minlat, maxlon, maxlat);
-        visitor->addExtentToVisit(userExtent);
-    }
-
     // Read in an index shapefile to drive where to tile
     std::string index;
 
@@ -607,44 +672,30 @@ main(int argc, char** argv)
         }
     }
 
-    // Set the level limits:
-    unsigned minLevel = ~0;
-    bool minLevelSet = args.read("--min-level", minLevel);
 
-    unsigned maxLevel = 0;
-    bool maxLevelSet = args.read("--max-level", maxLevel);
 
-    // figure out the max source level:
-    if (!minLevelSet || !maxLevelSet)
+    if (userExtent.isSet())
     {
-        DataExtentList dataExtents;
-        input->getDataExtents(dataExtents);
-        for (auto& de : dataExtents)
-        {
-            if (!maxLevelSet && de.maxLevel().isSet() && de.maxLevel().get() > maxLevel)
-                maxLevel = de.maxLevel().get();
-
-            if (!minLevelSet && de.minLevel().isSet() && de.minLevel().get() < minLevel)
-                minLevel = de.minLevel().get();
-
-            if (userExtent.isInvalid())
-            {
-                visitor->addExtentToVisit(de);
-            }
-        }
+        visitor->addExtentToVisit(userExtent.value());
+    }
+    else
+    {
+        for (auto& de : extentsToVisit)
+            visitor->addExtentToVisit(de);
     }
 
-    if (minLevel < ~0)
+    if (minLevelToVisit.isSet())
     {
-        visitor->setMinLevel(minLevel);
+        visitor->setMinLevel(minLevelToVisit.get());
     }
 
-    if (maxLevel > 0)
+    if (maxLevelToVisit.isSet())
     {
-        maxLevel = outputProfile->getEquivalentLOD(input->getProfile(), maxLevel);
-        visitor->setMaxLevel(maxLevel);
+        visitor->setMaxLevel(maxLevelToVisit.get());
         OE_NOTICE << LC << "Calculated max level = " << maxLevel << std::endl;
     }
+
+
 
     // If we've not added any extents to visit just add the entire input extent
     if (visitor->getExtentsToVisit().empty())
@@ -653,7 +704,7 @@ main(int argc, char** argv)
     }
 
     DataExtentList outputExtents;
-    if (userExtent.isInvalid())
+    if (!userExtent.isSet())
     {
         // Transform and copy over the data extents to the output datasource.
         DataExtentList inputExtents;
@@ -671,7 +722,7 @@ main(int argc, char** argv)
     else
     {
         // Use the user set extents
-        GeoExtent outputExtent = outputProfile->clampAndTransformExtent(userExtent);
+        GeoExtent outputExtent = outputProfile->clampAndTransformExtent(userExtent.value());
         DataExtent result(outputExtent, outputProfile->getEquivalentLOD(input->getProfile(), minLevel), outputProfile->getEquivalentLOD(input->getProfile(), maxLevel));
         outputExtents.push_back(result);
     }

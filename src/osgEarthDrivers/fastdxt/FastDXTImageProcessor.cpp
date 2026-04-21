@@ -64,9 +64,9 @@ void padImageToMultipleOf4(osg::Image* input)
 
     osg::Vec4 pixel;
 
-    for (unsigned t = 0; t < read.t(); ++t)
+    for (int t = 0; t < read.t(); ++t)
     {
-        for (unsigned s = 0; s < read.s(); ++s)
+        for (int s = 0; s < read.s(); ++s)
         {
             read(pixel, s, t);
             write(pixel, s, t);

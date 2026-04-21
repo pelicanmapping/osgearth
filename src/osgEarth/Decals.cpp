@@ -311,7 +311,7 @@ DecalDecorator::setBindings(Util::ShaderPackage& package) const
 void
 DecalDecorator::dirtyUniforms()
 {
-    for (int i = 0; i < _globjects.size(); ++i)
+    for (unsigned i = 0; i < _globjects.size(); ++i)
     {
         _globjects[i].dirty = true;
     }

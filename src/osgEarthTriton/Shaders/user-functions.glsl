@@ -50,6 +50,15 @@ void user_decal_color(in vec4 textureColor, in float alpha, in vec4 lightColor, 
 {
 
 }
+
+// Override the depth calculation for the decal fragment. May be needed if you are using a
+// logarithmic depth buffer, as the depth texture used for decals is always linear.
+// See also the overridePosition function in user-vert-functions.glsl if you are manipulating
+// depth values.
+void user_decal_depth(inout float depth)
+{
+
+}
 #endif
 
 //adjust the reflection color prior to it being used by triton.

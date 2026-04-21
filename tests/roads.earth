@@ -25,7 +25,24 @@ https://readymap.org
 
     <DebugImage name="TileKey debug" open="false"/>
 
-    <FeatureModel name="Road center-line verts">
+    <TiledFeatureModel name="Road center-line" open="true">
+        <profile>spherical-mercator</profile>
+        <features>roads-data</features>
+        <styles>
+            <style type="text/css">
+                default {
+                    stroke: #00ffff7f;
+                    stroke-width: 8m;
+                    stroke-linejoin: miter;
+                    stroke-linecap: flat;
+                    render-depth-offset: 25m;
+                    altitude-clamping: terrain;
+                }
+            </style>
+        </styles>
+    </TiledFeatureModel>
+
+    <TiledFeatureModel name="Road center-line verts">
         <profile>spherical-mercator</profile>
         <features>roads-data</features>
         <styles>
@@ -42,24 +59,7 @@ https://readymap.org
                 }
             </style>
         </styles>
-    </FeatureModel>
-
-    <FeatureModel name="Road center-line" open="true">
-        <profile>spherical-mercator</profile>
-        <features>roads-data</features>
-        <styles>
-            <style type="text/css">
-                default {
-                    stroke: #00ffff7f;
-                    stroke-width: 8m;
-                    stroke-linejoin: miter;
-                    stroke-linecap: flat;
-                    render-depth-offset: true;
-                    altitude-clamping: terrain;
-                }
-            </style>
-        </styles>
-    </FeatureModel>
+    </TiledFeatureModel>
 
     <TiledFeatureModel name="Road surface - mesh" open="false">
         <profile>spherical-mercator</profile>

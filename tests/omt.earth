@@ -126,19 +126,19 @@
                     select: 'capital' in feature.properties;
                     text: feature.properties.name_en;
                     text-align: center_center;
-                    text-size: 30.0f;
+                    text-size: 30.0;
                     text-halo: #2f2f2f;
-                    text-priority: 100.0-parseDouble(feature.properties.rank);
+                    text-priority: 100.0-parseFloat(feature.properties.rank);
                     text-declutter: true;
                 }
                 capital {
                     select: !('capital' in feature.properties);
                     text: feature.properties.name_en;
                     text-align: center_center;
-                    text-size: 22.0f;
+                    text-size: 22.0;
                     text-fill: #efefff;
                     text-halo: #2f2f2f;
-                    text-priority: 100.0-parseDouble(feature.properties.rank); 
+                    text-priority: 100.0-parseFloat(feature.properties.rank); 
                     text-declutter: true;
                 }
             ]]></style>            

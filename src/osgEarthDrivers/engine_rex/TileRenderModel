@@ -53,6 +53,8 @@ namespace osgEarth { namespace REX
         GLint drawOrder; // todo: stuff this somewhere else?
         GLfloat elevMin; // min tile elevation
         GLfloat elevMax; // max tile elevation
+        GLfloat tileSpan; // tile width in meters
+        GLfloat padding[3];
     };
     static_assert(sizeof(GL4Tile) % 16 == 0, "GL4Tile must be aligned to 16 bytes for std430");
 

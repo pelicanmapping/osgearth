@@ -2,16 +2,29 @@
  * Copyright 2025 Pelican Mapping
  * MIT License
  */
-#ifndef OSGEARTHFEATURES_FILTER_H
-#define OSGEARTHFEATURES_FILTER_H 1
+#pragma once
 
 #include <osgEarth/Common>
 #include <osgEarth/Feature>
 #include <osgEarth/FilterContext>
 #include <osgEarth/GeoData>
 #include <osg/Matrixd>
-#include <list>
+#include <vector>
 
+namespace osgEarth
+{
+    //! Hint to a filter about the type of output to produce.
+    enum FilterUsage
+    {
+        //! Generate optimized output, ready for rendering
+        FILTER_USAGE_NORMAL = 0,
+
+        //! Generate simple output with the expectation that it will be further processed
+        //! later in the pipeline
+        FILTER_USAGE_PARAMETRIC = 1,
+        FILTER_USAGE_ZERO_WORK_CALLBACK_BASED = 1 // alias, compatibility with old code
+    };
+}
 
 namespace osgEarth { namespace Util
 {
@@ -94,7 +107,7 @@ namespace osgEarth { namespace Util
         virtual FeatureFilter* create( const Config& conf ) = 0;
     };    
 
-    typedef std::list< osg::ref_ptr< FeatureFilterFactory > > FeatureFilterFactoryList;
+    using FeatureFilterFactoryList = std::vector<osg::ref_ptr<FeatureFilterFactory>>;
 
     /**
      * A registry of FeatureFilter plugins
@@ -228,4 +241,3 @@ namespace osgEarth { namespace Util
 
 } }
 
-#endif // OSGEARTHFEATURES_FILTER_H

@@ -65,7 +65,7 @@ namespace osgEarth
     /**
      * Registry for ColorFilter serialization support.
      */
-    class OSGEARTH_EXPORT ColorFilterRegistry
+    class OSGEARTH_EXPORT ColorFilterRegistry : public osg::Referenced
     {
     public:
         static ColorFilterRegistry* instance();

@@ -46,11 +46,12 @@ AnnotationRegistry::instance()
     // OK to be in the local scope since this gets called at static init time
     // by the OSGEARTH_REGISTER_ANNOTATION macro
     static std::once_flag s_once;
-    static AnnotationRegistry* s_singleton = nullptr;
+    static osg::ref_ptr<AnnotationRegistry> s_singleton;
     static std::mutex s_singletonMutex;
 
     std::call_once(s_once, []() {
         s_singleton = new AnnotationRegistry();
+        Registry::instance()->registerSingleton(s_singleton.get());
     });
 
     return s_singleton;

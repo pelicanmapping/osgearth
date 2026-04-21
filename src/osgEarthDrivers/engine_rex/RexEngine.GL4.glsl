@@ -22,6 +22,8 @@ struct oe_rex_Tile {
     int drawOrder;
     float elevMin;
     float elevMax;
+    float tileSpan;
+    float padding[3];
     //float padding[2];
 };
 layout(binding = 29, std430) readonly buffer RexTextureArena {

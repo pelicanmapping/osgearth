@@ -1419,7 +1419,7 @@ GDAL_detail::Driver::createHeightField(const TileKey& key, unsigned tileSize, Pr
 
             if (!hasNoDataValue)
             {
-                double ri, ci, realPart;
+                double ri, ci;
 
                 GDALRIOResampleAlg alg =
                     gdalOptions().interpolation() == INTERP_AVERAGE ? GRIORA_Average : // note: broken
@@ -1502,9 +1502,9 @@ GDAL_detail::Driver::createHeightField(const TileKey& key, unsigned tileSize, Pr
 
             // flip the raster, and scale by linear units
             int halfHeight = tileSize / 2;
-            for (int t = 0; t < tileSize; ++t)
+            for (int t = 0; t < (int)tileSize; ++t)
             {
-                for (int s = 0; s < tileSize; ++s)
+                for (int s = 0; s < (int)tileSize; ++s)
                 {
                     if (t < halfHeight)
                         std::swap(hf_raw[t * tileSize + s], hf_raw[(tileSize - t - 1) * tileSize + s]);
@@ -2305,10 +2305,10 @@ osgEarth::GDAL_detail::heightFieldToTiff(const osg::HeightField* hf)
     std::vector<float> heights;
     heights.reserve(width * height);
     // Flip the heightfield to match the GDAL orientation
-    for (unsigned int r = 0; r < height; ++r)
+    for (int r = 0; r < height; ++r)
     {
-        unsigned int inv_r = height - r - 1;
-        for (unsigned int c = 0; c < width; ++c)
+        int inv_r = height - r - 1;
+        for (int c = 0; c < width; ++c)
         {
             heights.push_back(hf->getHeight(c, inv_r));
         }

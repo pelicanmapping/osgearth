@@ -15,8 +15,6 @@ using namespace osgEarth::Contrib;
 MouseCoordsTool::MouseCoordsTool( MapNode* mapNode, LabelControl* label, Formatter* formatter ) :
 _mapNode( mapNode )
 {
-    _mapNodePath.push_back( mapNode->getTerrainEngine()->getNode() );
-
     if ( label )
     {
         addCallback( new MouseCoordsLabelCallback(label, formatter) );
@@ -32,6 +30,14 @@ MouseCoordsTool::addCallback( MouseCoordsTool::Callback* cb )
 bool
 MouseCoordsTool::handle( const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& aa )
 {
+    if (!_mapNode || !_mapNode->getTerrainEngine())
+        return false;
+
+    if (_mapNodePath.empty())
+    {
+        _mapNodePath.push_back(_mapNode->getTerrainEngine()->getNode());
+    }
+
     if (ea.getEventType() == ea.MOVE || ea.getEventType() == ea.DRAG)
     {
         osg::Vec3d world;

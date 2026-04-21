@@ -350,14 +350,14 @@ XYZElevationLayer::createHeightFieldImplementation(const TileKey& key, ProgressC
         key.getExtent().getBounds(xmin, ymin, xmax, ymax);
 
         osg::Vec4f pixel;
-        for (int c = 0; c < getTileSize(); c++)
+        for (int c = 0; c < (int)getTileSize(); c++)
         {
             if (progress && progress->isCanceled())
                 return {};
 
             double u = (double)c / (double)(getTileSize() - 1);
             double x = xmin + u * (xmax - xmin);
-            for (int r = 0; r < getTileSize(); r++)
+            for (int r = 0; r < (int)getTileSize(); r++)
             {
                 double v = (double)r / (double)(getTileSize() - 1);
                 double y = ymin + v * (ymax - ymin);

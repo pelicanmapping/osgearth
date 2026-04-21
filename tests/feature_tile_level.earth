@@ -19,7 +19,7 @@ Shows how to use the seelct-symbol with feature.tile_level
         <min_level>2</min_level>
         <max_level>2</max_level>
         <styles>
-            <style type="text/css">
+            <style>
                 world {
                    stroke:       #9f9f7f;
                    stroke-width: 2px;
@@ -34,7 +34,7 @@ Shows how to use the seelct-symbol with feature.tile_level
         <profile>global-geodetic</profile>  
         <max_level>8</max_level>
         <styles>            
-            <style type="text/css"> <![CDATA[
+            <style> <![CDATA[
                 label {
                     text-declutter: true;
                     text-content:   feature.properties.name;

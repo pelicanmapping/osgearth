@@ -25,24 +25,24 @@ namespace
         return a + (b - a)*t;
     }
 
+    // clamp "a" to [lo..hi].
+    double inline clamp(double a, double lo, double hi)
+    {
+        return a < lo ? lo : a > hi ? hi : a;
+    }
+
     // smoothstep (cos approx) interpolation between a and b
     double inline smoothstep(double a, double b, double t)
     {
         // smoothstep (approximates cosine):
-        t = t * t*(3.0 - 2.0*t);
-        return a + (b - a)*t;
+        t = (-2.0 * t * t * t) + (3.0 * t * t);
+        return mix(a, b, clamp(t, 0.0, 1.0));
     }
 
     double inline smootherstep(double a, double b, double t)
     {
-        t = t * t*t*(t*(t*6.0 - 15.0) + 10.0);
-        return a + (b - a)*t;
-    }
-
-    // clamp "a" to [lo..hi].
-    double inline clamp(double a, double lo, double hi)
-    {
-        return osg::maximum(osg::minimum(a, hi), lo);
+        t = (6.0 * t * t * t * t * t) - (15.0 * t * t * t * t) + (10.0 * t * t * t);
+        return mix(a, b, clamp(t, 0.0, 1.0));
     }
 
     typedef osg::Vec3d POINT;
@@ -327,8 +327,8 @@ namespace
         {
             Sample* b2 = &samples[i];
             if (b1 == b2) continue;
-            if (b1->T == 0.0 && (EQ2(b1->A, b2->A) || EQ2(b1->A, b2->B))) return false;
-            if (b1->T == 1.0 && (EQ2(b1->B, b2->A) || EQ2(b1->B, b2->B))) return false;
+            if (equivalent(b1->T, 0.0) && (EQ2(b1->A, b2->A) || EQ2(b1->A, b2->B))) return false;
+            if (equivalent(b1->T, 1.0) && (EQ2(b1->B, b2->A) || EQ2(b1->B, b2->B))) return false;
         }
         return true;
     }
@@ -570,7 +570,7 @@ namespace
 
                     osg::Vec3d AP = P - A;    // vector from endpoint A to point P
 
-                    if (L2 == 0.0)
+                    if (equivalent(L2, 0.0))
                     {
                         // trivial case: zero-length segment
                         t = 0.0;
@@ -664,31 +664,16 @@ namespace
                             (sample.D - sample.innerRadius) / (sample.outerRadius - sample.innerRadius),
                             0.0, 1.0);
 
-                        if (sample.T == 0.0)
-                        {
-                            sample.elevPROJ = sample.AElev;
-                            if (sample.elevPROJ == NO_DATA_VALUE)
-                                sample.elevPROJ = elevP;
-                        }
-                        else if (sample.T == 1.0)
-                        {
-                            sample.elevPROJ = sample.BElev;
-                            if (sample.elevPROJ == NO_DATA_VALUE)
-                                sample.elevPROJ = elevP;
-                        }
+                        float a = sample.AElev;
+                        float b = sample.BElev;
+                        if (a == NO_DATA_VALUE && b != NO_DATA_VALUE)
+                            sample.elevPROJ = b;
+                        else if (a != NO_DATA_VALUE && b == NO_DATA_VALUE)
+                            sample.elevPROJ = a;
+                        else if (a == NO_DATA_VALUE && b == NO_DATA_VALUE)
+                            sample.elevPROJ = elevP;
                         else
-                        {
-                            float elevA = sample.AElev;
-                            if (elevA == NO_DATA_VALUE)
-                                elevA = elevP;
-
-                            float elevB = sample.BElev;
-                            if (elevB == NO_DATA_VALUE)
-                                elevB = elevP;
-
-                            // linear interpolation of height from point A to point B on the segment:
-                            sample.elevPROJ = mix(elevA, elevB, sample.T);
-                        }
+                            sample.elevPROJ = mix(a, b, sample.T);
 
                         // smoothstep interpolation of along the buffer (perpendicular to the segment)
                         // will gently integrate the new value into the existing terrain.
@@ -863,24 +848,23 @@ FlatteningLayer::addedToMap(const Map* map)
     // Collect all elevation layers preceding this one and use them for flattening.
     ElevationLayerVector layers;
     map->getLayers(layers);
-    for (ElevationLayerVector::iterator i = layers.begin(); i != layers.end(); ++i) {
-        if (i->get() == this) {
-            layers.erase(i);
-            break;
-        }
-        else {
-            OE_DEBUG << LC << "Using: " << i->get()->getName() << "\n";
-        }
-    }
-    if (!layers.empty())
+    
+    ElevationLayerVector layersToUse;
+    for (auto& layer : layers)
     {
-        _elevWorkingSet.setElevationLayers(layers);
+        if (layer.get() == this)
+            break;
+
+        layersToUse.push_back(layer);
+    }
+
+    if (!layersToUse.empty())
+    {
+        _elevWorkingSet.setElevationLayers(layersToUse);
     }
 
     // Initialize the elevation pool with our map:
-    //OE_DEBUG << LC << "Attaching elevation pool to map" << std::endl;
     _pool = map->getElevationPool();
-    //_pool->setMap(map);
 
     // Make a feature session
     _session = new Session(map);

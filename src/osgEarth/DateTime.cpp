@@ -89,6 +89,8 @@ _time_t(0)
 {
     bool ok = false;
     int year, month, day, hour, min, sec;
+    char smonth[4];
+    char swdky[4];
     
     ::memset( &_tm, 0, sizeof(tm) );
 
@@ -131,6 +133,28 @@ _time_t(0)
         _tm.tm_min  = min;
         _tm.tm_sec  = sec;
         ok = true;
+    }
+    else if (sscanf(input.c_str(), "%3s, %2d %3s %4d %2d:%2d:%2d", swdky, &day, smonth, &year, &hour, &min, &sec) == 7)
+    {
+        // try RFC 1123 format: "Sun, 06 Nov 1994 08:49:37 GMT"
+        _tm.tm_year = year - 1900;
+        _tm.tm_mon = -1;
+        for (int i = 0; i < 12; ++i)
+        {
+            if (strncmp(smonth, rfc_month[i], 3) == 0)
+            {
+                _tm.tm_mon = i;
+                break;
+            }
+        }
+        if (_tm.tm_mon >= 0)
+        {
+            _tm.tm_mday = day;
+            _tm.tm_hour = hour;
+            _tm.tm_min = min;
+            _tm.tm_sec = sec;
+            ok = true;
+        }
     }
 
     if ( ok )

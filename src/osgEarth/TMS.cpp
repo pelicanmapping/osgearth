@@ -378,6 +378,7 @@ TileMap::generateTileSets(unsigned int numLevels)
 TileMap*
 TileMap::create(const std::string& url,
                 const Profile*     profile,
+                unsigned maxDataLevel,
                 const DataExtentList& dataExtents,
                 const std::string& format,
                 int                tile_width,
@@ -430,7 +431,7 @@ TileMap::create(const std::string& url,
         tileMap->setExtents(bounds.xMin(), bounds.yMin(), bounds.xMax(), bounds.yMax());
     }
 
-    tileMap->generateTileSets();
+    tileMap->generateTileSets(maxDataLevel > 0u ? std::min(maxDataLevel+1u, 20u) : 20u);
     tileMap->computeMinMaxLevel();
 
     return tileMap;
@@ -812,6 +813,7 @@ TMS::Driver::open(const URI& uri,
                   osg::ref_ptr<const Profile>& profile,
                   const std::string& format,
                   bool isCoverage,
+                  unsigned maxDataLevel,
                   DataExtentList& dataExtents,
                   const osgDB::Options* readOptions)
 {
@@ -857,6 +859,7 @@ TMS::Driver::open(const URI& uri,
         _tileMap = TMS::TileMap::create(
             uri.full(),
             profile.get(),
+            maxDataLevel,
             extents,
             format,
             256,
@@ -1218,6 +1221,7 @@ TMSImageLayer::openImplementation()
         profile,
         options().format().get(),
         options().coverage().get(),
+        options().maxDataLevel().get(),
         dataExtents,
         getReadOptions());
 
@@ -1432,14 +1436,14 @@ TMSElevationLayer::createHeightFieldImplementation(const TileKey& key, ProgressC
         key.getExtent().getBounds(xmin, ymin, xmax, ymax);
 
         osg::Vec4f pixel;
-        for (int c = 0; c < getTileSize(); c++)
+        for (int c = 0; c < (int)getTileSize(); c++)
         {
             if (progress && progress->isCanceled())
                 return {};
             
             double u = (double)c / (double)(getTileSize() - 1);
             double x = xmin + u * (xmax - xmin);
-            for (int r = 0; r < getTileSize(); r++)
+            for (int r = 0; r < (int)getTileSize(); r++)
             {
                 double v = (double)r / (double)(getTileSize() - 1);
                 double y = ymin + v * (ymax - ymin);

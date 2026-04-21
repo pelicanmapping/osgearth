@@ -173,13 +173,13 @@ TEST_CASE("Feature handles attributes correctly.")
         feature->set("double", 6.0);
         REQUIRE(feature->getDouble("double") == 6.0);
 
-        feature->set("int", 8);
+        feature->set("int", static_cast<std::int64_t>(8));
         REQUIRE(feature->getInt("int") == 8);
 
-        feature->set("int64", static_cast<long long>(4549941524));
+        feature->set("int64", static_cast<std::int64_t>(4549941524));
         REQUIRE(feature->getInt("int64") == 4549941524);
 
-        feature->set("int64max", static_cast<long long>(INT64_MAX));
+        feature->set("int64max", static_cast<std::int64_t>(INT64_MAX));
         REQUIRE(feature->getInt("int64max") == INT64_MAX);
 
         feature->set("bool", true);
@@ -202,7 +202,7 @@ TEST_CASE("Feature handles attributes correctly.")
         REQUIRE(feature->isSet("double") == false);
         REQUIRE(feature->getDouble("double") == 0.0);
 
-        feature->set("int", 8);
+        feature->set("int", std::int64_t(8));
         REQUIRE(feature->isSet("int") == true);
         feature->setNull("int");
         REQUIRE(feature->isSet("int") == false);

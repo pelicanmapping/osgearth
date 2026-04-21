@@ -682,6 +682,7 @@ ImageLayer::assembleImage(const TileKey& key, ProgressCallback* progress)
             // new output:
             auto mosaic = new osg::Image();
             mosaic->allocateImage(cols, rows, layers, proto->getPixelFormat(), proto->getDataType());
+            mosaic->setInternalTextureFormat(proto->getInternalTextureFormat());
 
             // Working set of points. it's much faster to xform an entire vector all at once.
             std::vector<osg::Vec3d> points;

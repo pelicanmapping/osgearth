@@ -264,7 +264,7 @@ namespace osgEarth
                             case osgEarth::ATTRTYPE_INT:
                             {
                                 int64_t v = readInt64(is);
-                                feature->set(attrName, static_cast<long long>(v));
+                                feature->set(attrName, static_cast<std::int64_t>(v));
                                 break;
                             }
                             default:

@@ -54,8 +54,8 @@ namespace osgEarth
 
         void install(osg::RenderInfo& ri)
         {
-            URI refgrid("https://github.com/gwaldron/osgearth/blob/master/data/reference_grid.jpg?raw=true");
-            URI rttobject("https://github.com/gwaldron/osgearth/blob/master/data/jet.osgb?raw=true");
+            URI refgrid("https://raw.githubusercontent.com/pelicanmapping/osgearth/refs/heads/master/data/reference_grid.jpg?raw=true");
+            URI rttobject("https://github.com/pelicanmapping/osgearth/blob/master/data/jet.osgb?raw=true");
 
             EventRouter::get(view(ri))
                 .onMove([&](osg::View* v, float x, float y) { onMove(v, x, y); }, false)

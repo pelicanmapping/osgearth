@@ -27,13 +27,18 @@ namespace
     #else
         bool s_GLES_SHADERS = false;
     #endif
+
+    // global toggle for varying packing
+    bool s_packingEnabled = true;
 }
 
 #define INDENT "    "
 
 ShaderFactory::ShaderFactory()
 {
-    //nop
+    const char* s = ::getenv("OSGEARTH_DISABLE_VARYING_PACKING");
+    if (s)
+        s_packingEnabled = false;
 }
 
 std::string
@@ -119,17 +124,216 @@ ShaderFactory::removePostProcessorCallback(UID uid)
 
 namespace
 {
+    enum class ComponentType : uint8_t { Float, Int, UInt, Double, Bool, Unknown = 99 };
+
     struct Variable
     {
         std::string interp;      // interpolation qualifer (flat, etc.)
         std::string type;        // float, vec4, etc.
+        ComponentType componentType; // float, int, uint etc
         std::string name;        // name without any array specifiers, etc.
         std::string prec;        // precision qualifier if any
         std::string declaration; // name including array specifiers (for decl)
         int         arraySize;   // 0 if not an array; else array size.
+
+        // Assigned by packer:
+        int location = -1;
+        std::string packedName;        // e.g. "packed6.xy" OR "oe_tile_key" for direct
     };
 
     typedef std::vector<Variable> Variables;
+
+    struct PackedSlot
+    {
+        ComponentType  scalar;
+        std::string interp;
+        std::string prec;
+        int         location;
+
+        bool operator==(const PackedSlot& o) const {
+            return scalar == o.scalar && location == o.location && interp == o.interp && prec == o.prec;
+        }
+    };
+
+    class VaryingPacker
+    {
+    public:
+        // Unique packed slots that must be declared
+        std::vector<PackedSlot> packedSlots;
+
+        void pack(std::vector<Variable>& vars)
+        {
+            packedSlots.clear();
+
+            // get the pack width of a variable, we only return valid value
+            // for single scalars and vec2 types as they are all we pack for now.
+            auto packWidth = [&](const Variable& v) -> int {
+                if (!s_packingEnabled) return -1;
+                if (v.arraySize > 0) return -1;
+                const std::string & t = v.type;
+                if (t == "float" || t == "int" || t == "uint") return 1;
+                if (t == "vec2" || t == "ivec2" || t == "uvec2") return 2;
+                return -1;
+            };
+
+            // how many full locations (vec4s) does a variables type consume
+            auto locationsPerElement = [&](const Variable& v) -> int {
+                const std::string & t = v.type;
+                if (t == "mat4" || t == "dmat4") return 4;
+                if (t == "mat3" || t == "dmat3") return 3;
+                return 1;
+            };
+
+            // the swizzle string for a packed var e.g. if we were to pack
+            // a vec2 at component 1 of the packed vec4 it's swizzle would
+            // be .yz
+            auto swizzle = [&](int comp, int width) -> std::string {
+                static const char* lanes = "xyzw";
+                std::string s = ".";
+                for (int i = 0; i < width; ++i) s.push_back(lanes[comp + i]);
+                return s;
+            };
+
+            // group indices by (ComponentType, interp, prec)
+            struct GroupKey {
+                ComponentType scalar { ComponentType::Unknown };
+                std::string interp;
+                std::string prec;
+
+                bool operator==(const GroupKey& o) const {
+                    return scalar == o.scalar && interp == o.interp && prec == o.prec;
+                }
+
+                bool operator<(GroupKey const& o) const {
+                    if (scalar != o.scalar) return static_cast<int>(scalar) < static_cast<int>(o.scalar);
+                    if (interp != o.interp) return interp < o.interp;
+                    return prec < o.prec;
+                }
+            };
+
+            // add the vars to the groups
+            std::map<GroupKey, std::vector<int>> groups;
+            for (int i = 0; i < (int)vars.size(); ++i) {
+                groups[{vars[i].componentType, vars[i].interp, vars[i].prec}].push_back(i);
+             }
+
+             // pack each group independently; global location increment across groups
+             int nextLocation = 0;
+
+             for (auto const& kv : groups) {
+                 GroupKey const& key = kv.first;
+                 std::vector<int> const& idxs = kv.second;
+
+                 int packLocation = -1;
+                 int packComponent = 0;
+
+                 auto resetPacking = [&]() { packLocation = -1; packComponent = 0; };
+
+                 // Ensure we record slot declaration once
+                 auto addPackedSlot = [&](int loc) {
+                     PackedSlot s;
+                     s.scalar = key.scalar;
+                     s.interp = key.interp;
+                     s.prec = key.prec;
+                     s.location = loc;
+
+                     // unique insert
+                     for (size_t i = 0; i < packedSlots.size(); ++i)
+                     if (packedSlots[i] == s) return;
+                     packedSlots.push_back(s);
+                 };
+
+                 for (size_t ii = 0; ii < idxs.size(); ++ii)
+                 {
+                     Variable& v = vars[idxs[ii]];
+
+                     int width = packWidth(v);
+                     if (width > 0)
+                     {
+                        // Pack into a packed slot, like old float/vec2 packer
+                        if (packLocation < 0 || packComponent + width > 4)
+                        {
+                           packLocation = nextLocation++;
+                           packComponent = 0;
+                           addPackedSlot(packLocation);
+                        }
+
+                        v.location = packLocation;
+                        v.packedName = "packed" + std::to_string(packLocation) + swizzle(packComponent, width);
+
+                        packComponent += width;
+                     }
+                     else
+                     {
+                         // Non-packable: matrices, vec3+, arrays, etc.
+                         resetPacking();
+
+                         v.location = nextLocation;
+                         v.packedName = v.name; // your rule: just keep the original name
+
+                         int locs = locationsPerElement(v) * std::max(1, v.arraySize);
+                         nextLocation += locs;
+                     }
+                 }
+             }
+
+             // Sort packed slots for pretty emission
+             std::sort(packedSlots.begin(), packedSlots.end(),
+                 [&](const PackedSlot& a, const PackedSlot& b) {
+                     if (a.scalar != b.scalar) return a.scalar < b.scalar;
+                     if (a.interp != b.interp) return a.interp < b.interp;
+                     if (a.prec != b.prec)  return a.prec < b.prec;
+                     return a.location < b.location;
+             });
+        }
+
+        std::string emitInterfaceBlock(const std::vector<Variable>& vars,
+                                       const char* blockName,
+                                       const char* indent = "    ") const
+        {
+            auto slotTypeName = [&](ComponentType k) -> const char* {
+                switch (k) {
+                    case ComponentType::Float:  return "vec4";
+                    case ComponentType::Int:    return "ivec4";
+                    case ComponentType::UInt:   return "uvec4";
+                    case ComponentType::Bool:   return "bvec4";
+                    case ComponentType::Double: return "dvec4";
+                    default:                 return "vec4";
+                }
+            };
+
+            std::stringstream buf;
+            buf << blockName << " {\n";
+
+            // 1) Declare packed slots first
+            for (size_t i = 0; i < packedSlots.size(); ++i) {
+                const PackedSlot& s = packedSlots[i];
+                buf << indent;
+                if (!s.interp.empty()) buf << s.interp << " ";
+                if (!s.prec.empty())   buf << s.prec << " ";
+                buf << slotTypeName(s.scalar) << " packed" << s.location << ";\n";
+            }
+
+            // 2) Declare non-packed originals normally
+            for (size_t i = 0; i < vars.size(); ++i) {
+                const Variable& v = vars[i];
+
+                // If packedName starts with "packed", we skip declaring the original
+                // because the slot declaration covers it.
+                if (v.packedName.size() >= 6 && v.packedName.compare(0, 6, "packed") == 0)
+                    continue;
+
+                buf << indent;
+                if (!v.interp.empty()) buf << v.interp << " ";
+                if (!v.prec.empty())   buf << v.prec << " ";
+                buf << v.declaration << ";\n";
+            }
+
+            buf << "}";
+            return buf.str();
+        }
+    };
+
 
 	void addExtensionsToBuffer(
         std::ostream& buf, 
@@ -209,12 +413,12 @@ ShaderFactory::createMains(
     bool hasTES = tessEvalStage    && !tessEvalStage->empty();
     bool hasFS  = true;
     bool hasVS  = true;
-    
+
     // where to insert the view/clip stage vertex functions:
     bool viewStageInGS  = hasGS;
     bool viewStageInTES = !viewStageInGS && hasTES;
     bool viewStageInVS  = !viewStageInTES && !viewStageInGS;
-    
+
     bool clipStageInGS  = hasGS;
     bool clipStageInTES = hasTES && !hasGS;
     bool clipStageInVS  = !clipStageInGS && !clipStageInTES;
@@ -272,7 +476,7 @@ ShaderFactory::createMains(
             {
                 v.interp = tokens[p++];
             }
-            
+
             if ( tokens[p] == "lowp" || tokens[p] == "mediump" || tokens[p] == "highp" )
             {
                 v.prec = tokens[p++];
@@ -294,6 +498,15 @@ ShaderFactory::createMains(
                     v.declaration = Stringify() << v.type << " " << v.name;
                     v.arraySize = 0;
                 }
+
+                const std::string & t = v.type;
+                if (t == "float" || t.rfind("vec", 0) == 0 || t.rfind("mat", 0) == 0) v.componentType = ComponentType::Float;
+                else if (t == "int" || t.rfind("ivec", 0) == 0) v.componentType = ComponentType::Int;
+                else if (t == "uint" || t.rfind("uvec", 0) == 0) v.componentType = ComponentType::UInt;
+                else if (t == "double" || t.rfind("dvec", 0) == 0 || t.rfind("dmat", 0) == 0) v.componentType = ComponentType::Double;
+                else if (t == "bool" || t.rfind("bvec", 0) == 0) v.componentType = ComponentType::Bool;
+                else v.componentType = ComponentType::Float;
+
             }
 
             if ( !v.type.empty() && !v.name.empty() && !v.declaration.empty() )
@@ -317,15 +530,10 @@ ShaderFactory::createMains(
     std::string glMatrixUniforms = "";
 
     // build the vertex data interface block definition:
-    std::string vertdata;
-    {
-        std::stringstream buf;
-        buf << "VP_PerVertex { \n";
-        for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-            buf << INDENT << i->interp << (i->interp.empty()?"":" ") << i->prec << (i->prec.empty()?"":" ") << i->declaration << "; \n";
-        buf << "}";
-        vertdata = buf.str();
-    }
+    VaryingPacker packer;
+    packer.pack(vars);
+
+    std::string vertdata = packer.emitInterfaceBlock(vars, "VP_PerVertex");
 
     // TODO: perhaps optimize later to not include things we don't need in the FS
     std::string fragdata = vertdata;
@@ -498,7 +706,7 @@ ShaderFactory::createMains(
         {
             // Copy stage globals to output block:
             for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-                buf << INDENT << "vp_out." << i->name << " = " << i->name << "; \n";
+                buf << INDENT << "vp_out." << i->packedName << " = " << i->name << "; \n";
         }
 
         buf << "} \n";
@@ -545,7 +753,7 @@ ShaderFactory::createMains(
         
         // Copy input block to stage globals:
         for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-            buf << INDENT << i->name << " = vp_in[index]." << i->name << "; \n";
+            buf << INDENT << i->name << " = vp_in[index]." << i->packedName << "; \n";
 
         buf << "} \n";
         
@@ -564,7 +772,7 @@ ShaderFactory::createMains(
                 
         // Copy in to globals
         for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-            buf << INDENT << i->name << " = vp_in[gl_InvocationID]." << i->name << "; \n";
+            buf << INDENT << i->name << " = vp_in[gl_InvocationID]." << i->packedName << "; \n";
 
         // Invoke functions
         if ( tessControlStage )
@@ -575,7 +783,7 @@ ShaderFactory::createMains(
                 
         // Copy globals to out.
         for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-            buf << INDENT << "vp_out[gl_InvocationID]." << i->name << " = " << i->name << "; \n";
+            buf << INDENT << "vp_out[gl_InvocationID]." << i->packedName << " = " << i->name << "; \n";
 
         buf << "} \n";
         
@@ -673,12 +881,14 @@ ShaderFactory::createMains(
         
             // Copy input block to stage globals:
             for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-                buf << INDENT << i->name << " = vp_in[index]." << i->name << "; \n";
+                buf << INDENT << i->name << " = vp_in[index]." << i->packedName << "; \n";
 
             buf << "} \n";
 
             buf << "\nvoid VP_Interpolate3() \n"
-                << "{ \n";            
+                << "{ \n"
+                << "   int flat_i = gl_TessCoord.y > gl_TessCoord.x && gl_TessCoord.y > gl_TessCoord.z ? 1 : (gl_TessCoord.z > gl_TessCoord.x && gl_TessCoord.z > gl_TessCoord.y ? 2 : 0); \n";
+            
             for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
             {
                 if ( i->interp != "flat" )                     
@@ -686,24 +896,25 @@ ShaderFactory::createMains(
                     if ( i->arraySize == 0 )
                     {
                         buf << INDENT << i->name << " = VP_Interpolate3"
-                            << "( vp_in[0]." << i->name
-                            << ", vp_in[1]." << i->name
-                            << ", vp_in[2]." << i->name << " ); \n";
+                            << "( vp_in[0]." << i->packedName
+                            << ", vp_in[1]." << i->packedName
+                            << ", vp_in[2]." << i->packedName << " ); \n";
                     }
                     else
                     {
                         for(int n=0; n<i->arraySize; ++n)
                         {
                             buf << INDENT << i->name << "[" << n << "] = VP_Interpolate3"
-                                << "( vp_in[0]." << i->name << "[" << n << "]"
-                                << ", vp_in[1]." << i->name << "[" << n << "]"
-                                << ", vp_in[2]." << i->name << "[" << n << "] ); \n";
+                                << "( vp_in[0]." << i->packedName << "[" << n << "]"
+                                << ", vp_in[1]." << i->packedName << "[" << n << "]"
+                                << ", vp_in[2]." << i->packedName << "[" << n << "] ); \n";
                         }
                     }
                 }
                 else
-                {
-                    buf << INDENT << i->name << " = vp_in[0]." << i->name << "; \n";
+                {                    
+                    buf << INDENT << i->name << " = vp_in[flat_i]." << i->packedName << "; \n";
+                    //buf << INDENT << i->name << " = vp_in[gl_InvocationID]." << i->name << "; \n";
                 }
             }
             buf << "} \n";
@@ -793,7 +1004,7 @@ ShaderFactory::createMains(
         
             // Copy globals to output block:
             for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-                buf << INDENT << "vp_out." << i->name << " = " << i->name << "; \n";
+                buf << INDENT << "vp_out." << i->packedName << " = " << i->name << "; \n";
 
             buf << INDENT << "gl_Position = vp_Vertex; \n"
                 << "} \n";
@@ -809,7 +1020,7 @@ ShaderFactory::createMains(
             // Copy default input block to output block (auto passthrough on first vert)
             // NOT SURE WE NEED THIS
             for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-                buf << INDENT << "vp_out." << i->name << " = vp_in[0]." << i->name << "; \n";
+                buf << INDENT << "vp_out." << i->packedName << " = vp_in[0]." << i->packedName << "; \n";
         }
 
         if ( tessEvalStage )
@@ -849,7 +1060,7 @@ ShaderFactory::createMains(
         {
             buf << "\n// Geometry stage inputs:\n"
                 << "in " << vertdata << " vp_in []; \n";
-        }        
+        }    
 
         // Declare stage globals.
         buf << "\n// Geometry stage globals: \n";
@@ -899,7 +1110,7 @@ ShaderFactory::createMains(
         
         // Copy input block to stage globals:
         for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-            buf << INDENT << i->name << " = vp_in[index]." << i->name << "; \n";
+            buf << INDENT << i->name << " = vp_in[index]." << i->packedName << "; \n";
 
         buf << "} \n";
 
@@ -986,7 +1197,7 @@ ShaderFactory::createMains(
                 
         // Copy globals to output block:
         for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-            buf << INDENT << "vp_out." << i->name << " = " << i->name << "; \n";
+            buf << INDENT << "vp_out." << i->packedName << " = " << i->name << "; \n";
 
         buf << INDENT << "gl_Position = vp_Vertex; \n";
 
@@ -1023,7 +1234,7 @@ ShaderFactory::createMains(
                 
         // Copy globals to output block:
         for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-            buf << INDENT << "vp_out." << i->name << " = " << i->name << "; \n";
+            buf << INDENT << "vp_out." << i->packedName << " = " << i->name << "; \n";
 
         buf << INDENT << "gl_Position = vp_Vertex; \n";
 
@@ -1038,7 +1249,7 @@ ShaderFactory::createMains(
         // Copy default input block to output block (auto passthrough on first vert)
         // NOT SURE WE NEED THIS
         for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-            buf << INDENT << "vp_out." << i->name << " = vp_in[0]." << i->name << "; \n";
+            buf << INDENT << "vp_out." << i->packedName << " = vp_in[0]." << i->packedName << "; \n";
 
         if ( geomStage )
         {
@@ -1125,7 +1336,7 @@ ShaderFactory::createMains(
         
         // Copy input block to stage globals:
         for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
-            buf << INDENT << i->name << " = vp_in." << i->name << "; \n";
+            buf << INDENT << i->name << " = vp_in." << i->packedName << "; \n";
 
         buf << INDENT << "vp_Normal = normalize(vp_Normal); \n";
 

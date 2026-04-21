@@ -55,6 +55,7 @@ bool
 Units::parse(const std::string& name, UnitsType& output)
 {
     const UnitsType u = osgEarth::Registry::instance()->getUnits(name);
+
     if (u.valid())
     {
         output = u;

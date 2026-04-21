@@ -973,13 +973,13 @@ OGRFeatureSource::insertFeature(Feature* feature)
                 switch (OGR_Fld_GetType(field_handle_ref))
                 {
                 case OFTInteger:
-                    OGR_F_SetFieldInteger(feature_handle, field_index, a->second.getInt(0));
+                    OGR_F_SetFieldInteger(feature_handle, field_index, a->second.getAsInt(0));
                     break;
                 case OFTReal:
-                    OGR_F_SetFieldDouble(feature_handle, field_index, a->second.getDouble(0.0));
+                    OGR_F_SetFieldDouble(feature_handle, field_index, a->second.getAsDouble(0.0));
                     break;
                 case OFTString:
-                    OGR_F_SetFieldString(feature_handle, field_index, a->second.getString().c_str());
+                    OGR_F_SetFieldString(feature_handle, field_index, a->second.getAsString().c_str());
                     break;
                 default:break;
                 }

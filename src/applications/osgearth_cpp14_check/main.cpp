@@ -39,7 +39,6 @@
 #include <osgEarth/CachePolicy>
 #include <osgEarth/CacheSeed>
 #include <osgEarth/Callbacks>
-#include <osgEarth/Callouts>
 #include <osgEarth/CameraUtils>
 #include <osgEarth/Capabilities>
 #include <osgEarth/CascadeDrapingDecorator>

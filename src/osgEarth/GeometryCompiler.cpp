@@ -13,7 +13,6 @@
 #include <osgEarth/SubstituteModelFilter>
 #include <osgEarth/TessellateOperator>
 #include <osgEarth/Session>
-
 #include <osgEarth/Utils>
 #include <osgEarth/Registry>
 #include <osgEarth/Capabilities>
@@ -26,10 +25,6 @@
 #define LC "[GeometryCompiler] "
 
 using namespace osgEarth;
-using namespace osgEarth::Util;
-using namespace osgEarth::Util;
-
-//#define PROFILING 1
 
 //-----------------------------------------------------------------------
 
@@ -38,46 +33,51 @@ GeometryCompilerOptions GeometryCompilerOptions::s_defaults(true);
 void
 GeometryCompilerOptions::setDefaults(const GeometryCompilerOptions& defaults)
 {
-   s_defaults = defaults;
+    s_defaults = defaults;
 }
 
 // defaults.
 GeometryCompilerOptions::GeometryCompilerOptions(bool stockDefaults) :
-_maxGranularity_deg    ( 10.0 ),
-_mergeGeometry         ( true ),
-_clustering            ( false ),
-_instancing            ( true ),
-_ignoreAlt             ( false ),
-_shaderPolicy          ( SHADERPOLICY_GENERATE ),
-_geoInterp             ( GEOINTERP_GREAT_CIRCLE ),
-_optimizeStateSharing  ( true ),
-_optimize              ( false ),
-_optimizeVertexOrdering( true ),
-_validate              ( false ),
-_maxPolyTilingAngle    ( 45.0f ),
-_useOSGTessellator     ( false ),
-_buildKDTrees          ( true )
+    _maxGranularity_deg(10.0),
+    _mergeGeometry(true),
+    _clustering(false),
+    _instancing(true),
+    _ignoreAlt(false),
+    _shaderPolicy(SHADERPOLICY_GENERATE),
+    _geoInterp(GEOINTERP_GREAT_CIRCLE),
+    _optimizeStateSharing(true),
+    _optimize(false),
+    _optimizeVertexOrdering(true),
+    _validate(false),
+    _maxPolyTilingAngle(45.0f),
+    _useOSGTessellator(false),
+    _buildKDTrees(true),
+    _filterUsage(FILTER_USAGE_NORMAL)
 {
-    //nop
+    if (stockDefaults)
+    {
+        //nop
+    }
 }
 
 //-----------------------------------------------------------------------
 
 GeometryCompilerOptions::GeometryCompilerOptions(const ConfigOptions& conf) :
-_maxGranularity_deg    ( s_defaults.maxGranularity().value() ),
-_mergeGeometry         ( s_defaults.mergeGeometry().value() ),
-_clustering            ( s_defaults.clustering().value() ),
-_instancing            ( s_defaults.instancing().value() ),
-_ignoreAlt             ( s_defaults.ignoreAltitudeSymbol().value() ),
-_shaderPolicy          ( s_defaults.shaderPolicy().value() ),
-_geoInterp             ( s_defaults.geoInterp().value() ),
-_optimizeStateSharing  ( s_defaults.optimizeStateSharing().value() ),
-_optimize              ( s_defaults.optimize().value() ),
-_optimizeVertexOrdering( s_defaults.optimizeVertexOrdering().value() ),
-_validate              ( s_defaults.validate().value() ),
-_maxPolyTilingAngle    ( s_defaults.maxPolygonTilingAngle().value() ),
-_useOSGTessellator     (s_defaults.useOSGTessellator().value()),
-_buildKDTrees          ( s_defaults.buildKDTrees().value() )
+    _maxGranularity_deg(s_defaults.maxGranularity().value()),
+    _mergeGeometry(s_defaults.mergeGeometry().value()),
+    _clustering(s_defaults.clustering().value()),
+    _instancing(s_defaults.instancing().value()),
+    _ignoreAlt(s_defaults.ignoreAltitudeSymbol().value()),
+    _shaderPolicy(s_defaults.shaderPolicy().value()),
+    _geoInterp(s_defaults.geoInterp().value()),
+    _optimizeStateSharing(s_defaults.optimizeStateSharing().value()),
+    _optimize(s_defaults.optimize().value()),
+    _optimizeVertexOrdering(s_defaults.optimizeVertexOrdering().value()),
+    _validate(s_defaults.validate().value()),
+    _maxPolyTilingAngle(s_defaults.maxPolygonTilingAngle().value()),
+    _useOSGTessellator(s_defaults.useOSGTessellator().value()),
+    _buildKDTrees(s_defaults.buildKDTrees().value()),
+    _filterUsage(s_defaults.filterUsage().value())
 {
     fromConfig(conf.getConfig());
 }
@@ -104,6 +104,9 @@ GeometryCompilerOptions::fromConfig( const Config& conf )
     conf.get( "shader_policy", "disable",  _shaderPolicy, SHADERPOLICY_DISABLE );
     conf.get( "shader_policy", "inherit",  _shaderPolicy, SHADERPOLICY_INHERIT );
     conf.get( "shader_policy", "generate", _shaderPolicy, SHADERPOLICY_GENERATE );
+
+    conf.get("filter_usage", "normal", filterUsage(), FILTER_USAGE_NORMAL);
+    conf.get("filter_usage", "parametric", filterUsage(), FILTER_USAGE_PARAMETRIC);
 }
 
 Config
@@ -129,6 +132,15 @@ GeometryCompilerOptions::getConfig() const
     conf.set( "shader_policy", "disable",  _shaderPolicy, SHADERPOLICY_DISABLE );
     conf.set( "shader_policy", "inherit",  _shaderPolicy, SHADERPOLICY_INHERIT );
     conf.set( "shader_policy", "generate", _shaderPolicy, SHADERPOLICY_GENERATE );
+
+    conf.set("filter_usage", "normal", filterUsage(), FILTER_USAGE_NORMAL);
+    conf.set("filter_usage", "parametric", filterUsage(), FILTER_USAGE_PARAMETRIC);
+
+    // compatibility
+    conf.set("filter_usage", "filter_usage_normal", filterUsage(), FILTER_USAGE_NORMAL);
+    conf.set("filter_usage", "filter_usage_parametric", filterUsage(), FILTER_USAGE_PARAMETRIC);
+    conf.set("filter_usage", "filter_usage_zero_work_callback_based", filterUsage(), FILTER_USAGE_ZERO_WORK_CALLBACK_BASED );
+
     return conf;
 }
 
@@ -141,15 +153,15 @@ GeometryCompiler::GeometryCompiler()
 }
 
 GeometryCompiler::GeometryCompiler( const GeometryCompilerOptions& options ) :
-_options( options )
+    _options( options )
 {
     //nop
 }
 
 osg::Node*
 GeometryCompiler::compile(Geometry*             geometry,
-                          const Style&          style,
-                          const FilterContext&  context)
+    const Style&          style,
+    const FilterContext&  context)
 {
     osg::ref_ptr<Feature> f = new Feature(geometry, 0L); // no SRS!
     return compile(f.get(), style, context);
@@ -157,7 +169,7 @@ GeometryCompiler::compile(Geometry*             geometry,
 
 osg::Node*
 GeometryCompiler::compile(Geometry*             geometry,
-                          const Style&          style)
+    const Style&          style)
 {
     osg::ref_ptr<Feature> f = new Feature(geometry, 0L); // no SRS!
     return compile(f.get(), style, FilterContext(0L) );
@@ -165,15 +177,15 @@ GeometryCompiler::compile(Geometry*             geometry,
 
 osg::Node*
 GeometryCompiler::compile(Geometry*             geometry,
-                          const FilterContext&  context)
+    const FilterContext&  context)
 {
     return compile( geometry, Style(), context );
 }
 
 osg::Node*
 GeometryCompiler::compile(Feature*              feature,
-                          const Style&          style,
-                          const FilterContext&  context)
+    const Style&          style,
+    const FilterContext&  context)
 {
     FeatureList workingSet;
     workingSet.push_back(feature);
@@ -182,7 +194,7 @@ GeometryCompiler::compile(Feature*              feature,
 
 osg::Node*
 GeometryCompiler::compile(Feature*              feature,
-                          const FilterContext&  context)
+    const FilterContext&  context)
 {
     if (feature->style())
         return compile(feature, *feature->style(), context);
@@ -192,8 +204,8 @@ GeometryCompiler::compile(Feature*              feature,
 
 osg::Node*
 GeometryCompiler::compile(FeatureCursor*        cursor,
-                          const Style&          style,
-                          const FilterContext&  context)
+    const Style&          style,
+    const FilterContext&  context)
 
 {
     // start by making a working copy of the feature set
@@ -205,8 +217,8 @@ GeometryCompiler::compile(FeatureCursor*        cursor,
 
 osg::Node*
 GeometryCompiler::compile(FeatureList&          workingSet,
-                          const Style&          style,
-                          const FilterContext&  context)
+    const Style&          style,
+    const FilterContext&  context)
 {
     OE_PROFILING_ZONE;
 
@@ -214,6 +226,8 @@ GeometryCompiler::compile(FeatureList&          workingSet,
     osg::Timer_t p_start = osg::Timer::instance()->tick();
     unsigned p_features = workingSet.size();
 #endif
+
+    osg::ref_ptr<osg::Group> extrusionGroup;
 
     // for debugging/validation.
     std::vector<std::string> history;
@@ -298,7 +312,6 @@ GeometryCompiler::compile(FeatureList&          workingSet,
     }
 
     // resample the geometry if necessary:
-    // @deprecated, remove this, dupe of the ResampleFilter
     if (_options.resampleMode().isSet())
     {
         ResampleFilter resample;
@@ -311,7 +324,7 @@ GeometryCompiler::compile(FeatureList&          workingSet,
         if ( trackHistory ) history.push_back( "resample" );
     }
 
-    // check whether we need to do elevation adjustment:
+    // check whether we need to do elevation clamping:
     bool altRequired =
         _options.ignoreAltitudeSymbol() != true &&
         altitude && (
@@ -320,7 +333,7 @@ GeometryCompiler::compile(FeatureList&          workingSet,
             altitude->verticalScale().isSet() ||
             altitude->script().isSet() );
 
-    // instance substitution:
+    // instance substitution (replaces marker)
     if ( model )
     {
         const InstanceSymbol* instance = (const InstanceSymbol*)model;
@@ -331,7 +344,7 @@ GeometryCompiler::compile(FeatureList&          workingSet,
         if ( trackHistory ) history.push_back( "model");
 
         if ( instance->placement() == InstanceSymbol::PLACEMENT_RANDOM   ||
-             instance->placement() == InstanceSymbol::PLACEMENT_INTERVAL )
+            instance->placement() == InstanceSymbol::PLACEMENT_INTERVAL )
         {
             ScatterFilter scatter;
             scatter.setDensity( *instance->density() );
@@ -362,6 +375,8 @@ GeometryCompiler::compile(FeatureList&          workingSet,
 
         // activate draw-instancing
         sub.setUseDrawInstanced( *_options.instancing() );
+
+        sub.setFilterUsage(*_options.filterUsage());
 
         // activate feature naming
         if ( _options.featureName().isSet() )
@@ -397,13 +412,22 @@ GeometryCompiler::compile(FeatureList&          workingSet,
             extrude.setFeatureNameExpr( *_options.featureName() );
 
         if (_options.mergeGeometry().isSet())
-            extrude.setMergeGeometry(*_options.mergeGeometry());            
+            extrude.setMergeGeometry(*_options.mergeGeometry());
+        //else if (_options.optimize() == true)
+        //    extrude.setMergeGeometry(false);
+            
+
+        //if ( _options.filterUsage().isSet() )
+        //    extrude.setFilterUsage(*_options.filterUsage());
 
         osg::Node* node = extrude.push( workingSet, sharedCX );
         if ( node )
         {
             if ( trackHistory ) history.push_back( "extrude" );
             resultGroup->addChild( node );
+
+            extrusionGroup = dynamic_cast<osg::Group*>(node);
+            OE_SOFT_ASSERT(extrusionGroup.get());
         }
     }
 
@@ -475,11 +499,6 @@ GeometryCompiler::compile(FeatureList&          workingSet,
         }
     }
 
-    if (render)
-    {
-        render->applyTo(resultGroup.get());
-    }
-
     if (Registry::capabilities().supportsGLSL())
     {
         ShaderPolicy shaderPolicy = _options.shaderPolicy().get();
@@ -506,11 +525,11 @@ GeometryCompiler::compile(FeatureList&          workingSet,
     {
         // Common state set cache?
         osg::ref_ptr<StateSetCache> sscache;
-        if ( sharedCX.getSession() )
+        if ( sharedCX.session() )
         {
             // with a shared cache, don't combine statesets. They may be
             // in the live graph
-            sscache = sharedCX.getSession()->getStateSetCache();
+            sscache = sharedCX.session()->getStateSetCache();
             sscache->consolidateStateAttributes( resultGroup.get() );
         }
         else
@@ -556,6 +575,34 @@ GeometryCompiler::compile(FeatureList&          workingSet,
         OE_NOTICE << LC << "-- End Debugging --\n";
     }
 
+    if(extrusion)
+    {
+        if (*_options.filterUsage() == FILTER_USAGE_ZERO_WORK_CALLBACK_BASED && extrusionGroup.get())
+        {
+            // remove the extrusion result from the result group
+            resultGroup->removeChild(extrusionGroup);
+
+            osg::Matrixd xform = osg::Matrixd::identity();
+            osg::MatrixTransform* matixTransform = dynamic_cast<osg::MatrixTransform*>(extrusionGroup.get());
+            if (matixTransform)
+            {
+                xform = matixTransform->getMatrix();
+                matixTransform->setMatrix(osg::Matrixd::identity());
+            }
+
+            // make a new attach point so that the filter node is found along with it
+            osg::Group* attachPoint = new osg::Group();
+            attachPoint->setName("extrude_geometry_attach_point");
+            // add the attach point to the result group, so that the attach point itself can be found
+            resultGroup->addChild(attachPoint);
+
+            // make a filter node with the extrusion group as the data
+            ExtrudeGeometryFilterNode* extrudeGeometryFilterNode = new ExtrudeGeometryFilterNode(extrusionGroup, xform);
+
+            attachPoint->addChild(extrudeGeometryFilterNode);
+            //attachPoint->setUserData(extrudeGeometryFilterNode);
+        }
+    }
     // Build kdtrees to increase intersection speed.
     if ((_options.buildKDTrees() == true) && osgDB::Registry::instance()->getKdTreeBuilder())
     {

@@ -435,11 +435,7 @@ FeatureSource::createFeatureCursor(const Query& in_query, const FeatureFilterCha
                 {
                     for (auto& feature : features)
                     {
-                        std::string attr = feature->getString(options().fidAttribute().get());
-                        for (auto& c : attr)
-                            if (!isdigit(c))
-                                c = ' ';
-                        feature->setFID(as<FeatureID>(attr, 0));
+                        feature->setFID(feature->getInt(options().fidAttribute().get(), 0));
                     }
                 }
 
@@ -458,7 +454,7 @@ FeatureSource::createFeatureCursor(const Query& in_query, const FeatureFilterCha
                 {
                     for (auto& feature : features)
                     {
-                        feature->set(".tile_level", (long long)query.tileKey()->getLOD());
+                        feature->set(".tile_level", (std::int64_t)query.tileKey()->getLOD());
                     }
                 }
 

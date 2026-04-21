@@ -63,16 +63,18 @@ namespace osgEarth
         virtual ~Geometry();
 
     public:
-        static std::string toString( Type t ) {
+        static const std::string& toString( Type t ) {
+            static std::string s[8] = {
+                "Point", "PointSet", "LineString", "Ring", "Polygon", "TriangleMesh", "MultiGeometry", "Unknown"
+            };
             return
-                t == TYPE_POINT ?      "Point" :
-                t == TYPE_POINTSET ?   "PointSet" :
-                t == TYPE_LINESTRING ? "LineString" :
-                t == TYPE_RING ?       "Ring" :
-                t == TYPE_POLYGON ?    "Polygon" :
-                t == TYPE_TRIMESH ?    "TriangleMesh" :
-                t == TYPE_MULTI ?      "MultiGeometry" :
-                                       "Unknown";
+                t == TYPE_POINT ? s[0] :
+                t == TYPE_POINTSET ? s[1] :
+                t == TYPE_LINESTRING ? s[2] :
+                t == TYPE_RING ? s[3] :
+                t == TYPE_POLYGON ? s[4] :
+                t == TYPE_TRIMESH ? s[5] :
+                t == TYPE_MULTI ? s[6] : s[7];
         }
 
         /** Creates a geometry from a vector array */

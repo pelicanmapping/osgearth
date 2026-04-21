@@ -9,6 +9,7 @@
 #include <osgEarth/SpatialReference>
 #include <osgEarth/StringUtils>
 #include <osgEarth/Cache>
+#include <osgEarth/ImageUtils>
 #include <osgDB/ReadFile>
 #include <filesystem>
 
@@ -197,5 +198,36 @@ static void BM_SQLite3SystemSingleThreadedWrite(benchmark::State& state)
 }
 
 BENCHMARK(BM_SQLite3SystemSingleThreadedWrite)->Iterations(1);
+
+static void BM_CompressImage_FastDXT(benchmark::State& state)
+{
+    std::string driver = "fastdxt";
+    osg::ref_ptr<osg::Image> image = osgDB::readRefImageFile(CACHE_IMAGE);
+    // Preload the processor so it's ready before timing.
+    osgDB::ImageProcessor* ip = osgDB::Registry::instance()->getImageProcessorForExtension(driver);
+
+    for (auto _ : state)
+    {
+        osg::ref_ptr<const osg::Image> compressed = ImageUtils::compressImage(image.get(), driver);
+        benchmark::DoNotOptimize(compressed);
+    }
+}
+BENCHMARK(BM_CompressImage_FastDXT);
+
+static void BM_CompressImage_STBDXT(benchmark::State& state)
+{
+    std::string driver = "stbdxt";
+
+    osg::ref_ptr<osg::Image> image = osgDB::readRefImageFile(CACHE_IMAGE);
+    // Preload the processor so it's ready before timing.
+    osgDB::ImageProcessor* ip = osgDB::Registry::instance()->getImageProcessorForExtension(driver);
+
+    for (auto _ : state)
+    {
+        osg::ref_ptr<const osg::Image> compressed = ImageUtils::compressImage(image.get(), driver);
+        benchmark::DoNotOptimize(compressed);
+    }
+}
+BENCHMARK(BM_CompressImage_STBDXT);
 
 BENCHMARK_MAIN();

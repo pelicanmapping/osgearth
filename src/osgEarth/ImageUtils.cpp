@@ -695,7 +695,7 @@ ImageUtils::compressImage(const osg::Image* input, const std::string& method)
         driver == "auto" ||
         (driver.length() >=3 && driver.substr(0,3)=="dxt"))
     {
-        driver = "fastdxt";
+        driver = "stbdxt";
     }
 
     ip = osgDB::Registry::instance()->getImageProcessorForExtension(driver);
@@ -770,7 +770,7 @@ ImageUtils::compressImageInPlace(osg::Image* input, const std::string& method)
             driver == "auto" ||
             (driver.length() >=3 && driver.substr(0,3)=="dxt"))
         {
-            driver = "fastdxt";
+            driver = "stbdxt";
         }
 
         ip = osgDB::Registry::instance()->getImageProcessorForExtension(driver);

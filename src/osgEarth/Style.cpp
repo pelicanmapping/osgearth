@@ -6,6 +6,7 @@
 #include <osgEarth/StyleSheet>
 #include <osgEarth/CssUtils>
 #include <algorithm>
+#include <utility>
 
 using namespace osgEarth;
 
@@ -16,6 +17,12 @@ using namespace osgEarth;
 
 Style::Style( const std::string& name ) :
 _name( name )
+{
+    //NOP
+}
+
+Style::Style( std::string&& name ) :
+_name( std::move(name) )
 {
     //NOP
 }
@@ -38,6 +45,15 @@ _uri     ( rhs._uri )
     }
 }
 
+Style::Style(Style&& rhs) noexcept :
+_name    ( std::move(rhs._name) ),
+_symbols ( std::move(rhs._symbols) ),
+_origType( std::move(rhs._origType) ),
+_origData( std::move(rhs._origData) ),
+_uri     ( std::move(rhs._uri) )
+{
+}
+
 Style&
 Style::operator = ( const Style& rhs )
 {
@@ -47,6 +63,20 @@ Style::operator = ( const Style& rhs )
     _uri = rhs._uri;
     _symbols.clear();
     copySymbols(rhs);
+    return *this;
+}
+
+Style&
+Style::operator = ( Style&& rhs ) noexcept
+{
+    if (this != &rhs)
+    {
+        _name = std::move(rhs._name);
+        _symbols = std::move(rhs._symbols);
+        _origType = std::move(rhs._origType);
+        _origData = std::move(rhs._origData);
+        _uri = std::move(rhs._uri);
+    }
     return *this;
 }
 

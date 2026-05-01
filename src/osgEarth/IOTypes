@@ -7,6 +7,7 @@
 #include <osgEarth/DateTime>
 #include <osgEarth/Containers>
 #include <osg/Object>
+#include <utility>
 
 /**
  * A collectin of types used by the various I/O systems in osgEarth. These
@@ -23,12 +24,14 @@ namespace osgEarth
         StringObject();
         StringObject( const StringObject& rhs, const osg::CopyOp& op ) : osg::Object(rhs, op), _str(rhs._str) { }
         StringObject( const std::string& in ) : osg::Object(), _str(in) { }
+        StringObject( std::string&& in ) : osg::Object(), _str(std::move(in)) { }
 
         /** dtor */
         virtual ~StringObject();
         META_Object( osgEarth, StringObject );
 
         void setString( const std::string& value );
+        void setString( std::string&& value );
         const std::string& getString() const;
     private:
         std::string _str;
@@ -124,6 +127,9 @@ namespace osgEarth
         ReadResult(const std::string& error)
             : _code(RESULT_NOT_FOUND), _fromCache(false), _lmt(0), _duration_s(0.0), _detail(error) { }
 
+        ReadResult(std::string&& error)
+            : _code(RESULT_NOT_FOUND), _fromCache(false), _lmt(0), _duration_s(0.0), _detail(std::move(error)) { }
+
         /** Construct a result with code and data */
         ReadResult( Code code, osg::Object* result )
             : _code(code), _result(result), _fromCache(false), _lmt(0), _duration_s(0.0) { }
@@ -131,6 +137,9 @@ namespace osgEarth
         /** Construct a result with data, possible with an error code */
         ReadResult( Code code, osg::Object* result, const Config& meta )
             : _code(code), _result(result), _meta(meta), _fromCache(false), _lmt(0), _duration_s(0.0) { }
+
+        ReadResult( Code code, osg::Object* result, Config&& meta )
+            : _code(code), _result(result), _meta(std::move(meta)), _fromCache(false), _lmt(0), _duration_s(0.0) { }
 
         /** Construct a successful result (implicit OK code) */
         ReadResult( osg::Object* result )
@@ -144,13 +153,25 @@ namespace osgEarth
         ReadResult( osg::Object* result, const Config& meta )
             : _code(RESULT_OK), _result(result), _meta(meta), _fromCache(false), _lmt(0), _duration_s(0.0) { }
 
+        ReadResult( osg::Object* result, Config&& meta )
+            : _code(RESULT_OK), _result(result), _meta(std::move(meta)), _fromCache(false), _lmt(0), _duration_s(0.0) { }
+
         template<typename T>
         ReadResult( const osg::ref_ptr<T>& result, const Config& meta )
             : _code(RESULT_OK), _result(result), _meta(meta), _fromCache(false), _lmt(0), _duration_s(0.0) { }
 
+        template<typename T>
+        ReadResult( const osg::ref_ptr<T>& result, Config&& meta )
+            : _code(RESULT_OK), _result(result), _meta(std::move(meta)), _fromCache(false), _lmt(0), _duration_s(0.0) { }
+
         /** Copy construct */
         ReadResult( const ReadResult& rhs )
             : _code(rhs._code), _result(rhs._result.get()), _meta(rhs._meta), _fromCache(rhs._fromCache), _lmt(rhs._lmt), _duration_s(rhs._duration_s), _detail(rhs._detail) { }
+
+        /** Move construct */
+        ReadResult( ReadResult&& rhs ) = default;
+        ReadResult& operator=(const ReadResult& rhs) = default;
+        ReadResult& operator=(ReadResult&& rhs) = default;
 
         /** dtor */
         virtual ~ReadResult() { }
@@ -233,8 +254,10 @@ namespace osgEarth
         void setDuration(double s) { _duration_s = s; }
 
         void setMetadata(const Config& meta) { _meta = meta; }
+        void setMetadata(Config&& meta) { _meta = std::move(meta); }
 
         void setErrorDetail(const std::string& value) { _detail = value; }
+        void setErrorDetail(std::string&& value) { _detail = std::move(value); }
 
     protected:
         Code                      _code;

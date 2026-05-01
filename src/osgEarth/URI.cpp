@@ -12,6 +12,7 @@
 #include <osgDB/FileNameUtils>
 #include <osgDB/ReadFile>
 #include <osgDB/Archive>
+#include <utility>
 
 #ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
 #include <Superluminal/PerformanceAPI.h>
@@ -82,6 +83,11 @@ URIContext::URIContext(const std::string& referrer) :
 {
 }
 
+URIContext::URIContext(std::string&& referrer) :
+    _referrer(std::move(referrer))
+{
+}
+
 URIContext::URIContext(const URIContext& rhs) :
     _referrer(rhs._referrer),
     _headers(rhs._headers)
@@ -98,6 +104,12 @@ void
 URIContext::addHeader(const std::string& name, const std::string& value)
 {
     _headers[name] = value;
+}
+
+void
+URIContext::addHeader(std::string&& name, std::string&& value)
+{
+    _headers[std::move(name)] = std::move(value);
 }
 
 const Headers&
@@ -178,10 +190,25 @@ URI::URI( const std::string& location )
     ctorCacheKey();
 }
 
+URI::URI( std::string&& location )
+{
+    _baseURI = std::move(location);
+    _fullURI = osgEarth::Util::stripRelativePaths(_baseURI);
+    ctorCacheKey();
+}
+
 URI::URI( const std::string& location, const URIContext& context )
 {
     _context = context;
     _baseURI = location;
+    _fullURI = context.getOSGPath( _baseURI );
+    ctorCacheKey();
+}
+
+URI::URI( std::string&& location, const URIContext& context )
+{
+    _context = context;
+    _baseURI = std::move(location);
     _fullURI = context.getOSGPath( _baseURI );
     ctorCacheKey();
 }
@@ -235,7 +262,7 @@ URI::getConfig() const
                 headersconf.add(Config(i->first, i->second));
             }
         }
-        conf.add(headersconf);
+        conf.add(std::move(headersconf));
     }
 
     return conf;

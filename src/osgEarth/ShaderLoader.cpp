@@ -11,6 +11,7 @@
 #include "GLSLChunker"
 
 #include <osgDB/FileUtils>
+#include <utility>
 
 #undef  LC
 #define LC "[ShaderLoader] "
@@ -458,7 +459,7 @@ ShaderLoader::split(const std::string& multisource,
     while ((pos = multisource.find(SPLIT_DELIM, offset)) != std::string::npos)
     {
         std::string source = multisource.substr(offset, pos-offset);
-        output.push_back(source);
+        output.push_back(std::move(source));
         offset = pos + SPLIT_DELIM_LEN;
     }
     output.push_back(multisource.substr(offset));
@@ -669,30 +670,30 @@ ShaderLoader::sort_components(
             OE_HARD_ASSERT(chunk.tokens.size() > 0);
 
             if (chunk.tokens[0] == "#version")
-                versions.push_back(chunk);
+                versions.push_back(std::move(chunk));
             else if (chunk.tokens[0] == "#extension")
-                extensions.push_back(chunk);
+                extensions.push_back(std::move(chunk));
             else if (chunk.tokens[0] == "#pragma")
-                pragmas.push_back(chunk);
+                pragmas.push_back(std::move(chunk));
             else
-                code.push_back(chunk);
+                code.push_back(std::move(chunk));
         }
         else
         {
-            code.push_back(chunk);
+            code.push_back(std::move(chunk));
         }
     }
 
     input.clear();
 
     for (auto& c : versions)
-        input.push_back(c);
+        input.push_back(std::move(c));
     for (auto& c : extensions)
-        input.push_back(c);
+        input.push_back(std::move(c));
     for (auto& c : pragmas)
-        input.push_back(c);
+        input.push_back(std::move(c));
     for (auto& c : code)
-        input.push_back(c);
+        input.push_back(std::move(c));
 
     glsl.write(input, in_out_source);
 }

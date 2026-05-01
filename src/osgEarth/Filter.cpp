@@ -57,7 +57,7 @@ FeatureFilterChain::create(const std::vector<ConfigOptions>& filters, const osgD
         }
     }
 
-    return std::move(chain);
+    return chain;
 }
 
 /********************************************************************************/

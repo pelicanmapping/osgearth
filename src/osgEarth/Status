@@ -8,6 +8,7 @@
 
 #include <osgEarth/Common>
 #include <string>
+#include <utility>
 
 namespace osgEarth
 {
@@ -27,9 +28,14 @@ namespace osgEarth
     public:
         Status() : _code(NoError) { }
         Status(const Status& rhs) : _code(rhs._code), _msg(rhs._msg) { }
+        Status(Status&& rhs) noexcept = default;
+        Status& operator=(const Status& rhs) = default;
+        Status& operator=(Status&& rhs) noexcept = default;
         Status(const Code& code) : _code(code) { }
         Status(const std::string& msg) : _code(GeneralError), _msg(msg) { }
+        Status(std::string&& msg) : _code(GeneralError), _msg(std::move(msg)) { }
         Status(const Code& code, const std::string& msg) : _code(code), _msg(msg) { }
+        Status(const Code& code, std::string&& msg) : _code(code), _msg(std::move(msg)) { }
         bool isOK() const { return _code == NoError; }
         bool isError() const { return !isOK(); }
         const Code& code() const { return _code; }
@@ -40,9 +46,12 @@ namespace osgEarth
         static Status OK() { return Status(); }
         static Status Error(const Code& code) { return Status(code); }
         static Status Error(const std::string& msg) { return Status(msg); }
+        static Status Error(std::string&& msg) { return Status(std::move(msg)); }
         static Status Error(const Code& code, const std::string& msg) { return Status(code, msg); }
+        static Status Error(const Code& code, std::string&& msg) { return Status(code, std::move(msg)); }
         void set(const Code& code) { _code = code, _msg = ""; }
         void set(const Code& code, const std::string& msg) { _code = code, _msg = msg; }
+        void set(const Code& code, std::string&& msg) { _code = code, _msg = std::move(msg); }
         std::string toString() const {
             return _codeText[(unsigned)_code < 6 ? (int)_code : 5] + ": " + message();
         }
@@ -64,6 +73,7 @@ namespace osgEarth
         Result() : Status() { }
         Result(const T& val) : _value(val) { }
         Result(const Status& s) : Status(s) { }
+        Result(T&& val) : _value(std::move(val)) { }
         const T& value() const { return _value; }
         const T& get() const { return _value; }
         const T* operator -> () const { return &_value; }

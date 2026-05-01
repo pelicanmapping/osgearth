@@ -6,6 +6,7 @@
 #include <osgEarth/StringUtils>
 #include <cctype>
 #include <cstring>
+#include <utility>
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
@@ -115,7 +116,7 @@ StringTokenizer::operator()(const std::string& input, bool* error) const
                             trim2(token);
 
                         if (_keepEmptyTokens || !token.empty())
-                            output.push_back(token);
+                            output.push_back(std::move(token));
 
                         if (d.second == true) // keep the delimiter itself as a token?
                             output.push_back(d.first);
@@ -213,7 +214,7 @@ StringTokenizer::operator()(const std::string& input, bool* error) const
     if (_trimTokens)
         trim2(bufstr);
     if (!bufstr.empty())
-        output.push_back(bufstr);
+        output.push_back(std::move(bufstr));
 
     return output;
 }

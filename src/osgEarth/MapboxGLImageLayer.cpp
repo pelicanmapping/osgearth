@@ -684,7 +684,7 @@ MapBoxGL::StyleSheet MapBoxGL::StyleSheet::load(const URI& location, const osgDB
             source.attribution() = sourceJson.get("attribution", "").asString();
             source.type() = sourceJson.get("type", "").asString();
             source.loadFeatureSource(location.full(), options);
-            styleSheet._sources.push_back(source);
+            styleSheet._sources.push_back(std::move(source));
         }
     }
 

@@ -6,6 +6,7 @@
 #include <osgEarth/URI>
 #include <osgDB/Registry>
 #include <osgDB/FileNameUtils>
+#include <utility>
 
 using namespace osgEarth;
 
@@ -33,6 +34,11 @@ const std::string& StringObject::getString() const
 void StringObject::setString( const std::string& value )
 {
     _str = value;
+}
+
+void StringObject::setString( std::string&& value )
+{
+    _str = std::move(value);
 }
 
 //----------------------------------------------------------------------------

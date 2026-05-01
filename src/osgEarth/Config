@@ -65,9 +65,6 @@ namespace osgEarth
         Config(const std::string& key) :
             _key(key) { }
 
-        Config(std::string&& key) noexcept :
-            _key(std::move(key)) { }
-
         template<typename T>
         explicit Config(const std::string& key, const T& value) :
             _key(key)
@@ -75,21 +72,8 @@ namespace osgEarth
             setValue(value);
         }
 
-        template<typename T>
-        explicit Config(std::string&& key, const T& value) :
-            _key(std::move(key))
-        {
-            setValue(value);
-        }
-
         explicit Config(const std::string& key, std::string&& value) :
             _key(key)
-        {
-            setValue(std::move(value));
-        }
-
-        explicit Config(std::string&& key, std::string&& value) :
-            _key(std::move(key))
         {
             setValue(std::move(value));
         }
@@ -103,12 +87,6 @@ namespace osgEarth
 #ifdef OE_CONFIG_MOVE_SEMATICS
         explicit Config(const std::string& key, Config&& value) noexcept :
             _key(key)
-        {
-            add(std::move(value));
-        }
-
-        explicit Config(std::string&& key, Config&& value) noexcept :
-            _key(std::move(key))
         {
             add(std::move(value));
         }
@@ -262,21 +240,8 @@ namespace osgEarth
             return _children.back();
         }
 
-        template<typename T>
-        Config& add(std::string&& key, const T& value) {
-            _children.emplace_back(std::move(key), value);
-            _children.back().setReferrer(_referrer);
-            return _children.back();
-        }
-
         Config& add(const std::string& key, std::string&& value) {
             _children.emplace_back(key, std::move(value));
-            _children.back().setReferrer(_referrer);
-            return _children.back();
-        }
-
-        Config& add(std::string&& key, std::string&& value) {
-            _children.emplace_back(std::move(key), std::move(value));
             _children.back().setReferrer(_referrer);
             return _children.back();
         }
@@ -300,10 +265,6 @@ namespace osgEarth
             return add(Config(key));
         }
 
-        Config& add(std::string&& key) {
-            return add(Config(std::move(key)));
-        }
-
         /** Add a set of config objects as children. */
         void add(const ConfigSet& set) {
             for (ConfigSet::const_iterator i = set.begin(); i != set.end(); i++)
@@ -321,11 +282,6 @@ namespace osgEarth
             std::string keyCopy = key;
             Config& result = add(std::move(conf));
             result.key() = std::move(keyCopy);
-            return result;
-        }
-        Config& add(std::string&& key, Config&& conf) noexcept {
-            Config& result = add(std::move(conf));
-            result.key() = std::move(key);
             return result;
         }
         Config& set(Config&& conf) noexcept {
@@ -426,11 +382,6 @@ namespace osgEarth
 
         Config& set(const std::string& key, std::string&& value) {
             set(Config(key, std::move(value)));
-            return *this;
-        }
-
-        Config& set(std::string&& key, std::string&& value) {
-            set(Config(std::move(key), std::move(value)));
             return *this;
         }
 

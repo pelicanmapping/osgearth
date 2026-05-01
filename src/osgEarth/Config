@@ -140,7 +140,6 @@ namespace osgEarth
         /** Hint that this Config came from an externally referenced resource. */
         const std::string& externalRef() const { return _externalRef; }
         void setExternalRef(const std::string& externalRef) { _externalRef = externalRef; }
-        void setExternalRef(std::string&& externalRef) { _externalRef = std::move(externalRef); }
 
         /** Populate this object from an XML input stream. */
         bool fromXML(std::istream& in);

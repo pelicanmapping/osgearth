@@ -36,11 +36,6 @@ void StringObject::setString( const std::string& value )
     _str = value;
 }
 
-void StringObject::setString( std::string&& value )
-{
-    _str = std::move(value);
-}
-
 //----------------------------------------------------------------------------
 
 ProxySettings::ProxySettings( const Config& conf )

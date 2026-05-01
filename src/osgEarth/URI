@@ -42,7 +42,6 @@ namespace osgEarth
 
         /** Creates a context that specifies a referring object. */
         URIContext(const std::string& referrer);
-        URIContext(std::string&& referrer);
 
         /** Copy constructor. */
         URIContext(const URIContext& rhs);
@@ -79,7 +78,6 @@ namespace osgEarth
 
         //! Add a header name/value pair to use when requesting a remote URL
         void addHeader(const std::string& name, const std::string& value);
-        void addHeader(std::string&& name, std::string&& value);
 
         //! Headers in this URIContext
         const Headers& getHeaders() const;
@@ -150,13 +148,11 @@ namespace osgEarth
          * Constructs a new URI from a location (typically an absolute url)
          */
         URI( const std::string& location );
-        URI( std::string&& location );
         
         /**
          * Constructs a new URI from a location and an existing context.
          */
         URI( const std::string& location, const URIContext& context );
-        URI( std::string&& location, const URIContext& context );
 
         /**
          * Constructs a new URI from a string.
@@ -200,7 +196,6 @@ namespace osgEarth
 
         /** Sets a cache key. By default the cache key is the full URI, but you can override that. */
         void setCacheKey( const std::string& key ) { _cacheKey = key; }
-        void setCacheKey( std::string&& key ) { _cacheKey = std::move(key); }
 
     public: // read methods return a ReadResult object
 

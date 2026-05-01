@@ -42,7 +42,6 @@ namespace osgEarth
     public:
         /** Constructs a new, empty style. */
         Style( const std::string& name = "" );
-        Style( std::string&& name );
 
         /** Constructs a style by deserializing it from a Config. */
         Style(const Config& conf);
@@ -66,7 +65,6 @@ namespace osgEarth
 
         /** Sets the name of this style */
         void setName( const std::string& value ) { _name = value; }
-        void setName( std::string&& value ) { _name = std::move(value); }
 
         /** Starts with this style, merges in all the symbols from the other style, and
             returns a new style */

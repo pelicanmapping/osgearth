@@ -24,14 +24,12 @@ namespace osgEarth
         StringObject();
         StringObject( const StringObject& rhs, const osg::CopyOp& op ) : osg::Object(rhs, op), _str(rhs._str) { }
         StringObject( const std::string& in ) : osg::Object(), _str(in) { }
-        StringObject( std::string&& in ) : osg::Object(), _str(std::move(in)) { }
 
         /** dtor */
         virtual ~StringObject();
         META_Object( osgEarth, StringObject );
 
         void setString( const std::string& value );
-        void setString( std::string&& value );
         const std::string& getString() const;
     private:
         std::string _str;
@@ -126,9 +124,6 @@ namespace osgEarth
         /** Construct a result with an error message */
         ReadResult(const std::string& error)
             : _code(RESULT_NOT_FOUND), _fromCache(false), _lmt(0), _duration_s(0.0), _detail(error) { }
-
-        ReadResult(std::string&& error)
-            : _code(RESULT_NOT_FOUND), _fromCache(false), _lmt(0), _duration_s(0.0), _detail(std::move(error)) { }
 
         /** Construct a result with code and data */
         ReadResult( Code code, osg::Object* result )
@@ -257,7 +252,6 @@ namespace osgEarth
         void setMetadata(Config&& meta) { _meta = std::move(meta); }
 
         void setErrorDetail(const std::string& value) { _detail = value; }
-        void setErrorDetail(std::string&& value) { _detail = std::move(value); }
 
     protected:
         Code                      _code;

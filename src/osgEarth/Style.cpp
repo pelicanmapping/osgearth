@@ -21,12 +21,6 @@ _name( name )
     //NOP
 }
 
-Style::Style( std::string&& name ) :
-_name( std::move(name) )
-{
-    //NOP
-}
-
 Style::Style(const Style& rhs, const osg::CopyOp& op) :
 _name    ( rhs._name ),
 _symbols ( rhs._symbols ),

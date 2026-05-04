@@ -5,6 +5,7 @@ set(TARGET_SRC
     ExpressionTests.cpp
     GeoExtentTests.cpp
     FeatureTests.cpp
+    ImageUtilsTests.cpp
     PathTests.cpp
     ImageLayerTests.cpp
     SpatialReferenceTests.cpp

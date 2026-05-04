@@ -230,4 +230,50 @@ static void BM_CompressImage_STBDXT(benchmark::State& state)
 }
 BENCHMARK(BM_CompressImage_STBDXT);
 
+static osg::ref_ptr<osg::Image> createResizeBenchmarkImage(unsigned int width, unsigned int height)
+{
+    osg::ref_ptr<osg::Image> image = new osg::Image();
+    image->allocateImage(width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+
+    for (unsigned int t = 0; t < height; ++t)
+    {
+        for (unsigned int s = 0; s < width; ++s)
+        {
+            unsigned char* pixel = image->data(s, t);
+            pixel[0] = static_cast<unsigned char>((s * 3 + t) & 0xff);
+            pixel[1] = static_cast<unsigned char>((s + t * 5) & 0xff);
+            pixel[2] = static_cast<unsigned char>((s * 7 + t * 11) & 0xff);
+            pixel[3] = static_cast<unsigned char>(255 - ((s + t) & 0x7f));
+        }
+    }
+
+    return image;
+}
+
+static void BM_ResizeImage_BilinearRGBA8(benchmark::State& state)
+{
+    osg::ref_ptr<osg::Image> image = createResizeBenchmarkImage(1024, 1024);
+    osg::ref_ptr<osg::Image> output = new osg::Image();
+    output->allocateImage(
+        static_cast<int>(state.range(0)),
+        static_cast<int>(state.range(1)),
+        1,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE);
+
+    for (auto _ : state)
+    {
+        bool result = ImageUtils::resizeImage(
+            image.get(),
+            static_cast<unsigned int>(state.range(0)),
+            static_cast<unsigned int>(state.range(1)),
+            output,
+            0,
+            true);
+        benchmark::DoNotOptimize(result);
+        benchmark::ClobberMemory();
+    }
+}
+BENCHMARK(BM_ResizeImage_BilinearRGBA8)->Args({768, 768})->Unit(benchmark::kMillisecond);
+
 BENCHMARK_MAIN();

@@ -207,74 +207,99 @@ ImageUtils::resizeImage(const osg::Image* input,
 
         osg::Vec4 color;
 
+        struct ResizeSample
+        {
+            int min;
+            int max;
+            int nearest;
+            double weight0;
+            double weight1;
+        };
+
+        auto makeSample = [](float input_coord, int input_size)
+        {
+            ResizeSample sample;
+
+            if (input_coord >= input_size)
+                input_coord = static_cast<float>(input_size - 1);
+            else if (input_coord < 0.0f)
+                input_coord = 0.0f;
+
+            sample.min = osg::maximum(static_cast<int>(floor(input_coord)), 0);
+            sample.max = osg::maximum(osg::minimum(static_cast<int>(ceil(input_coord)), input_size - 1), 0);
+
+            if (sample.min > sample.max)
+                sample.min = sample.max;
+
+            sample.weight0 = static_cast<double>(sample.max) - static_cast<double>(input_coord);
+            sample.weight1 = static_cast<double>(input_coord) - static_cast<double>(sample.min);
+
+            const int base = static_cast<int>(input_coord);
+            sample.nearest = (input_coord - base) <= (ceil(input_coord) - input_coord) ?
+                base :
+                osg::minimum(1 + base, input_size - 1);
+
+            return sample;
+        };
+
+        std::vector<ResizeSample> rowSamples(out_t);
+        for (unsigned int output_row = 0; output_row < out_t; ++output_row)
+        {
+            const float input_row = ((float)output_row / (float)out_t) * (float)in_t;
+            rowSamples[output_row] = makeSample(input_row, static_cast<int>(in_t));
+        }
+
+        std::vector<ResizeSample> colSamples(out_s);
+        for (unsigned int output_col = 0; output_col < out_s; ++output_col)
+        {
+            const float input_col = ((float)output_col / (float)out_s) * (float)in_s;
+            colSamples[output_col] = makeSample(input_col, static_cast<int>(in_s));
+        }
+
         for( unsigned int output_row=0; output_row < out_t; output_row++ )
         {
-            // get an appropriate input row
-            float output_row_ratio = (float)output_row/(float)out_t;
-            float input_row = output_row_ratio * (float)in_t;
-            if ( input_row >= input->t() ) input_row = in_t-1;
-            else if ( input_row < 0 ) input_row = 0;
+            const ResizeSample& row = rowSamples[output_row];
 
             for( unsigned int output_col = 0; output_col < out_s; output_col++ )
             {
-                float output_col_ratio = (float)output_col/(float)out_s;
-                float input_col =  output_col_ratio * (float)in_s;
-                if ( input_col >= (int)in_s ) input_col = in_s-1;
-                else if ( input_col < 0 ) input_col = 0.0f;
+                const ResizeSample& col = colSamples[output_col];
 
                 for(int layer=0; layer<input->r(); ++layer)
                 {
                     if (bilinear)
                     {
-                        // Do a bilinear interpolation for the image
-                        int rowMin = osg::maximum((int)floor(input_row), 0);
-                        int rowMax = osg::maximum(osg::minimum((int)ceil(input_row), (int)(input->t()-1)), 0);
-                        int colMin = osg::maximum((int)floor(input_col), 0);
-                        int colMax = osg::maximum(osg::minimum((int)ceil(input_col), (int)(input->s()-1)), 0);
+                        osg::Vec4 urColor = read(col.max, row.max, layer);
+                        osg::Vec4 llColor = read(col.min, row.min, layer);
+                        osg::Vec4 ulColor = read(col.min, row.max, layer);
+                        osg::Vec4 lrColor = read(col.max, row.min, layer);
 
-                        if (rowMin > rowMax) rowMin = rowMax;
-                        if (colMin > colMax) colMin = colMax;
-
-                        osg::Vec4 urColor = read(colMax, rowMax, layer);
-                        osg::Vec4 llColor = read(colMin, rowMin, layer);
-                        osg::Vec4 ulColor = read(colMin, rowMax, layer);
-                        osg::Vec4 lrColor = read(colMax, rowMin, layer);
-
-                        if ((colMax == colMin) && (rowMax == rowMin))
+                        if ((col.max == col.min) && (row.max == row.min))
                         {
                             // Exact value
                             color = urColor;
                         }
-                        else if (colMax == colMin)
+                        else if (col.max == col.min)
                         {
                             // Linear interpolate vertically
-                            color = llColor * ((double)rowMax - input_row) + ulColor * (input_row - (double)rowMin);
+                            color = llColor * row.weight0 + ulColor * row.weight1;
                         }
-                        else if (rowMax == rowMin)
+                        else if (row.max == row.min)
                         {
                             // Linear interpolate horizontally
-                            color = llColor * ((double)colMax - input_col) + lrColor * (input_col - (double)colMin);
+                            color = llColor * col.weight0 + lrColor * col.weight1;
                         }
                         else
                         {
                             // Bilinear interpolate
-                            osg::Vec4 r1 = llColor * ((double)colMax - input_col) + lrColor * (input_col - (double)colMin);
-                            osg::Vec4 r2 = ulColor * ((double)colMax - input_col) + urColor * (input_col - (double)colMin);
-                            color = r1 * ((double)rowMax - input_row) + r2 * (input_row - (double)rowMin);
+                            osg::Vec4 r1 = llColor * col.weight0 + lrColor * col.weight1;
+                            osg::Vec4 r2 = ulColor * col.weight0 + urColor * col.weight1;
+                            color = r1 * row.weight0 + r2 * row.weight1;
                         }
                     }
                     else
                     {
                         // nearest neighbor:
-                        int col = (input_col-(int)input_col) <= (ceil(input_col)-input_col) ?
-                            (int)input_col :
-                            osg::minimum( 1+(int)input_col, (int)in_s-1 );
-
-                        int row = (input_row-(int)input_row) <= (ceil(input_row)-input_row) ?
-                            (int)input_row :
-                            osg::minimum( 1+(int)input_row, (int)in_t-1 );
-
-                        read(color, col, row, layer); // read pixel from mip level 0.
+                        read(color, col.nearest, row.nearest, layer); // read pixel from mip level 0.
 
                         // old code
                         //color = read( (int)input_col, (int)input_row, layer ); // read pixel from mip level 0

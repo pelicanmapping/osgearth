@@ -58,6 +58,101 @@ namespace
             minX, minY, 0.0, 1.0);
         return transform;
     }
+
+    bool
+    transformPointZ(
+        osg::Vec3d& point,
+        const SpatialReference* inputSRS,
+        const SpatialReference* outputSRS,
+        bool pointIsLatLong)
+    {
+        const VerticalDatum* inVDatum = inputSRS->getVerticalDatum();
+        const VerticalDatum* outVDatum = outputSRS->getVerticalDatum();
+
+        // same vdatum, no xformation necessary.
+        if (inVDatum == outVDatum)
+            return true;
+
+        UnitsType inUnits = inVDatum ? inVDatum->getUnits() : Units::METERS;
+        UnitsType outUnits = outVDatum ? outVDatum->getUnits() : inUnits;
+
+        osg::Vec3d geoPoint;
+        const osg::Vec3d* latLongPoint = &point;
+
+        if (!inputSRS->isGeographic() && !pointIsLatLong)
+        {
+            geoPoint = point;
+            if (!inputSRS->transform(geoPoint, inputSRS->getGeographicSRS(), geoPoint))
+                return false;
+
+            latLongPoint = &geoPoint;
+        }
+
+        if (inVDatum)
+        {
+            // to HAE:
+            point.z() = inVDatum->msl2hae(latLongPoint->y(), latLongPoint->x(), point.z());
+        }
+
+        // do the units conversion:
+        point.z() = inUnits.convertTo(outUnits, point.z());
+
+        if (outVDatum)
+        {
+            // to MSL:
+            point.z() = outVDatum->hae2msl(latLongPoint->y(), latLongPoint->x(), point.z());
+        }
+
+        return true;
+    }
+
+    bool
+    transformSphericalMercatorXY(
+        osg::Vec3d& point,
+        const SpatialReference* inputSRS,
+        const SpatialReference* outputSRS)
+    {
+        const double radius = 6378137.0;
+
+        if (inputSRS->isGeographic() &&
+            outputSRS->isSphericalMercator() &&
+            inputSRS->isHorizEquivalentTo(outputSRS->getGeographicSRS()))
+        {
+            double lon_deg = inputSRS->getUnits().convertTo(Units::DEGREES, point.x());
+            double lat_deg = inputSRS->getUnits().convertTo(Units::DEGREES, point.y());
+
+            if (lat_deg <= -90.0 || lat_deg >= 90.0)
+                return false;
+
+            point.x() = Units::METERS.convertTo(outputSRS->getUnits(), radius * deg2rad(lon_deg));
+            point.y() = Units::METERS.convertTo(
+                outputSRS->getUnits(),
+                radius * log(tan(osg::PI_4 + deg2rad(lat_deg) * 0.5)));
+
+            return true;
+        }
+
+        if (inputSRS->isSphericalMercator() &&
+            outputSRS->isGeographic() &&
+            outputSRS->isHorizEquivalentTo(inputSRS->getGeographicSRS()))
+        {
+            double x_m = inputSRS->getUnits().convertTo(Units::METERS, point.x());
+            double y_m = inputSRS->getUnits().convertTo(Units::METERS, point.y());
+            double lon_deg = rad2deg(x_m / radius);
+            double lat_deg = rad2deg(2.0 * atan(exp(y_m / radius)) - osg::PI_2);
+
+            point.x() = Units::DEGREES.convertTo(
+                outputSRS->getUnits(),
+                osg::clampBetween(lon_deg, -180.0, 180.0));
+            point.y() = Units::DEGREES.convertTo(
+                outputSRS->getUnits(),
+                osg::clampBetween(lat_deg, -90.0, 90.0));
+
+            return true;
+        }
+
+        return false;
+    }
 }
 
 //------------------------------------------------------------------------
@@ -831,14 +926,88 @@ SpatialReference::transform(const osg::Vec3d&       input,
     if (!valid())
         return false;
 
-    std::vector<osg::Vec3d> v(1, input);
+    output = input;
 
-    if ( transform(v, outputSRS) )
+    // Cube and LTP transforms have custom vector-based pre/post transforms.
+    if (isCube() || isLTP() || outputSRS->isCube() || outputSRS->isLTP())
     {
-        output = v[0];
+        std::vector<osg::Vec3d> v(1, input);
+        if (transform(v, outputSRS))
+        {
+            output = v[0];
+            return true;
+        }
+        return false;
+    }
+
+    // trivial equivalency:
+    if (isEquivalentTo(outputSRS))
+        return true;
+
+    if (isGeocentric() && !outputSRS->isGeocentric())
+    {
+        const SpatialReference* outputGeoSRS = outputSRS->getGeodeticSRS();
+        output = outputGeoSRS->getEllipsoid().geocentricToGeodetic(output);
+        return outputGeoSRS->transform(output, outputSRS, output);
+    }
+
+    else if (!isGeocentric() && outputSRS->isGeocentric())
+    {
+        const SpatialReference* outputGeoSRS = outputSRS->getGeodeticSRS();
+        bool success = transform(output, outputGeoSRS, output);
+        if (success)
+            output = outputGeoSRS->getEllipsoid().geodeticToGeocentric(output);
+        return success;
+    }
+
+    // if the point is starting as geographic, do the Z first to avoid an unnecessary
+    // transformation in the case of differing vdatums.
+    bool z_done = false;
+    if (isGeographic())
+    {
+        z_done = transformPointZ(output, this, outputSRS, true);
+    }
+
+    if (transformSphericalMercatorXY(output, this, outputSRS))
+    {
+        if (!z_done)
+        {
+            z_done = transformPointZ(output, this, outputSRS, outputSRS->isGeographic());
+        }
         return true;
     }
-    return false;
+
+    ThreadLocal& local = getLocal();
+
+    double x = output.x();
+    double y = output.y();
+
+    bool success = transformXYPointArrays(local, &x, &y, 1, outputSRS);
+
+    if (success)
+    {
+        if (isProjected() && outputSRS->isGeographic())
+        {
+            // special case: when going from projected to geographic, clamp the
+            // points to the maximum geographic extent. Sometimes the conversion from
+            // a global/projected SRS (like mercator) will result in *slightly* invalid
+            // geographic points (like long=180.000003), so this addresses that issue.
+            output.x() = osg::clampBetween(x, -180.0, 180.0);
+            output.y() = osg::clampBetween(y, -90.0, 90.0);
+        }
+        else
+        {
+            output.x() = x;
+            output.y() = y;
+        }
+    }
+
+    if (success && !z_done)
+    {
+        z_done = transformPointZ(output, this, outputSRS, outputSRS->isGeographic());
+    }
+
+    return success;
 }
 
 

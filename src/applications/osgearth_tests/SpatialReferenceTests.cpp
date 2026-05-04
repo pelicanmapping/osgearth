@@ -137,6 +137,29 @@ TEST_CASE("SphMercator/WGS84 transform") {
     REQUIRE(vec_eq(temp2, osg::Vec3d(-180, -85, 0)));
 }
 
+TEST_CASE("Single point transforms match batch transforms") {
+    const SpatialReference* wgs84 = SpatialReference::get("wgs84");
+    const SpatialReference* sm = SpatialReference::get("spherical-mercator");
+    const SpatialReference* wgs84_egm96 = SpatialReference::get("wgs84", "egm96");
+    const SpatialReference* ecef = wgs84->getGeocentricSRS();
+
+    auto require_single_matches_batch =
+        [](const SpatialReference* inputSRS, const SpatialReference* outputSRS, const osg::Vec3d& input)
+    {
+        osg::Vec3d single;
+        std::vector<osg::Vec3d> batch(1, input);
+
+        REQUIRE(inputSRS->transform(input, outputSRS, single));
+        REQUIRE(inputSRS->transform(batch, outputSRS));
+        REQUIRE(vec_eq(single, batch[0]));
+    };
+
+    require_single_matches_batch(wgs84, sm, osg::Vec3d(-73.935242, 40.730610, 12.0));
+    require_single_matches_batch(sm, wgs84, osg::Vec3d(-8230420.0, 4972687.0, 12.0));
+    require_single_matches_batch(wgs84, wgs84_egm96, osg::Vec3d(90.0, 0.0, -63.24));
+    require_single_matches_batch(wgs84, ecef, osg::Vec3d(-73.935242, 40.730610, 12.0));
+}
+
 TEST_CASE("Vertical Datum Tests") {
     const SpatialReference* wgs84 = SpatialReference::get("wgs84");
     const SpatialReference* wgs84_egm96 = SpatialReference::get("wgs84", "egm96");

@@ -31,6 +31,22 @@ static void BM_GeoPointTransform(benchmark::State& state)
 }
 BENCHMARK(BM_GeoPointTransform);
 
+static void BM_SpatialReferenceTransformSinglePoint(benchmark::State& state)
+{
+    auto wgs84 = osgEarth::SpatialReference::get("wgs84");
+    auto mercator = osgEarth::SpatialReference::get("spherical-mercator");
+    osg::Vec3d input(-73.935242, 40.730610, 0.0);
+
+    for (auto _ : state)
+    {
+        osg::Vec3d output;
+        bool result = wgs84->transform(input, mercator, output);
+        benchmark::DoNotOptimize(result);
+        benchmark::DoNotOptimize(output);
+    }
+}
+BENCHMARK(BM_SpatialReferenceTransformSinglePoint);
+
 static void BM_GeoExtentContains(benchmark::State& state)
 {
     auto srs = osgEarth::SpatialReference::get("wgs84");

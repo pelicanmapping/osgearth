@@ -123,7 +123,7 @@ ElevationPool::setMap(const Map* map)
 }
 
 int
-ElevationPool::getLOD(double x, double y, WorkingSet* ws)
+ElevationPool::getLOD(double x, double y, WorkingSet* ws, int maxLOD)
 {
     double point[2] = { x, y };
     int maxiestMaxLevel = -1;
@@ -141,7 +141,9 @@ ElevationPool::getLOD(double x, double y, WorkingSet* ws)
             index->Search(point, point, [&](const unsigned& level)
                 {
                     maxiestMaxLevel = std::max(maxiestMaxLevel, (int)level);
-                    return RTREE_KEEP_SEARCHING;
+                    return maxiestMaxLevel >= maxLOD ?
+                        RTREE_STOP_SEARCHING :
+                        RTREE_KEEP_SEARCHING;
                 });
         }
     }
@@ -332,7 +334,7 @@ ElevationPool::prepareEnvelope(ElevationPool::Envelope& env, const GeoPoint& ref
         resolutionInMapUnits,
         ELEVATION_TILE_SIZE);
 
-    env._lod = std::min(getLOD(refPointMap.x(), refPointMap.y(), ws), (int)maxLOD);
+    env._lod = std::min(getLOD(refPointMap.x(), refPointMap.y(), ws, maxLOD), (int)maxLOD);
 
     // This can happen if the elevation data publishes no data extents
     if (env._lod < 0 && !_mapData.layers.empty())
@@ -662,7 +664,7 @@ ElevationPool::sampleMapCoords(
             resolutionInMapUnits,
             ELEVATION_TILE_SIZE);
 
-        lod = std::min(getLOD(p.x(), p.y(), ws), (int)computedLOD);
+        lod = std::min(getLOD(p.x(), p.y(), ws, computedLOD), (int)computedLOD);
 
         if (lod < 0)
         {
@@ -751,7 +753,7 @@ ElevationPool::getSample(const GeoPoint& p, unsigned maxLOD, WorkingSet* ws, Pro
     maxLOD = std::min(maxLOD, static_cast<unsigned>(std::numeric_limits<int>::max()));
 
     // returns the best LOD for the given point, or -1 if there is no data there
-    int lod = std::min(getLOD(p.x(), p.y(), ws), (int)maxLOD);
+    int lod = std::min(getLOD(p.x(), p.y(), ws, (int)maxLOD), (int)maxLOD);
 
     if (lod >= 0)
     {

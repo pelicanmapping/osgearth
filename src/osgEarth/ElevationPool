@@ -240,7 +240,7 @@ namespace osgEarth
             ProgressCallback* progress);        
 
         //! Best LOD this a point for the working set, or -1 if no data in index
-        int getLOD(double x, double y, WorkingSet*);
+        int getLOD(double x, double y, WorkingSet*, int maxLOD);
 
         osg::ref_ptr<ElevationTile> getOrCreateRaster(
             MapData& snapshot,

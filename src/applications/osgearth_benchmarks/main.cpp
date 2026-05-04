@@ -5,7 +5,10 @@
 
 #include <benchmark/benchmark.h>
 
+#include <osgEarth/ElevationPool>
 #include <osgEarth/GeoData>
+#include <osgEarth/HeightFieldUtils>
+#include <osgEarth/Map>
 #include <osgEarth/SpatialReference>
 #include <osgEarth/StringUtils>
 #include <osgEarth/Cache>
@@ -15,6 +18,62 @@
 
 using namespace osgEarth;
 namespace fs = std::filesystem;
+
+namespace
+{
+    class ConstantElevationLayer : public ElevationLayer
+    {
+    public:
+        META_LayerNoOptions(osgEarth, ConstantElevationLayer, ElevationLayer, constant_elevation);
+
+        void init() override
+        {
+            ElevationLayer::init();
+            setProfile(Profile::create(Profile::GLOBAL_GEODETIC));
+            setMaxDataLevel(12u);
+            options().tileSize() = 9u;
+        }
+
+    protected:
+        GeoHeightField createHeightFieldImplementation(
+            const TileKey& key,
+            ProgressCallback* progress) const override
+        {
+            osg::ref_ptr<osg::HeightField> hf = HeightFieldUtils::createReferenceHeightField(
+                key.getExtent(),
+                getTileSize(),
+                getTileSize(),
+                0u,
+                false,
+                42.0f);
+
+            return GeoHeightField(hf.get(), key.getExtent());
+        }
+
+        virtual ~ConstantElevationLayer() { }
+    };
+
+    osg::ref_ptr<Map> createElevationBenchmarkMap(unsigned dataExtentCount)
+    {
+        osg::ref_ptr<Map> map = new Map();
+        map->setProfile(Profile::create(Profile::GLOBAL_GEODETIC));
+
+        osg::ref_ptr<ConstantElevationLayer> layer = new ConstantElevationLayer();
+
+        DataExtentList dataExtents;
+        dataExtents.reserve(dataExtentCount);
+        for (unsigned i = 0; i < dataExtentCount; ++i)
+        {
+            dataExtents.emplace_back(map->getProfile()->getExtent(), 0u, 12u);
+        }
+
+        layer->setDataExtents(dataExtents);
+        map->addLayer(layer.get());
+        map->getElevationPool()->setMap(map.get());
+
+        return map;
+    }
+}
 
 static void BM_GeoPointTransform(benchmark::State& state)
 {
@@ -57,6 +116,56 @@ static void BM_GeoExtentIntersects(benchmark::State& state)
     }
 }
 BENCHMARK(BM_GeoExtentIntersects);
+
+static void BM_ElevationPoolSampleMapCoordsFixedResolution(benchmark::State& state)
+{
+    osg::ref_ptr<Map> map = createElevationBenchmarkMap(256u);
+    osg::ref_ptr<ElevationPool> pool = map->getElevationPool();
+
+    std::vector<osg::Vec3d> points;
+    points.reserve(state.range(0));
+    for (int i = 0; i < state.range(0); ++i)
+    {
+        double x = -1.0 + 2.0 * static_cast<double>(i % 64) / 63.0;
+        double y = -1.0 + 2.0 * static_cast<double>((i / 64) % 64) / 63.0;
+        points.emplace_back(x, y, 0.0);
+    }
+
+    const Distance resolution(10000000.0, Units::METERS);
+
+    int warmupCount = pool->sampleMapCoords(
+        points.begin(),
+        points.end(),
+        resolution,
+        nullptr,
+        nullptr);
+
+    if (warmupCount != static_cast<int>(points.size()))
+    {
+        state.SkipWithError("ElevationPool failed to sample all benchmark points");
+        return;
+    }
+
+    for (auto _ : state)
+    {
+        int count = pool->sampleMapCoords(
+            points.begin(),
+            points.end(),
+            resolution,
+            nullptr,
+            nullptr);
+
+        if (count != static_cast<int>(points.size()))
+        {
+            state.SkipWithError("ElevationPool failed to sample all benchmark points");
+            return;
+        }
+
+        benchmark::DoNotOptimize(count);
+        benchmark::ClobberMemory();
+    }
+}
+BENCHMARK(BM_ElevationPoolSampleMapCoordsFixedResolution)->Arg(4096);
 
 
 

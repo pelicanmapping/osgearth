@@ -1,3 +1,0 @@
-[submodule "src/third_party/lerc"]
-	path = src/third_party/lerc
-	url = https://github.com/Esri/lerc.git

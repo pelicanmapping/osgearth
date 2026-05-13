@@ -36,7 +36,5 @@ endif()
 
 if(NOT APPLE AND NOT ANDROID)
     add_subdirectory(fastdxt)
-    if(NOT BUILDING_VCPKG_PORT)
-        add_subdirectory(lerc)
-    endif()
+    add_subdirectory(lerc)
 endif()

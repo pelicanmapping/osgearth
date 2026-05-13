@@ -159,7 +159,7 @@ public:
 
         // Decode the image
         unsigned int bandOffset = 0;
-        hr = lerc_decode((const unsigned char*)(data.get()), length, 0, numDims, width, height, numBands, dataType, (void*)output);
+        hr = lerc_decode((const unsigned char*)(data.get()), length, 0, nullptr, numDims, width, height, numBands, dataType, (void*)output);
         if (hr)
         {
             delete[]output;
@@ -334,6 +334,7 @@ public:
         hr = lerc_computeCompressedSize((void*)imageData,    // raw image data, row by row, band by band
             dataType, numDims, width, height, numBands,
             0,
+            nullptr,
             maxZError,           // max coding error per pixel, or precision
             &numBytesNeeded);    // size of outgoing Lerc blob
         if (hr)
@@ -347,7 +348,8 @@ public:
 
         hr = lerc_encode((void*)imageData,    // raw image data, row by row, band by band
             dataType, numDims, width, height, numBands,
-            0,         // can give nullptr if all pixels are valid
+            0,
+            nullptr,             // all pixels are valid
             maxZError,           // max coding error per pixel, or precision
             pLercBlob,           // buffer to write to, function will fail if buffer too small
             numBytesBlob,        // buffer size

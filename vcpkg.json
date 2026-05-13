@@ -9,6 +9,7 @@
     "benchmark",
     "blend2d",
     "draco",
+    "lerc",
     {
       "name": "gdal",
       "default-features": false,

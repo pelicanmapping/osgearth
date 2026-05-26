@@ -6,7 +6,6 @@
 
 #include <osgEarth/VisibleLayer>
 #include <osgEarth/Color>
-#include <osg/Texture1D>
 #include <osg/Texture2D>
 #include <osg/TransferFunction>
 
@@ -64,11 +63,7 @@ namespace osgEarth
         //! Destructor
         virtual ~ContourMapLayer() { }
 
-#if defined(OSG_GLES2_AVAILABLE) || defined(OSG_GLES3_AVAILABLE)
         typedef osg::Texture2D TextureType;
-#else
-        typedef osg::Texture1D TextureType;
-#endif
 
         TextureImageUnitReservation _reservationColorRamp;
         TextureImageUnitReservation _reservationGeoid;

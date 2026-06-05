@@ -13,6 +13,7 @@
 #include <osgEarth/StringUtils>
 #include <osgEarth/Cache>
 #include <osgEarth/ImageUtils>
+#include <osgEarth/MBTiles>
 #include <osgDB/ReadFile>
 #include <filesystem>
 
@@ -72,6 +73,61 @@ namespace
         map->getElevationPool()->setMap(map.get());
 
         return map;
+    }
+
+    struct MBTilesReadBenchmarkData
+    {
+        MBTiles::Driver driver;
+        osg::ref_ptr<const Profile> profile;
+        TileKey key = TileKey::INVALID;
+        bool ready = false;
+        std::string error;
+
+        MBTilesReadBenchmarkData()
+        {
+            MBTiles::Options options;
+            options.url() = "../data/world_countries.mbtiles";
+
+            DataExtentList dataExtents;
+            Status status = driver.open(
+                "world_countries",
+                options,
+                false,
+                options.format(),
+                profile,
+                dataExtents,
+                nullptr);
+
+            if (status.isError())
+            {
+                error = status.toString();
+                return;
+            }
+
+            if (!profile.valid())
+            {
+                error = "MBTiles benchmark failed to establish a profile";
+                return;
+            }
+
+            // Largest PNG tile in the bundled fixture: z=3, x=4, MBTiles row=4.
+            key = TileKey(3u, 4u, 3u, profile.get());
+
+            ReadResult warmup = driver.read(key, nullptr, nullptr);
+            if (!warmup.succeeded())
+            {
+                error = "MBTiles benchmark failed to read warmup tile";
+                return;
+            }
+
+            ready = true;
+        }
+    };
+
+    MBTilesReadBenchmarkData& getMBTilesReadBenchmarkData()
+    {
+        static MBTilesReadBenchmarkData data;
+        return data;
     }
 }
 
@@ -166,6 +222,29 @@ static void BM_ElevationPoolSampleMapCoordsFixedResolution(benchmark::State& sta
     }
 }
 BENCHMARK(BM_ElevationPoolSampleMapCoordsFixedResolution)->Arg(4096);
+
+static void BM_MBTilesImageRead_PNG(benchmark::State& state)
+{
+    MBTilesReadBenchmarkData& data = getMBTilesReadBenchmarkData();
+    if (!data.ready)
+    {
+        state.SkipWithError(data.error.c_str());
+        return;
+    }
+
+    for (auto _ : state)
+    {
+        ReadResult result = data.driver.read(data.key, nullptr, nullptr);
+        if (!result.succeeded())
+        {
+            state.SkipWithError("MBTiles benchmark failed to read tile");
+            return;
+        }
+
+        benchmark::DoNotOptimize(result.getImage());
+    }
+}
+BENCHMARK(BM_MBTilesImageRead_PNG)->ThreadRange(1, 8)->UseRealTime()->Unit(benchmark::kMicrosecond);
 
 
 

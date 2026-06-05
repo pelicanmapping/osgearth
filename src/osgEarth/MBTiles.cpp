@@ -317,10 +317,10 @@ bool MBTilesElevationLayer::putMetaData(const std::string& name, const std::stri
 #define LC "[MBTiles] \"" << _name << "\" "
 
 MBTiles::Driver::Driver() :
+    _database(nullptr),
     _minLevel(0),
     _maxLevel(19),
-    _forceRGB(false),
-    _database(nullptr)
+    _forceRGB(false)
 {
     //nop
 }
@@ -330,15 +330,82 @@ Driver::~Driver()
     closeDatabase();
 }
 
+MBTiles::Driver::PerThreadData::~PerThreadData()
+{
+    if (selectTileStmt)
+    {
+        sqlite3_finalize((sqlite3_stmt*)selectTileStmt);
+        selectTileStmt = nullptr;
+    }
+
+    if (selectMetaDataStmt)
+    {
+        sqlite3_finalize((sqlite3_stmt*)selectMetaDataStmt);
+        selectMetaDataStmt = nullptr;
+    }
+
+    if (database)
+    {
+        sqlite3_close_v2((sqlite3*)database);
+        database = nullptr;
+    }
+}
+
 void
 MBTiles::Driver::closeDatabase()
 {
+    _perThreadData.clear();
+
     if (_database != nullptr)
     {
         sqlite3* database = (sqlite3*)_database;
         sqlite3_close_v2(database);
         _database = nullptr;
     }
+}
+
+MBTiles::Driver::PerThreadData&
+MBTiles::Driver::getPerThreadData() const
+{
+    PerThreadData& data = _perThreadData.get();
+    if (!data.database)
+    {
+        sqlite3** dbptr = (sqlite3**)&data.database;
+        int rc = sqlite3_open_v2(_fullFilename.c_str(), dbptr, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, 0L);
+        if (rc != SQLITE_OK)
+        {
+            OE_WARN << LC << "Failed to open read-only database: "
+                << (_fullFilename.empty() ? std::string("<empty>") : _fullFilename)
+                << "; " << (data.database ? sqlite3_errmsg((sqlite3*)data.database) : "unknown error")
+                << std::endl;
+
+            if (data.database)
+            {
+                sqlite3_close_v2((sqlite3*)data.database);
+                data.database = nullptr;
+            }
+
+            return data;
+        }
+
+        static const char* selectTileQuery = "SELECT tile_data from tiles where zoom_level = ? AND tile_column = ? AND tile_row = ?";
+        rc = sqlite3_prepare_v2((sqlite3*)data.database, selectTileQuery, -1, (sqlite3_stmt**)&data.selectTileStmt, 0L);
+        if (rc != SQLITE_OK)
+        {
+            OE_WARN << LC << "Failed to prepare SQL: " << selectTileQuery << "; "
+                << sqlite3_errmsg((sqlite3*)data.database) << std::endl;
+        }
+
+        static const char* selectMetaDataQuery = "SELECT value from metadata where name = ?";
+        rc = sqlite3_prepare_v2((sqlite3*)data.database, selectMetaDataQuery, -1, (sqlite3_stmt**)&data.selectMetaDataStmt, 0L);
+        if (rc != SQLITE_OK)
+        {
+            OE_WARN << LC << "Failed to prepare SQL: " << selectMetaDataQuery << "; "
+                << sqlite3_errmsg((sqlite3*)data.database) << std::endl;
+        }
+    }
+
+    return data;
 }
 
 Status
@@ -406,6 +473,8 @@ MBTiles::Driver::open(
         return Status(Status::ResourceUnavailable, Stringify()
             << "Database \"" << fullFilename << "\": " << sqlite3_errmsg(database));
     }
+
+    _fullFilename = fullFilename;
 
     // New database setup:
     if (isNewDatabase)
@@ -640,18 +709,26 @@ MBTiles::Driver::read(
     ProgressCallback* progress,
     const osgDB::Options* readOptions) const
 {
-    std::lock_guard<std::mutex> exclusiveLock(_mutex);
-
     int z = key.getLevelOfDetail();
     int x = key.getTileX();
     int y = key.getTileY();
 
-    if (z < (int)_minLevel)
+    bool valid = true;
+    std::string dataBuffer;
+
+    unsigned minLevel, maxLevel;
+    {
+        std::lock_guard<std::mutex> exclusiveLock(_mutex);
+        minLevel = _minLevel;
+        maxLevel = _maxLevel;
+    }
+
+    if (z < (int)minLevel)
     {
         return ReadResult::RESULT_NOT_FOUND;
     }
 
-    if (z > (int)_maxLevel)
+    if (z > (int)maxLevel)
     {
         //If we're at the max level, just return NULL
         return ReadResult::RESULT_NOT_FOUND;
@@ -661,69 +738,69 @@ MBTiles::Driver::read(
     key.getProfile()->getNumTiles(key.getLevelOfDetail(), numCols, numRows);
     y  = numRows - y - 1;
 
-    sqlite3* database = (sqlite3*)_database;
-
-    //Get the image
-    sqlite3_stmt* select = NULL;
-    std::string query = "SELECT tile_data from tiles where zoom_level = ? AND tile_column = ? AND tile_row = ?";
-    int rc = sqlite3_prepare_v2( database, query.c_str(), -1, &select, 0L );
-    if ( rc != SQLITE_OK )
+    PerThreadData& threadData = getPerThreadData();
+    sqlite3_stmt* select = (sqlite3_stmt*)threadData.selectTileStmt;
+    if (!threadData.database || !select)
     {
-        OE_WARN << LC << "Failed to prepare SQL: " << query << "; " << sqlite3_errmsg(database) << std::endl;
         return ReadResult::RESULT_READER_ERROR;
     }
 
-    bool valid = true;
+    sqlite3_reset(select);
+    sqlite3_clear_bindings(select);
 
     sqlite3_bind_int( select, 1, z );
     sqlite3_bind_int( select, 2, x );
     sqlite3_bind_int( select, 3, y );
 
-    osg::Image* result = NULL;
-    rc = sqlite3_step( select );
+    int rc = sqlite3_step( select );
     if ( rc == SQLITE_ROW)
     {
-        // the pointer returned from _blob gets freed internally by sqlite, supposedly
+        // The SQLite blob pointer is only valid until the statement is reset/finalized.
         const char* data = (const char*)sqlite3_column_blob( select, 0 );
         int dataLen = sqlite3_column_bytes( select, 0 );
-
-        std::string dataBuffer( data, dataLen );
-
-        // decompress if necessary:
-        if ( _compressor.valid() )
-        {
-            std::istringstream inputStream(dataBuffer);
-            std::string value;
-            if ( !_compressor->decompress(inputStream, value) )
-            {
-                OE_WARN << LC << "Decompression failed" << std::endl;
-                valid = false;
-            }
-            else
-            {
-                dataBuffer = value;
-            }
-        }
-
-        // decode the raw image data:
-        if ( valid )
-        {
-            std::istringstream inputStream(dataBuffer);
-            result = ImageUtils::readStream(inputStream, _dbOptions.get());
-            // If we couldn't load the image automatically try the reader instead.
-            if (!result && _rw.valid())
-            {
-                result = _rw->readImage(inputStream, _dbOptions.get()).takeImage();
-            }
-        }
+        if (dataLen > 0 && data)
+            dataBuffer.assign(data, dataLen);
+        else
+            dataBuffer.clear();
     }
     else
     {
-        OE_DEBUG << LC << "SQL QUERY failed for " << query << ": " << std::endl;
+        OE_DEBUG << LC << "SQL QUERY failed for tile read: " << std::endl;
         valid = false;
     }
 
-    sqlite3_finalize( select );
+    sqlite3_reset(select);
+    sqlite3_clear_bindings(select);
+
+    osg::Image* result = NULL;
+
+    // decompress if necessary:
+    if ( valid && _compressor.valid() )
+    {
+        std::istringstream inputStream(dataBuffer);
+        std::string value;
+        if ( !_compressor->decompress(inputStream, value) )
+        {
+            OE_WARN << LC << "Decompression failed" << std::endl;
+            valid = false;
+        }
+        else
+        {
+            dataBuffer = value;
+        }
+    }
+
+    // decode the raw image data:
+    if ( valid )
+    {
+        std::istringstream inputStream(dataBuffer);
+        result = ImageUtils::readStream(inputStream, _dbOptions.get());
+        // If we couldn't load the image automatically try the reader instead.
+        if (!result && _rw.valid())
+        {
+            result = _rw->readImage(inputStream, _dbOptions.get()).takeImage();
+        }
+    }
 
     return ReadResult(result);
 }
@@ -989,42 +1066,41 @@ MBTiles::Driver::encode(const TileKey& key, const osg::Image* image, ProgressCal
 bool
 MBTiles::Driver::getMetaData(const std::string& key, std::string& value)
 {
-    std::lock_guard<std::mutex> exclusiveLock(_mutex);
-
-    sqlite3* database = (sqlite3*)_database;
-
-    //get the metadata
-    sqlite3_stmt* select = NULL;
-    std::string query = "SELECT value from metadata where name = ?";
-    int rc = sqlite3_prepare_v2( database, query.c_str(), -1, &select, 0L );
-    if ( rc != SQLITE_OK )
+    PerThreadData& threadData = getPerThreadData();
+    sqlite3_stmt* select = (sqlite3_stmt*)threadData.selectMetaDataStmt;
+    if (!threadData.database || !select)
     {
-        OE_WARN << LC << "Failed to prepare SQL: " << query << "; " << sqlite3_errmsg(database) << std::endl;
         return false;
     }
 
+    sqlite3_reset(select);
+    sqlite3_clear_bindings(select);
 
     bool valid = true;
-    std::string keyStr = std::string( key );
-    rc = sqlite3_bind_text( select, 1, keyStr.c_str(), keyStr.length(), SQLITE_STATIC );
+    int rc = sqlite3_bind_text(select, 1, key.c_str(), static_cast<int>(key.length()), SQLITE_STATIC);
     if (rc != SQLITE_OK )
     {
-        OE_WARN << LC << "Failed to bind text: " << query << "; " << sqlite3_errmsg(database) << std::endl;
+        OE_WARN << LC << "Failed to bind metadata key; "
+            << sqlite3_errmsg((sqlite3*)threadData.database) << std::endl;
+        sqlite3_reset(select);
+        sqlite3_clear_bindings(select);
         return false;
     }
 
     rc = sqlite3_step( select );
     if ( rc == SQLITE_ROW)
     {
-        value = (char*)sqlite3_column_text( select, 0 );
+        const unsigned char* text = sqlite3_column_text( select, 0 );
+        value = text ? (const char*)text : "";
     }
     else
     {
-        OE_DEBUG << LC << "SQL QUERY failed for " << query << ": " << std::endl;
+        OE_DEBUG << LC << "SQL QUERY failed for metadata key \"" << key << "\": " << std::endl;
         valid = false;
     }
 
-    sqlite3_finalize( select );
+    sqlite3_reset(select);
+    sqlite3_clear_bindings(select);
     return valid;
 }
 

@@ -7,6 +7,7 @@
 #define OSGEARTH_MBTILES_H
 
 #include <osgEarth/Common>
+#include <osgEarth/Containers>
 #include <osgEarth/ImageLayer>
 #include <osgEarth/ElevationLayer>
 #include <osgEarth/URI>
@@ -76,7 +77,19 @@ namespace osgEarth { namespace MBTiles
         bool putMetaData(const std::string& name, const std::string& value);
 
     private:
+        struct PerThreadData
+        {
+            void* database = nullptr;
+            void* selectTileStmt = nullptr;
+            void* selectMetaDataStmt = nullptr;
+
+            ~PerThreadData();
+        };
+
+        PerThreadData& getPerThreadData() const;
+
         void* _database;
+        mutable Util::PerThread<PerThreadData> _perThreadData;
         mutable unsigned _minLevel;
         mutable unsigned _maxLevel;
         osg::ref_ptr< osg::Image> _emptyImage;
@@ -84,10 +97,11 @@ namespace osgEarth { namespace MBTiles
         osg::ref_ptr<const osgDB::Options> _dbOptions;
         osg::ref_ptr<osgDB::BaseCompressor> _compressor;
         std::string _tileFormat;
+        std::string _fullFilename;
         bool _forceRGB;
         std::string _name;
 
-        // because no one knows if/when sqlite3 is threadsafe.
+        // protects the shared write/metadata connection and mutable level metadata.
         mutable std::mutex _mutex;
 
         bool createTables();

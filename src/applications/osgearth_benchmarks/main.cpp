@@ -8,6 +8,7 @@
 #include <osgEarth/ElevationPool>
 #include <osgEarth/GeoData>
 #include <osgEarth/HeightFieldUtils>
+#include <osgEarth/ImageLayer>
 #include <osgEarth/Map>
 #include <osgEarth/SpatialReference>
 #include <osgEarth/StringUtils>
@@ -129,6 +130,62 @@ namespace
         static MBTilesReadBenchmarkData data;
         return data;
     }
+
+    osg::ref_ptr<osg::Image> createReprojectionBenchmarkImage(unsigned int width, unsigned int height)
+    {
+        osg::ref_ptr<osg::Image> image = new osg::Image();
+        image->allocateImage(width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+
+        for (unsigned int t = 0; t < height; ++t)
+        {
+            for (unsigned int s = 0; s < width; ++s)
+            {
+                unsigned char* pixel = image->data(s, t);
+                pixel[0] = static_cast<unsigned char>((s * 3 + t) & 0xff);
+                pixel[1] = static_cast<unsigned char>((s + t * 5) & 0xff);
+                pixel[2] = static_cast<unsigned char>((s * 7 + t * 11) & 0xff);
+                pixel[3] = 255u;
+            }
+        }
+
+        return image;
+    }
+
+    class ReprojectionBenchmarkImageLayer : public ImageLayer
+    {
+    public:
+        META_LayerNoOptions(osgEarth, ReprojectionBenchmarkImageLayer, ImageLayer, reprojection_benchmark_image);
+
+        void init() override
+        {
+            ImageLayer::init();
+            setProfile(Profile::create(Profile::GLOBAL_GEODETIC));
+            setTileSize(256u);
+            setMaxDataLevel(18u);
+            setCachePolicy(CachePolicy::NO_CACHE);
+        }
+
+        Status openImplementation() override
+        {
+            Status parent = ImageLayer::openImplementation();
+            if (parent.isError())
+                return parent;
+
+            _image = createReprojectionBenchmarkImage(256u, 256u);
+            return parent;
+        }
+
+        GeoImage createImageImplementation(const TileKey& key, ProgressCallback*) const override
+        {
+            return GeoImage(_image.get(), key.getExtent());
+        }
+
+    protected:
+        virtual ~ReprojectionBenchmarkImageLayer() { }
+
+    private:
+        osg::ref_ptr<osg::Image> _image;
+    };
 }
 
 static void BM_GeoPointTransform(benchmark::State& state)
@@ -245,6 +302,41 @@ static void BM_MBTilesImageRead_PNG(benchmark::State& state)
     }
 }
 BENCHMARK(BM_MBTilesImageRead_PNG)->ThreadRange(1, 8)->UseRealTime()->Unit(benchmark::kMicrosecond);
+
+static void BM_ImageLayerAssembleImage_Reproject(benchmark::State& state)
+{
+    osg::ref_ptr<ReprojectionBenchmarkImageLayer> layer = new ReprojectionBenchmarkImageLayer();
+    Status status = layer->open();
+    if (status.isError())
+    {
+        state.SkipWithError(status.toString().c_str());
+        return;
+    }
+
+    osg::ref_ptr<const Profile> outputProfile = Profile::create(Profile::GLOBAL_MERCATOR);
+    TileKey key(4u, 8u, 5u, outputProfile.get());
+
+    GeoImage warmup = layer->createImage(key, nullptr);
+    if (!warmup.valid())
+    {
+        state.SkipWithError("ImageLayer reprojection benchmark failed to create warmup tile");
+        return;
+    }
+
+    for (auto _ : state)
+    {
+        GeoImage image = layer->createImage(key, nullptr);
+        if (!image.valid())
+        {
+            state.SkipWithError("ImageLayer reprojection benchmark failed to create tile");
+            return;
+        }
+
+        benchmark::DoNotOptimize(image.getImage());
+        benchmark::ClobberMemory();
+    }
+}
+BENCHMARK(BM_ImageLayerAssembleImage_Reproject)->Unit(benchmark::kMillisecond);
 
 
 

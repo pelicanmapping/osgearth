@@ -464,4 +464,20 @@ static void BM_ResizeImage_BilinearRGBA8(benchmark::State& state)
 }
 BENCHMARK(BM_ResizeImage_BilinearRGBA8)->Args({768, 768})->Unit(benchmark::kMillisecond);
 
+static void BM_MipmapImage_RGBA8(benchmark::State& state)
+{
+    osg::ref_ptr<osg::Image> image = createResizeBenchmarkImage(
+        static_cast<unsigned int>(state.range(0)),
+        static_cast<unsigned int>(state.range(1)));
+
+    for (auto _ : state)
+    {
+        osg::ref_ptr<const osg::Image> mipmapped = ImageUtils::mipmapImage(image.get(), 4);
+        benchmark::DoNotOptimize(mipmapped.get());
+        benchmark::DoNotOptimize(mipmapped->getNumMipmapLevels());
+        benchmark::ClobberMemory();
+    }
+}
+BENCHMARK(BM_MipmapImage_RGBA8)->Args({1024, 1024})->Args({2048, 2048})->Unit(benchmark::kMillisecond);
+
 BENCHMARK_MAIN();

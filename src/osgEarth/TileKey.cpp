@@ -5,8 +5,21 @@
 
 #include <osgEarth/TileKey>
 #include <osgEarth/Math>
+#include <charconv>
+#include <limits>
 
 using namespace osgEarth;
+
+namespace
+{
+    constexpr std::size_t MAX_UNSIGNED_DIGITS = std::numeric_limits<unsigned int>::digits10 + 1u;
+    constexpr std::size_t MAX_TILEKEY_STRING_SIZE = 3u * MAX_UNSIGNED_DIGITS + 2u;
+
+    char* appendUnsigned(char* out, char* end, unsigned int value)
+    {
+        return std::to_chars(out, end, value).ptr;
+    }
+}
 
 //------------------------------------------------------------------------
 
@@ -80,9 +93,17 @@ TileKey::str() const
 {
     if (valid())
     {
-        char buf[255];
-        sprintf(buf, "%u/%u/%u", _lod, _x, _y);
-        return std::string(buf);
+        char buf[MAX_TILEKEY_STRING_SIZE];
+        char* out = buf;
+        char* end = buf + sizeof(buf);
+
+        out = appendUnsigned(out, end, _lod);
+        *out++ = '/';
+        out = appendUnsigned(out, end, _x);
+        *out++ = '/';
+        out = appendUnsigned(out, end, _y);
+
+        return std::string(buf, out);
     }
     else return "invalid";
 }

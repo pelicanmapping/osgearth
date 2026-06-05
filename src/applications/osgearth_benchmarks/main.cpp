@@ -11,6 +11,7 @@
 #include <osgEarth/Map>
 #include <osgEarth/SpatialReference>
 #include <osgEarth/StringUtils>
+#include <osgEarth/TileKey>
 #include <osgEarth/Cache>
 #include <osgEarth/ImageUtils>
 #include <osgDB/ReadFile>
@@ -166,6 +167,42 @@ static void BM_ElevationPoolSampleMapCoordsFixedResolution(benchmark::State& sta
     }
 }
 BENCHMARK(BM_ElevationPoolSampleMapCoordsFixedResolution)->Arg(4096);
+
+
+static void BM_TileKeyString(benchmark::State& state)
+{
+    osg::ref_ptr<const Profile> profile = Profile::create(Profile::GLOBAL_GEODETIC);
+
+    std::vector<TileKey> keys;
+    keys.reserve(state.range(0));
+    for (int i = 0; i < state.range(0); ++i)
+    {
+        const unsigned lod = 8u + static_cast<unsigned>(i % 16);
+        keys.emplace_back(
+            lod,
+            12345u + static_cast<unsigned>(i * 37u),
+            67890u + static_cast<unsigned>(i * 53u),
+            profile.get());
+    }
+
+    if (TileKey(17u, 123456u, 654321u, profile.get()).str() != "17/123456/654321")
+    {
+        state.SkipWithError("TileKey string formatting changed unexpectedly");
+        return;
+    }
+
+    for (auto _ : state)
+    {
+        for (const auto& key : keys)
+        {
+            std::string formatted = key.str();
+            benchmark::DoNotOptimize(formatted);
+        }
+    }
+
+    state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(keys.size()));
+}
+BENCHMARK(BM_TileKeyString)->Arg(4096);
 
 
 

@@ -9,10 +9,22 @@
 #include <osgEarth/Metrics>
 #include <osgEarth/ImageLayer>
 #include <osgEarth/Math>
-#include <osg/GLU>
 #include <osgDB/Registry>
 
+#include <osg/GLU>
 #include <osg/ValueObject>
+
+#include <algorithm>
+
+// Flip to 0 to compare against the old OSG GLU scaler path.
+#ifndef OSGEARTH_USE_STB_IMAGE_RESIZE
+#    define OSGEARTH_USE_STB_IMAGE_RESIZE 1
+#endif
+
+#if OSGEARTH_USE_STB_IMAGE_RESIZE
+#    define STB_IMAGE_RESIZE_IMPLEMENTATION
+#    include <third_party/stb_image_resize2.h>
+#endif
 
 #define LC "[ImageUtils] "
 
@@ -28,6 +40,180 @@
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
+
+namespace
+{
+    int
+    mipmapDimension(int size, int level)
+    {
+        return std::max(size >> level, 1);
+    }
+
+    bool
+    scaleImageWithGlu(
+        const osg::Image* image,
+        int in_s, int in_t, const void* inputData,
+        int out_s, int out_t, void* outputData,
+        int inputRowLength = 0,
+        int outputRowLength = 0)
+    {
+        osg::PixelStorageModes psm;
+        psm.pack_alignment = image->getPacking();
+        psm.pack_row_length = outputRowLength;
+        psm.unpack_alignment = image->getPacking();
+        psm.unpack_row_length = inputRowLength;
+
+        return gluScaleImage(
+            &psm,
+            image->getPixelFormat(),
+            in_s,
+            in_t,
+            image->getDataType(),
+            inputData,
+            out_s,
+            out_t,
+            image->getDataType(),
+            outputData) == 0;
+    }
+
+#if OSGEARTH_USE_STB_IMAGE_RESIZE
+    bool
+    getStbirPixelLayout(GLenum pixelFormat, stbir_pixel_layout& layout)
+    {
+        switch (pixelFormat)
+        {
+        case GL_DEPTH_COMPONENT:
+        case GL_LUMINANCE:
+        case GL_ALPHA:
+        case GL_RED:
+            layout = STBIR_1CHANNEL;
+            return true;
+
+        case GL_LUMINANCE_ALPHA:
+        case GL_RG:
+            layout = STBIR_2CHANNEL;
+            return true;
+
+        case GL_RGB:
+            layout = STBIR_RGB;
+            return true;
+
+        case GL_BGR:
+            layout = STBIR_BGR;
+            return true;
+
+        case GL_RGBA:
+        case GL_BGRA:
+            layout = STBIR_4CHANNEL;
+            return true;
+
+        default:
+            return false;
+        }
+    }
+
+    bool
+    getStbirDataType(GLenum dataType, stbir_datatype& type)
+    {
+        switch (dataType)
+        {
+        case GL_UNSIGNED_BYTE:
+            type = STBIR_TYPE_UINT8;
+            return true;
+
+        case GL_UNSIGNED_SHORT:
+            type = STBIR_TYPE_UINT16;
+            return true;
+
+        case GL_FLOAT:
+            type = STBIR_TYPE_FLOAT;
+            return true;
+
+#if defined(GL_HALF_FLOAT)
+        case GL_HALF_FLOAT:
+            type = STBIR_TYPE_HALF_FLOAT;
+            return true;
+#elif defined(GL_HALF_FLOAT_ARB)
+        case GL_HALF_FLOAT_ARB:
+            type = STBIR_TYPE_HALF_FLOAT;
+            return true;
+#elif defined(GL_HALF_FLOAT_OES)
+        case GL_HALF_FLOAT_OES:
+            type = STBIR_TYPE_HALF_FLOAT;
+            return true;
+#endif
+
+        default:
+            return false;
+        }
+    }
+
+    bool
+    scaleImageForMipmap(
+        const osg::Image* image,
+        int in_s, int in_t, const void* inputData,
+        int out_s, int out_t, void* outputData,
+        int inputRowLength = 0,
+        int outputRowLength = 0)
+    {
+        stbir_pixel_layout pixelLayout = STBIR_1CHANNEL;
+        stbir_datatype dataType = STBIR_TYPE_UINT8;
+
+        if (getStbirPixelLayout(image->getPixelFormat(), pixelLayout) &&
+            getStbirDataType(image->getDataType(), dataType))
+        {
+            const int inputStride = osg::Image::computeRowWidthInBytes(
+                inputRowLength > 0 ? inputRowLength : in_s,
+                image->getPixelFormat(),
+                image->getDataType(),
+                image->getPacking());
+
+            const int outputStride = osg::Image::computeRowWidthInBytes(
+                outputRowLength > 0 ? outputRowLength : out_s,
+                image->getPixelFormat(),
+                image->getDataType(),
+                image->getPacking());
+
+            return stbir_resize(
+                inputData,
+                in_s,
+                in_t,
+                inputStride,
+                outputData,
+                out_s,
+                out_t,
+                outputStride,
+                pixelLayout,
+                dataType,
+                STBIR_EDGE_CLAMP,
+                STBIR_FILTER_BOX) == outputData;
+        }
+
+        return scaleImageWithGlu(
+            image,
+            in_s, in_t, inputData,
+            out_s, out_t, outputData,
+            inputRowLength,
+            outputRowLength);
+    }
+#else
+    bool
+    scaleImageForMipmap(
+        const osg::Image* image,
+        int in_s, int in_t, const void* inputData,
+        int out_s, int out_t, void* outputData,
+        int inputRowLength = 0,
+        int outputRowLength = 0)
+    {
+        return scaleImageWithGlu(
+            image,
+            in_s, in_t, inputData,
+            out_s, out_t, outputData,
+            inputRowLength,
+            outputRowLength);
+    }
+#endif
+}
 
 
 osg::Image*
@@ -568,43 +754,38 @@ ImageUtils::mipmapImage(const osg::Image* input, int minLevelSize)
     output->setMipmapLevels(mipOffsets);
 
     // now, populate the image levels.
-    osg::PixelStorageModes psm;
-    psm.pack_alignment = input->getPacking();
-    psm.pack_row_length = input->getRowLength();
-    psm.unpack_alignment = input->getPacking();
-
     for(int level=1; level<numLevels; ++level)
     {
 #if 0
         // Build mipmaps based on the full resolution image
-        // OSG-custom gluScaleImage that does not require a graphics context
-        GLint status = gluScaleImage(
-            &psm,
-            output->getPixelFormat(),
+        bool scaled = scaleImageForMipmap(
+            output,
             output->s(),
             output->t(),
-            output->getDataType(),
             output->data(),
-            std::max(output->s() >> level, 1),
-            std::max(output->t() >> level, 1),
-            output->getDataType(),
-            output->getMipmapData(level));
+            mipmapDimension(output->s(), level),
+            mipmapDimension(output->t(), level),
+            output->getMipmapData(level),
+            0,
+            output->getRowLength());
 #else
         // Build mipmaps based on the previous level and not the full resolution for speed
-        // OSG-custom gluScaleImage that does not require a graphics context
-        GLint status = gluScaleImage(
-            &psm,
-            output->getPixelFormat(),
-            output->s() >> (level - 1),
-            output->t() >> (level -1 ),
-            output->getDataType(),
-            //output->data(),
+        bool scaled = scaleImageForMipmap(
+            output,
+            mipmapDimension(output->s(), level - 1),
+            mipmapDimension(output->t(), level - 1),
             output->getMipmapData(level - 1),
-            output->s() >> level,
-            output->t() >> level,
-            output->getDataType(),
-            output->getMipmapData(level));
+            mipmapDimension(output->s(), level),
+            mipmapDimension(output->t(), level),
+            output->getMipmapData(level),
+            0,
+            output->getRowLength());
 #endif
+        if (!scaled)
+        {
+            OE_WARN << LC << "mipmapImage: failed to scale image mip level " << level << std::endl;
+            return input;
+        }
     }
 
     return output;
@@ -670,25 +851,24 @@ ImageUtils::mipmapImageInPlace(osg::Image* input)
     input->setMipmapLevels(mipOffsets);
 
     // now, populate the image levels.
-    osg::PixelStorageModes psm;
-    psm.pack_alignment = input->getPacking();
-    psm.pack_row_length = input->getRowLength();
-    psm.unpack_alignment = input->getPacking();
-
     for(int level=1; level<numLevels; ++level)
     {
-        // OSG-custom gluScaleImage that does not require a graphics context
-        GLint status = gluScaleImage(
-            &psm,
-            input->getPixelFormat(),
+        bool scaled = scaleImageForMipmap(
+            input,
             input->s(),
             input->t(),
-            input->getDataType(),
             input->data(),
-            std::max(input->s() >> level, 1),
-            std::max(input->t() >> level, 1),
-            input->getDataType(),
-            input->getMipmapData(level));
+            mipmapDimension(input->s(), level),
+            mipmapDimension(input->t(), level),
+            input->getMipmapData(level),
+            0,
+            input->getRowLength());
+
+        if (!scaled)
+        {
+            OE_WARN << LC << "mipmapImageInPlace: failed to scale image mip level " << level << std::endl;
+            return;
+        }
     }
 }
 

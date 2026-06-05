@@ -73,6 +73,46 @@ namespace
 
         return map;
     }
+
+    std::string createStringReplaceInBenchmarkInput(unsigned markerCount, const std::string& marker)
+    {
+        std::string input;
+        input.reserve(markerCount * 96u);
+
+        for (unsigned i = 0; i < markerCount; ++i)
+        {
+            input += "vec4 sample_";
+            input += std::to_string(i);
+            input += " = texture(";
+            input += marker;
+            input += ", uv) * ";
+            input += marker;
+            input += "_scale;\n";
+        }
+
+        return input;
+    }
+
+    std::string createStringReplaceInBenchmarkExpected(
+        unsigned markerCount,
+        const std::string& replacement)
+    {
+        std::string expected;
+        expected.reserve(markerCount * 128u);
+
+        for (unsigned i = 0; i < markerCount; ++i)
+        {
+            expected += "vec4 sample_";
+            expected += std::to_string(i);
+            expected += " = texture(";
+            expected += replacement;
+            expected += ", uv) * ";
+            expected += replacement;
+            expected += "_scale;\n";
+        }
+
+        return expected;
+    }
 }
 
 static void BM_GeoPointTransform(benchmark::State& state)
@@ -166,6 +206,35 @@ static void BM_ElevationPoolSampleMapCoordsFixedResolution(benchmark::State& sta
     }
 }
 BENCHMARK(BM_ElevationPoolSampleMapCoordsFixedResolution)->Arg(4096);
+
+
+static void BM_StringReplaceInExpanding(benchmark::State& state)
+{
+    const std::string marker = "$OE_TEX";
+    const std::string replacement = "oe_layer_texture_unit_0123456789";
+    const unsigned markerCount = static_cast<unsigned>(state.range(0));
+    const std::string input = createStringReplaceInBenchmarkInput(markerCount, marker);
+
+    std::string sanity = input;
+    Strings::replaceIn(sanity, marker, replacement);
+
+    if (sanity != createStringReplaceInBenchmarkExpected(markerCount, replacement))
+    {
+        state.SkipWithError("Strings::replaceIn produced an unexpected replacement result");
+        return;
+    }
+
+    for (auto _ : state)
+    {
+        std::string working = input;
+        Strings::replaceIn(working, marker, replacement);
+        benchmark::DoNotOptimize(working);
+        benchmark::ClobberMemory();
+    }
+
+    state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(markerCount * 2u));
+}
+BENCHMARK(BM_StringReplaceInExpanding)->Arg(2048);
 
 
 

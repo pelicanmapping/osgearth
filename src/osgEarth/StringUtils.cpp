@@ -464,14 +464,51 @@ std::string&
 osgEarth::Util::replaceIn(std::string& s, const std::string& sub, const std::string& other)
 {
     if (sub.empty()) return s;
-    size_t b = 0;
-    for (; ; )
+
+    size_t first = s.find(sub);
+    if (first == std::string::npos) return s;
+
+    if (sub.size() == other.size())
     {
-        b = s.find(sub, b);
-        if (b == s.npos) break;
-        s.replace(b, sub.size(), other);
-        b += other.size();
+        for (size_t b = first; b != std::string::npos; b = s.find(sub, b + other.size()))
+        {
+            s.replace(b, sub.size(), other);
+        }
+
+        return s;
     }
+
+    size_t count = 1;
+    size_t second = s.find(sub, first + sub.size());
+    if (second == std::string::npos)
+    {
+        s.replace(first, sub.size(), other);
+        return s;
+    }
+
+    for (size_t b = second; b != std::string::npos; b = s.find(sub, b + sub.size()))
+    {
+        ++count;
+    }
+
+    const size_t finalSize =
+        other.size() > sub.size() ?
+        s.size() + count * (other.size() - sub.size()) :
+        s.size() - count * (sub.size() - other.size());
+
+    std::string output;
+    output.reserve(finalSize);
+
+    size_t tail = 0;
+    for (size_t b = first; b != std::string::npos; b = s.find(sub, tail))
+    {
+        output.append(s, tail, b - tail);
+        output.append(other);
+        tail = b + sub.size();
+    }
+    output.append(s, tail, std::string::npos);
+
+    s.swap(output);
     return s;
 }
 

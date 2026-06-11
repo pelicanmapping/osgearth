@@ -84,7 +84,7 @@ Config::fromURI(const URI& uri)
             if (key() == "Document" && children().size() > 0)
             {
                 Config temp = std::move(children().front());
-                *this = temp;
+                *this = std::move(temp);
             }               
         }
         else
@@ -241,7 +241,7 @@ namespace
 
                     else
                     {
-                        for (auto i : sets)
+                        for (auto& i : sets)
                         {
                             if (i.second.size() == 1)
                             {
@@ -325,7 +325,7 @@ namespace
                     {
                         Config element( *i );
                         json2conf( value, element, depth+1 );
-                        conf.add( element );
+                        conf.add( std::move(element) );
                     }
                 }
                 else if ( value.isArray() )
@@ -337,7 +337,7 @@ namespace
                         {
                             Config child;
                             json2conf( *j, child, depth+1 );
-                            conf.add( key, child );
+                            conf.add( key, std::move(child) );
                         }
                     }
                     else if ( endsWith(*i, "_$set") ) // backwards compatibility
@@ -347,14 +347,14 @@ namespace
                         {
                             Config child;
                             json2conf( *j, child, depth+1 );
-                            conf.add( key, child );
+                            conf.add( key, std::move(child) );
                         }
                     }
                     else
                     {
                         Config element( *i );
                         json2conf( value, element, depth+1 );
-                        conf.add( element );
+                        conf.add( std::move(element) );
                     }
                 }
                 else if ( (*i) == "$key" )
@@ -391,7 +391,7 @@ namespace
                 Config child;
                 json2conf( *j, child, depth+1 );
                 if ( !child.empty() )
-                    conf.add( child );
+                    conf.add( std::move(child) );
             }
         }
         else if ( json.type() != Json::nullValue )

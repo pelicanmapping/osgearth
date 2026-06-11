@@ -8,6 +8,7 @@
 
 #include <osgEarth/Common>
 #include <string>
+#include <utility>
 
 namespace osgEarth
 {
@@ -27,6 +28,9 @@ namespace osgEarth
     public:
         Status() : _code(NoError) { }
         Status(const Status& rhs) : _code(rhs._code), _msg(rhs._msg) { }
+        Status(Status&& rhs) noexcept = default;
+        Status& operator=(const Status& rhs) = default;
+        Status& operator=(Status&& rhs) noexcept = default;
         Status(const Code& code) : _code(code) { }
         Status(const std::string& msg) : _code(GeneralError), _msg(msg) { }
         Status(const Code& code, const std::string& msg) : _code(code), _msg(msg) { }
@@ -64,6 +68,7 @@ namespace osgEarth
         Result() : Status() { }
         Result(const T& val) : _value(val) { }
         Result(const Status& s) : Status(s) { }
+        Result(T&& val) : _value(std::move(val)) { }
         const T& value() const { return _value; }
         const T& get() const { return _value; }
         const T* operator -> () const { return &_value; }

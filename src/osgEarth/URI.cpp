@@ -12,6 +12,7 @@
 #include <osgDB/FileNameUtils>
 #include <osgDB/ReadFile>
 #include <osgDB/Archive>
+#include <utility>
 
 #ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
 #include <Superluminal/PerformanceAPI.h>
@@ -235,7 +236,7 @@ URI::getConfig() const
                 headersconf.add(Config(i->first, i->second));
             }
         }
-        conf.add(headersconf);
+        conf.add(std::move(headersconf));
     }
 
     return conf;

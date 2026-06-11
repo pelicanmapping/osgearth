@@ -12,6 +12,7 @@
 #include <osgEarth/StringUtils>
 #include <osg/Shape>
 #include <vector>
+#include <utility>
 
 namespace osgEarth
 {
@@ -227,6 +228,7 @@ namespace osgEarth
 
         //! Sets an attribute value
         void set(const std::string& name, const std::string& value);
+        void set(const std::string& name, std::string&& value);
         void set(const std::string& name, const char* value);
         void set(const std::string& name, double value);
         void set(const std::string& name, std::int64_t value);
@@ -237,6 +239,7 @@ namespace osgEarth
         void set(const std::string& name, unsigned long value) { set(name, static_cast<std::int64_t>(value)); }
         void set(const std::string& name, bool value);
         void set(const std::string& name, const AttributeValue& value);
+        void set(const std::string& name, AttributeValue&& value);
 
         //! Sets the named attribute to null (with no implicit type)
         void setNull(const std::string& name);
@@ -277,6 +280,7 @@ namespace osgEarth
         const Style* getStyle() const { return _style.get(); }
         Style& getOrCreateStyle();
         void setStyle(const Style& style);
+        void setStyle(Style&& style);
 
         /** Geodetic interpolation method. */
         optional<GeoInterpolation>& geoInterp() { return _geoInterp; }

@@ -6,6 +6,7 @@
 #include <osgEarth/URI>
 #include <osgDB/Registry>
 #include <osgDB/FileNameUtils>
+#include <utility>
 
 using namespace osgEarth;
 

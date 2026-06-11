@@ -304,7 +304,7 @@ std::unique_ptr< draco::Mesh > geometryToDraco(osg::Geometry* geometry, bool str
         }
     }    
 
-    return std::move(mesh);
+    return mesh;
 }
 
 

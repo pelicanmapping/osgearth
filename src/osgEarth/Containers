@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <queue>
 #include <thread>
+#include <utility>
 
 namespace osgEarth { namespace Util
 {
@@ -57,6 +58,17 @@ namespace osgEarth { namespace Util
             return _container.back().second;
         }
 
+        inline DATA& operator[](KEY&& key) {
+            for(unsigned i=0; i<_container.size(); ++i) {
+                if (keys_equal(_container[i].first, key)) {
+                    return _container[i].second;
+                }
+            }
+            _container.emplace_back();
+            _container.back().first = std::move(key);
+            return _container.back().second;
+        }
+
         inline const_iterator begin() const { return _container.begin(); }
         inline const_iterator end()   const { return _container.end(); }
         inline iterator begin()             { return _container.begin(); }
@@ -88,7 +100,7 @@ namespace osgEarth { namespace Util
             for(unsigned i=0; i<_container.size(); ++i) {
                 if (keys_equal(_container[i].first, key)) {
                     if (i+1 < _container.size()) {
-                        _container[i] = _container[_container.size()-1];
+                        _container[i] = std::move(_container[_container.size()-1]);
                     }
                     _container.resize(_container.size()-1);
                     break;
@@ -146,6 +158,17 @@ namespace osgEarth { namespace Util
             }
         }
 
+        inline std::pair<typename vector_set<DATA>::const_iterator, bool> insert(DATA&& data) {
+            const_iterator i = find(data);
+            if (i != end()) {
+                return std::make_pair(i, false);
+            }
+            else {
+                _container.push_back(std::move(data));
+                return std::make_pair(_container.end()-1, true);
+            }
+        }
+
         inline const_iterator find(const DATA& data) const {
             for (unsigned i = 0; i < _container.size(); ++i) {
                 if (_container[i] == data) {
@@ -167,7 +190,7 @@ namespace osgEarth { namespace Util
             for (unsigned i = 0; i < _container.size(); ++i) {
                 if (_container[i] == data) {
                     if (i + 1 < _container.size()) {
-                        _container[i] = _container[_container.size() - 1];
+                        _container[i] = std::move(_container[_container.size() - 1]);
                     }
                     _container.resize(_container.size() - 1);
                     return 1;
@@ -474,12 +497,14 @@ namespace osgEarth { namespace Util
         void assign(Iter first, Iter last) { _impl.assign(first, last); }
 
         void push_back(const value_type& value) { _impl.push_back(value); }
+        void push_back(value_type&& value) { _impl.push_back(std::move(value)); }
         void pop_back() { _impl.pop_back(); }
 
         iterator erase(iterator where) { return _impl.erase(where); }
         iterator erase(iterator first, iterator last) { return _impl.erase(first, last); }
 
         iterator insert(iterator where, const value_type& value) { return _impl.insert(where, value); }
+        iterator insert(iterator where, value_type&& value) { return _impl.insert(where, std::move(value)); }
 
         template<class InputIterator>
         void insert(iterator where, InputIterator first, InputIterator last)

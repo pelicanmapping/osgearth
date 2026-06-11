@@ -24,6 +24,7 @@
 #include <osgEarth/Config>
 #include <osg/Object>
 #include <vector>
+#include <utility>
 
 namespace osgEarth
 {
@@ -52,8 +53,12 @@ namespace osgEarth
             specify SHALLOW_COPY, the new one will point to the same symbols. */
         Style(const Style& rhs, const osg::CopyOp& op =osg::CopyOp::DEEP_COPY_ALL ); 
 
+        /** Move constructor. */
+        Style(Style&& rhs) noexcept;
+
         /** assignment operator */
         Style& operator = (const Style& rhs);
+        Style& operator = (Style&& rhs) noexcept;
 
         /** Gets the name of this style */
         const std::string& getName() const { return _name; }

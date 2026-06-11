@@ -9,6 +9,7 @@
 
 #include <osgEarth/StringUtils>
 #include <osgEarth/JsonUtils>
+#include <utility>
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
@@ -142,6 +143,15 @@ Feature::setStyle(const Style& style)
         _style = std::make_shared<Style>(style);
 }
 
+void
+Feature::setStyle(Style&& style)
+{
+    if (style.empty())
+        _style = nullptr;
+    else
+        _style = std::make_shared<Style>(std::move(style));
+}
+
 Style&
 Feature::getOrCreateStyle()
 {
@@ -156,6 +166,12 @@ void
 Feature::set(const std::string& name, const std::string& value)
 {
     _attrs[toLower(name)].emplace<std::string>(value);
+}
+
+void
+Feature::set(const std::string& name, std::string&& value)
+{
+    _attrs[toLower(name)].emplace<std::string>(std::move(value));
 }
 
 void
@@ -186,6 +202,12 @@ void
 Feature::set(const std::string& name, const AttributeValue& value)
 {
     _attrs[toLower(name)] = value;
+}
+
+void
+Feature::set(const std::string& name, AttributeValue&& value)
+{
+    _attrs[toLower(name)] = std::move(value);
 }
 
 void

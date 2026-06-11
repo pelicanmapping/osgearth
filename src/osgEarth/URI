@@ -11,6 +11,7 @@
 #include <osg/Node>
 #include <osgDB/Options>
 #include <osgDB/ReaderWriter>
+#include <utility>
 
 namespace osgEarth
 {
@@ -44,6 +45,9 @@ namespace osgEarth
 
         /** Copy constructor. */
         URIContext(const URIContext& rhs);
+        URIContext(URIContext&& rhs) noexcept = default;
+        URIContext& operator=(const URIContext& rhs) = default;
+        URIContext& operator=(URIContext&& rhs) noexcept = default;
 
         /** dtor */
         virtual ~URIContext() { }
@@ -244,6 +248,9 @@ namespace osgEarth
     public:
         /** Copier */
         URI( const URI& rhs );
+        URI( URI&& rhs ) noexcept = default;
+        URI& operator=(const URI& rhs) = default;
+        URI& operator=(URI&& rhs) noexcept = default;
 
 
     public: // config methods

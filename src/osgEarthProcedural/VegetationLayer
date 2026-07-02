@@ -52,10 +52,6 @@ namespace osgEarth { namespace Procedural
             //! default = true
             OE_OPTION(bool, useImpostorPBRMaps, true);
 
-            //! Whether to assume normal maps are RG-compressed
-            //! default = true;
-            OE_OPTION(bool, useRGCompressedNormalMaps, true);
-
             //! Scale factor for LOD-ing the far-away impostor vegetation
             //! default = 1.0f
             OE_OPTION(float, farLODScale, 1.0f);

@@ -27,9 +27,6 @@ FeatureImageLayer::Options::getConfig() const
     featureSource().set(conf, "features");
     styleSheet().set(conf, "styles");
     conf.set("buffer_width", bufferWidth());
-    conf.set("gamma", gamma());
-    conf.set("sdf", sdf());
-    conf.set("sdf_invert", sdf_invert());
     conf.set("background_color", backgroundColor());
 
     if (filters().empty() == false)
@@ -46,16 +43,9 @@ FeatureImageLayer::Options::getConfig() const
 void
 FeatureImageLayer::Options::fromConfig(const Config& conf)
 {
-    gamma().setDefault(1.3);
-    sdf().setDefault(false);
-    sdf_invert().setDefault(false);
-
     featureSource().get(conf, "features");
     styleSheet().get(conf, "styles");
     conf.get("buffer_width", bufferWidth());
-    conf.get("gamma", gamma());
-    conf.get("sdf", sdf());
-    conf.get("sdf_invert", sdf_invert());
     conf.get("background_color", backgroundColor());
 
     const Config& filtersConf = conf.child("filters");

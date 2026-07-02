@@ -52,13 +52,10 @@ namespace osgEarth
         public:
             META_LayerOptions(osgEarth, Options, TileLayer::Options);
             OE_OPTION(URI, noDataImageFilename);
-            OE_OPTION(osg::Vec4ub, transparentColor, osg::Vec4ub(0, 0, 0, 0));
             OE_OPTION(ColorFilterChain, colorFilters);
             OE_OPTION(osg::Texture::FilterMode, minFilter, osg::Texture::LINEAR_MIPMAP_LINEAR);
             OE_OPTION(osg::Texture::FilterMode, magFilter, osg::Texture::LINEAR);
             OE_OPTION(std::string, textureCompression);
-            OE_OPTION(double, edgeBufferRatio, 0.0);
-            OE_OPTION(unsigned, reprojectedTileSize, 256u);
             OE_OPTION(Distance, altitude);
             OE_OPTION(bool, coverage, false);
             OE_OPTION(bool, acceptDraping, false);

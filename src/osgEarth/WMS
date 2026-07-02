@@ -333,7 +333,6 @@ namespace osgEarth { namespace WMS
         OE_OPTION(std::string, crs);
         OE_OPTION(bool, transparent);
         OE_OPTION(std::string, times);
-        OE_OPTION(double, secondsPerFrame);
 
         static Config getMetadata();
         virtual Config getConfig() const;

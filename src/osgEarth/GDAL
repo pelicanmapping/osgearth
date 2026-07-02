@@ -56,7 +56,6 @@ namespace osgEarth
             OE_OPTION(std::string, connection);
             OE_OPTION(unsigned, subDataSet, 0u);
             OE_OPTION(RasterInterpolation, interpolation, INTERP_BILINEAR);
-            OE_OPTION(ProfileOptions, warpProfile);
             OE_OPTION(bool, useVRT, false);
             OE_OPTION(bool, coverageUsesPaletteIndex, true);
             OE_OPTION(bool, singleThreaded, false);
@@ -272,10 +271,6 @@ namespace osgEarth
         //! GDAL sub-dataset index (optional)
         void setSubDataSet(const unsigned& value);
         const unsigned& getSubDataSet() const;
-
-        //! Forced profile for reprojection (still need this?)
-        void setWarpProfile(const ProfileOptions& value);
-        const ProfileOptions& getWarpProfile() const;
 
         //! Interpolation method for resampling (default is bilinear)
         void setInterpolation(const RasterInterpolation& value);

@@ -285,16 +285,12 @@ LandCoverValueMapping::getConfig() const
 void
 LandCoverCoverageLayer::Options::fromConfig(const Config& conf)
 {
-    warp().init(0.0f);
-
     ConfigSet mappingsConf = conf.child("land_cover_mappings").children("mapping");
     for (ConfigSet::const_iterator i = mappingsConf.begin(); i != mappingsConf.end(); ++i)
     {
         osg::ref_ptr<LandCoverValueMapping> mapping = new LandCoverValueMapping(*i);
         mappings().push_back(mapping.get());
     }
-
-    conf.get("warp", warp());
 
     for(ConfigSet::const_iterator i = conf.children().begin(); i != conf.children().end(); ++i)
     {
@@ -325,8 +321,6 @@ LandCoverCoverageLayer::Options::getConfig() const
                 mappingConf.add(mapping->getConfig());
         }
     }
-    conf.set("warp", warp());
-
     if (layer().isSet())
         conf.set(layer()->getConfig());
 
@@ -350,10 +344,6 @@ LandCoverCoverageLayer::Options::map(int value, const std::string& lcClass)
 {
     mappings().push_back(new LandCoverValueMapping(value, lcClass));
 }
-
-//...................................................................
-
-OE_LAYER_PROPERTY_IMPL(LandCoverCoverageLayer, float, Warp, warp);
 
 Status
 LandCoverCoverageLayer::openImplementation()

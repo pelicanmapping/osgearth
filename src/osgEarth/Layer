@@ -178,7 +178,6 @@ namespace osgEarth
             OE_OPTION(CachePolicy, cachePolicy);
             OE_OPTION(std::string, shaderDefine);
             OE_OPTION(std::string, attribution);
-            OE_OPTION(ShaderOptions, shader);
             OE_OPTION_VECTOR(ShaderOptions, shaders);
             OE_OPTION(ProxySettings, proxySettings);
             OE_OPTION(std::string, osgOptionString);

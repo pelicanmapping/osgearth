@@ -30,7 +30,6 @@ namespace osgEarth { namespace Util
         public:
             META_LayerOptions(osgEarth, Options, VisibleLayer::Options);
             OE_OPTION(Style, gzdStyle);
-            OE_OPTION(float, textScale);
             virtual Config getConfig() const;
         private:
             void fromConfig(const Config& conf);
@@ -42,10 +41,6 @@ namespace osgEarth { namespace Util
         //! Style for the Grid Zone Designator graphics
         void setGZDStyle(const Style& value);
         const Style& getGZDStyle() const;
-
-        //! Text scale factor (default = 1)
-        void setTextScale(const float& value);
-        const float& getTextScale() const;
 
         //! If you change any of the options, call this to refresh the display
         //! and apply the new settings.

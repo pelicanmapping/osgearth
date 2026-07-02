@@ -167,7 +167,6 @@ namespace osgEarth
         class OSGEARTH_EXPORT Options : public Layer::Options {
         public:
             META_LayerOptions(osgEarth, Options, Layer::Options);
-            OE_OPTION(float, warp);
             OE_OPTION(ConfigOptions, layer);
             LandCoverValueMappingVector& mappings() { return _mappings; }
             const LandCoverValueMappingVector& mappings() const { return _mappings; }
@@ -190,10 +189,6 @@ namespace osgEarth
         //! Land cover dictionary to use.
         void setDictionary(LandCoverDictionary* value) { _lcDictionary = value; }
         LandCoverDictionary* getDictionary() const { return _lcDictionary.get(); }
-
-        //! Sets the warping amount
-        void setWarp(const float& value);
-        const float& getWarp() const;
 
         //! Sets the underlying image layer
         void setImageLayer(ImageLayer* value);

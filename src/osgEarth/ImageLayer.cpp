@@ -32,11 +32,6 @@ ImageLayer::Options::fromConfig(const Config& conf)
     conf.get( "coverage",       _coverage );
     conf.get( "altitude",       _altitude );
     conf.get( "accept_draping", acceptDraping());
-    conf.get( "edge_buffer_ratio", _edgeBufferRatio);
-    conf.get( "reprojected_tilesize", _reprojectedTileSize);
-
-    if ( conf.hasValue( "transparent_color" ) )
-        _transparentColor = stringToColor( conf.value( "transparent_color" ), osg::Vec4ub(0,0,0,0));
 
     if ( conf.hasChild("color_filters") )
     {
@@ -81,11 +76,6 @@ ImageLayer::Options::getConfig() const
     conf.set( "coverage",       _coverage );
     conf.set( "altitude",       _altitude );
     conf.set( "accept_draping", acceptDraping());
-    conf.set( "edge_buffer_ratio", _edgeBufferRatio);
-    conf.set( "reprojected_tilesize", _reprojectedTileSize);
-
-    if (_transparentColor.isSet())
-        conf.set("transparent_color", colorToString( _transparentColor.value()));
 
     if ( _colorFilters->size() > 0 )
     {

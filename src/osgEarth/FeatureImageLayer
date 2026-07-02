@@ -27,9 +27,6 @@ namespace osgEarth
             OE_OPTION_VECTOR(ConfigOptions, filters);
             OE_OPTION_LAYER(StyleSheet, styleSheet);
             OE_OPTION(Distance, bufferWidth, {});
-            OE_OPTION(double, gamma);
-            OE_OPTION(bool, sdf);
-            OE_OPTION(bool, sdf_invert);
             OE_OPTION(Color, backgroundColor, Color::Transparent);
             virtual Config getConfig() const;
         private:
@@ -71,8 +68,6 @@ namespace osgEarth
         virtual ~FeatureImageLayer() { }
 
     private:
-        optional<double> _gamma;
-
         void updateSession();
 
         void establishProfile();

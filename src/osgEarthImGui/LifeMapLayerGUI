@@ -148,7 +148,6 @@ namespace osgEarth
 
                     ImGuiLTable::SliderFloat("Terrain contrib", &o.terrainWeight().mutable_value(), 0.0f, 1.0f);
                     //ImGuiLTable::SliderFloat("Slope contrib", &o.slopeIntensity().mutable_value(), 1.0f, 10.0f);
-                    //ImGuiLTable::SliderFloat("Slope cutoff", &o.slopeCutoff().mutable_value(), 0.0f, 1.0f);
 
                     ImGuiLTable::SliderFloat("Noise contrib", &o.noiseWeight().mutable_value(), 0.0f, 1.0f);
 

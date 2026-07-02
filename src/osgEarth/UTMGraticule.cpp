@@ -175,7 +175,6 @@ UTMGraticule::Options::getConfig() const
 {
     Config conf = VisibleLayer::Options::getConfig();
     conf.set("gzd_style", gzdStyle() );
-    conf.set("text_scale", textScale() );
     return conf;
 }
 
@@ -183,13 +182,11 @@ void
 UTMGraticule::Options::fromConfig(const Config& conf)
 {
     conf.get("gzd_style", gzdStyle() );
-    conf.get("text_scale", textScale() );
 }
 
 //...................................................................
 
 OE_LAYER_PROPERTY_IMPL(UTMGraticule, Style, GZDStyle, gzdStyle);
-OE_LAYER_PROPERTY_IMPL(UTMGraticule, float, TextScale, textScale);
 
 void
 UTMGraticule::dirty()

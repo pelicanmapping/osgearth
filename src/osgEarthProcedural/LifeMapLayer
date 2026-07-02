@@ -39,10 +39,8 @@ namespace osgEarth { namespace Procedural
             OE_OPTION(Distance, landCoverBlur, Distance(0.0f, Units::METERS));
             OE_OPTION(float, terrainWeight, 1.0f);
             OE_OPTION(float, slopeIntensity, 1.0f);
-            OE_OPTION(float, slopeCutoff, 0.0f);
             OE_OPTION(float, colorWeight, 1.0f);
             OE_OPTION(float, noiseWeight, 0.225f);
-            OE_OPTION(float, lushFactor, 1.9f);
 
             virtual Config getConfig() const;
         private:

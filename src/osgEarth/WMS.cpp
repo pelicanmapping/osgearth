@@ -357,7 +357,6 @@ WMS::WMSImageLayerOptions::getConfig() const
     conf.set("crs", _crs);
     conf.set("transparent", _transparent);
     conf.set("times", _times);
-    conf.set("seconds_per_frame", _secondsPerFrame);
     return conf;
 }
 
@@ -366,7 +365,6 @@ WMS::WMSImageLayerOptions::fromConfig(const Config& conf)
 {
     _wmsVersion.init("1.1.1");
     _transparent.init(true);
-    _secondsPerFrame.init(1.0);
 
     conf.get("url", _url);
     conf.get("capabilities_url", _capabilitiesUrl);
@@ -380,7 +378,6 @@ WMS::WMSImageLayerOptions::fromConfig(const Config& conf)
     conf.get("transparent", _transparent);
     conf.get("times", _times);
     conf.get("time", _times); // alternative
-    conf.get("seconds_per_frame", _secondsPerFrame);
 }
 
 //........................................................................

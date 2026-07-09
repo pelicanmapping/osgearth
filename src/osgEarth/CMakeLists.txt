@@ -267,6 +267,7 @@ SET(TARGET_H
     IOTypes
     JoinLines
     JsonUtils
+    KdTreeBuilder
     LabelNode
     LandCover
     LandCoverLayer
@@ -630,6 +631,7 @@ set(TARGET_SRC
     IOTypes.cpp
     JoinLines.cpp
     JsonUtils.cpp
+    KdTreeBuilder.cpp
     LabelNode.cpp
     LandCover.cpp
     LandCoverLayer.cpp

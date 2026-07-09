@@ -1,0 +1,55 @@
+/* osgEarth
+* Copyright 2025 Pelican Mapping
+* MIT License
+*/
+#pragma once
+
+#include <osgEarth/Common>
+#include <osg/KdTree>
+
+namespace osgEarth { namespace Util
+{
+    /**
+     * Drop-in replacement for osg::KdTreeBuilder that produces trees
+     * identical to osg::KdTree::build() but builds them faster and with
+     * exact-sized memory allocations, so no capacity trimming is required
+     * afterwards. Large geometries can optionally be subdivided on
+     * multiple threads, still producing the identical tree.
+     *
+     * Install globally with:
+     *   osgDB::Registry::instance()->setKdTreeBuilder(new osgEarth::Util::KdTreeBuilder());
+     */
+    class OSGEARTH_EXPORT KdTreeBuilder : public osg::KdTreeBuilder
+    {
+    public:
+        KdTreeBuilder();
+        KdTreeBuilder(const KdTreeBuilder& rhs);
+
+        META_NodeVisitor(osgEarth, KdTreeBuilder)
+
+        KdTreeBuilder* clone() override { return new KdTreeBuilder(*this); }
+
+        void apply(osg::Geometry& geometry) override;
+
+        //! Number of threads used to build kdtrees for large geometries.
+        //! 0 (the default) means automatic: the OSGEARTH_KDTREE_BUILDER_THREADS
+        //! environment variable if set, otherwise up to 4. Set to 1 to force
+        //! single-threaded builds. Small geometries always build single-threaded.
+        void setNumThreads(unsigned int value) { _numThreads = value; }
+        unsigned int getNumThreads() const { return _numThreads; }
+
+        /**
+         * Build a kdtree for a single geometry into "kdTree".
+         * The result is identical to what osg::KdTree::build() produces,
+         * with every vector allocated to its exact final size.
+         * numThreads: 0 = automatic, 1 = single-threaded, N = up to N threads.
+         * Returns true if a tree was built.
+         */
+        static bool build(osg::KdTree& kdTree, osg::KdTree::BuildOptions& options, osg::Geometry* geometry, unsigned int numThreads = 1u);
+
+    protected:
+        virtual ~KdTreeBuilder() { }
+
+        unsigned int _numThreads;
+    };
+} }

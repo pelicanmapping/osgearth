@@ -609,7 +609,6 @@ GeometryCompiler::compile(FeatureList&          workingSet,
     {
         osg::ref_ptr< osg::KdTreeBuilder > kdTreeBuilder = osgDB::Registry::instance()->getKdTreeBuilder()->clone();
         resultGroup->accept(*kdTreeBuilder.get());
-        Util::trimKdTrees(resultGroup.get());
     }
 
     return resultGroup.release();

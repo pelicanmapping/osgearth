@@ -10,6 +10,7 @@
 #include "TerrainEngineNode"
 #include "GLUtils"
 #include "Chonk"
+#include "KdTreeBuilder"
 #include "MemoryUtils"
 #include "ScriptEngine"
 
@@ -44,6 +45,14 @@ void osgEarth::initialize()
     jobs::set_thread_name_function([](const char* value) {
         osgEarth::setThreadName(value);
     });
+
+    // Install osgEarth's fast, memory-exact KdTree builder as the default.
+    // It produces trees identical to osg::KdTreeBuilder's. Set
+    // OSGEARTH_USE_OSG_KDTREE_BUILDER in the environment to keep the stock builder.
+    if (::getenv("OSGEARTH_USE_OSG_KDTREE_BUILDER") == nullptr)
+    {
+        osgDB::Registry::instance()->setKdTreeBuilder(new Util::KdTreeBuilder());
+    }
 }
 
 void osgEarth::initialize(osg::ArgumentParser& args)

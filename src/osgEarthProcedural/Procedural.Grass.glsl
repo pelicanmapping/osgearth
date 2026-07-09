@@ -321,13 +321,9 @@ flat in uint64_t oe_veg_texHandle;
 vec3 vp_Normal;
 
 // fragment stage global PBR parameters.
-struct OE_PBR {
-    float roughness;
-    float ao;
-    float metal;
-    float brightness;
-    float contrast;
-} oe_pbr;
+// NOTE: must match the declaration in PBR.glsl exactly, since stage
+// globals are shared across all linked shader objects.
+struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;
 
 uniform float oe_veg_maxAlpha;
 uniform int oe_veg_isMultisampled;

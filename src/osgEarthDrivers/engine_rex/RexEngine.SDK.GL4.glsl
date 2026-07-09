@@ -145,7 +145,8 @@ float oe_terrain_getElevation(in uint64_t handle, in vec2 uv)
     // on texel center instead of edge.
     // If a min and max elev are set, we use them to decode the 16-bit elevation
     // value. If not, assume a 32-bit single channel float value.
-    if (handle >= 0)
+    // (note: handle is unsigned; zero means "no texture")
+    if (handle > 0UL)
     {
         float encoded = texture(sampler2D(handle), uv).r;
         float minh = oe_tile[oe_tileID].elevMin;

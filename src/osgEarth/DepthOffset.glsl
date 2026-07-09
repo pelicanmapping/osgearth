@@ -16,7 +16,7 @@ void oe_DepthOffset_vertex(inout vec4 vertexView)
     float maxRange = oe_DepthOffset_params[3];
 
     // calculate the depth offset bias for this range:
-    float bias = minRange;
+    float bias = minBias;
     if (maxRange > minRange && maxBias > minBias)
     {
         float ratio = (clamp(vertex_range, minRange, maxRange) - minRange) / (maxRange - minRange);

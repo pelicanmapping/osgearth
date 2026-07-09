@@ -160,8 +160,10 @@ void cull()
     vec4 center = xform * vec4(chonks[v].bs.xyz, 1);
     vec4 center_view = gl_ModelViewMatrix * center;
 
-    float max_scale = max(xform[0][0], max(xform[1][1], xform[2][2]));
-    float r = chonks[v].bs.w * max_scale;
+    // use the column lengths so this works for rotated instances too:
+    float max_scale2 = max(dot(xform[0].xyz, xform[0].xyz),
+        max(dot(xform[1].xyz, xform[1].xyz), dot(xform[2].xyz, xform[2].xyz)));
+    float r = chonks[v].bs.w * sqrt(max_scale2);
 
 
 
@@ -182,7 +184,8 @@ void cull()
     // Trivially reject low-LOD instances that intersect the near clip plane:
     if ((lod > 0) && (proj[3][3] < 0.01)) // is perspective camera
     {
-        float near = proj[2][3] / (proj[2][2] - 1.0);
+        // note: GLSL is column-major; this extracts the near plane distance.
+        float near = proj[3][2] / (proj[2][2] - 1.0);
         if (-(center_view.z + r) <= near)
         {
             REJECT(REASON_NEARCLIP);

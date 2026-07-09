@@ -120,7 +120,7 @@ void oe_GroundCover_VS(inout vec4 vertex_view)
     // push the falloff closer to the max distance.
     float falloff = 1.0 - (nRange*nRange*nRange);
     float width = render[gl_InstanceID].width * falloff;
-    float height = render[gl_InstanceID].width * falloff;
+    float height = render[gl_InstanceID].height * falloff;
 
     int which = gl_VertexID & 7; // mod8 - there are 8 verts per instance
 
@@ -174,7 +174,7 @@ void oe_GroundCover_VS(inout vec4 vertex_view)
             which == 1 ? vec4(vertex_view.xyz + halfWidthTangentVector, 1.0) :
             which == 2 ? vec4(vertex_view.xyz - halfWidthTangentVector + heightVector, 1.0) :
             vec4(vertex_view.xyz + halfWidthTangentVector + heightVector, 1.0);
-#
+
         // animate based on wind parameters.
         if (which >= 2 && oe_GroundCover_wind > 0)
         {

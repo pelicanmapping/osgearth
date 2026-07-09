@@ -112,7 +112,10 @@ void oe_shadow_fragment(inout vec4 color)
     vec3 L = normalize(osg_LightSource[0].position.xyz);
     vec3 N = normalize(vp_Normal);
     float costheta = clamp(dot(L,N), 0.0, 1.0);
-    float bias = b0*tan(acos(costheta));
+    // slope-scaled bias: tan(acos(x)) == sqrt(1-x^2)/x, clamped to
+    // a maximum (b1) so grazing angles don't disable shadowing entirely
+    float sintheta = sqrt(max(0.0, 1.0 - costheta*costheta));
+    float bias = clamp(b0 * sintheta / max(costheta, 1e-4), 0.0, b1);
 
     float depth;
 

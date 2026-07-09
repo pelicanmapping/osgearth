@@ -61,9 +61,9 @@ vec4 oe_logdepth_vert(in vec4 clip)
 {
     if (osg_ProjectionMatrix[3][3] == 0) // perspective only
     {
-        mat4 clip2view = inverse(osg_ProjectionMatrix);
-        vec4 farPoint = clip2view * vec4(0,0,1,1);
-        float FAR = -farPoint.z / farPoint.w;
+        // extract the far plane distance directly from the projection matrix
+        // (much cheaper than inverting the matrix per-vertex)
+        float FAR = osg_ProjectionMatrix[3][2] / (osg_ProjectionMatrix[2][2] + 1.0);
         float FC = 2.0 / log2(FAR + 1);
         clip.z = (log2(max(1e-6, clip.w+1.0))*FC - 1.0) * clip.w;
     }

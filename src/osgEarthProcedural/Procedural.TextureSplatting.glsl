@@ -282,10 +282,11 @@ void resolveRow(out Pixel result, int level, int row, float xvar)
     // texture index:
     int i = row * OE_TEX_DIM_X + x;
 
-    // read both columns:
+    // read both columns (clamp to the last column so we don't
+    // wrap around into the next row's textures):
     get_coord(coord, i, level);
     get_pixel(p1, w1, i, coord);
-    i = (i % OE_TEX_DIM_X < OE_TEX_DIM_X) ? i + 1 : i;
+    i = (i % OE_TEX_DIM_X < OE_TEX_DIM_X - 1) ? i + 1 : i;
     get_coord(coord, i, level);
     get_pixel(p2, w2, i, coord);
 

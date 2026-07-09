@@ -60,8 +60,9 @@ void oe_rex_normalMapFS(inout vec4 color)
     vec4 N_TS = oe_terrain_getNormalAndCurvature(oe_normal_uv);
 
     // +Y is "north" because we're already in the local frame of the current tile!
-    vec3 B = gl_NormalMatrix * vec3(0, 1, 0);
-    vec3 T = normalize(cross(B, oe_UpVectorView));
+    // Orthonormalize the frame (matches the GL4 path):
+    vec3 T = normalize(cross(gl_NormalMatrix * vec3(0, 1, 0), oe_UpVectorView));
+    vec3 B = normalize(cross(oe_UpVectorView, T));
     oe_normalMapTBN = mat3(T, B, oe_UpVectorView);
     vp_Normal = normalize(oe_normalMapTBN * N_TS.xyz);
 }

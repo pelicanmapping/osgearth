@@ -39,7 +39,7 @@ void main()
     vec3 totalDirection = vec3(0);
 
     int i;
-    for (i = 0; wind[i].speed >= 0.0 && i < SAFETY_BAILOUT; ++i)
+    for (i = 0; i < SAFETY_BAILOUT && wind[i].speed >= 0.0; ++i)
     {
         if (wind[i].position.w == 1)
         {
@@ -64,8 +64,9 @@ void main()
     float totalSpeed = length(totalDirection);
 
     vec4 pixel;
-    // RGB holds normalized wind direction
-    pixel.rgb = 0.5*(normalize(totalDirection)+1.0);
+    // RGB holds normalized wind direction. Guard against normalize(0),
+    // which yields NaNs when there are no active wind sources.
+    pixel.rgb = totalSpeed > 0.0 ? 0.5*(normalize(totalDirection)+1.0) : vec3(0.5);
 
     // A holds normalized wind speed
     pixel.a = min(totalSpeed, MAX_WIND_SPEED) / MAX_WIND_SPEED;

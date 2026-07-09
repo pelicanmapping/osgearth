@@ -37,8 +37,8 @@ void oe_rex_TCS()
     {
         if ((oe_terrain_vertexMarker & VERTEX_CONSTRAINT) != 0)
         {
-            // For boundary vertices, we want to ensure they are not tessellated away.
-            // Set a high tessellation level to preserve them.
+            // Do not subdivide triangles containing constraint vertices;
+            // leave them exactly as authored.
             gl_TessLevelOuter[0] = 1.0;
             gl_TessLevelOuter[1] = 1.0;
             gl_TessLevelOuter[2] = 1.0;

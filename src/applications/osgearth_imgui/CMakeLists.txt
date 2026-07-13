@@ -1,6 +1,6 @@
 add_osgearth_app(
     TARGET osgearth_imgui
-    SOURCES osgearth_imgui.cpp
+    SOURCES osgearth_imgui.cpp HeapHotSpots.cpp
     LIBRARIES osgEarthImGui
     FOLDER Tools )
 

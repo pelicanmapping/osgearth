@@ -51,6 +51,7 @@ set(STOCK_PANELS
 # osgEarth source code:
 set(LIB_HEADERS
     Common
+    HeapHotspotReport
     ImGuiEventHandler
     ImGuiApp
     ImGuiPanel )

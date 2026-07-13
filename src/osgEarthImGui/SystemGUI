@@ -5,6 +5,7 @@
 #pragma once
 
 #include <osgEarthImGui/ImGuiPanel>
+#include <osgEarthImGui/HeapHotspotReport>
 #include <osgEarth/Threading>
 #include <osgEarth/MemoryUtils>
 #include <osgEarth/GLUtils>
@@ -13,10 +14,13 @@
 #include <osgEarth/Capabilities>
 #include <osgEarth/FeatureNode>
 #include <chrono>
+#include <ctime>
+#include <functional>
 #include <list>
 #include <vector>
 #include <thread>
 #include <algorithm>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -56,6 +60,11 @@ namespace osgEarth
 
     class SystemGUI : public ImGuiPanel
     {
+    public:
+        using HeapHotspotsCapture = std::function<HeapHotspotReport()>;
+        using HeapHotspotsWrite = std::function<
+            bool(const HeapHotspotReport&, const std::string&)>;
+
     private:
         std::string _renderMode;
         bool _renderViewNormals;
@@ -66,12 +75,282 @@ namespace osgEarth
         float _dpr = 1.0f;
         float _fontScale = 1.0f;
         bool _first = true;
+        HeapHotspotsCapture _heapHotspotsCapture;
+        HeapHotspotsWrite _heapHotspotsWrite;
+        HeapHotspotReport _heapHotspotsReport;
+        ImGuiTextFilter _heapHotspotsFilter;
+        int _heapHotspotsSort = 0;
+        bool _heapHotspotsSortDescending = true;
+        std::size_t _selectedHeapHotspot = static_cast<std::size_t>(-1);
+        std::string _heapHotspotsStatus;
+
+        static std::string heapHotspotsFilename()
+        {
+            const auto now = std::chrono::system_clock::now();
+            const std::time_t time = std::chrono::system_clock::to_time_t(now);
+            std::tm localTime = {};
+#ifdef _WIN32
+            localtime_s(&localTime, &time);
+#else
+            localtime_r(&time, &localTime);
+#endif
+            char timestamp[32];
+            std::strftime(timestamp, sizeof(timestamp), "%Y%m%d-%H%M%S", &localTime);
+            return std::string("heap-hotspots-") + timestamp + ".txt";
+        }
+
+        static double heapMiB(std::uint64_t bytes)
+        {
+            return static_cast<double>(bytes) / 1048576.0;
+        }
+
+        void drawHeapHotspots()
+        {
+            if (!_heapHotspotsCapture)
+                return;
+
+            if (!ImGui::CollapsingHeader(
+                    "Heap allocation snapshot",
+                    ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                return;
+            }
+
+            if (ImGui::Button("Capture Heap Snapshot"))
+            {
+                // Release the previous diagnostic snapshot before measuring so
+                // retained report strings and call stacks cannot appear as
+                // unexplained application heap in the next snapshot.
+                _heapHotspotsReport = HeapHotspotReport();
+                _heapHotspotsReport = _heapHotspotsCapture();
+                _selectedHeapHotspot = static_cast<std::size_t>(-1);
+                _heapHotspotsStatus = _heapHotspotsReport.valid
+                    ? "Snapshot captured"
+                    : _heapHotspotsReport.error;
+            }
+
+            ImGui::SameLine();
+            if (_heapHotspotsReport.valid && _heapHotspotsWrite)
+            {
+                if (ImGui::Button("Save Snapshot Dump"))
+                {
+                    const std::string filename = heapHotspotsFilename();
+                    if (_heapHotspotsWrite(_heapHotspotsReport, filename))
+                        _heapHotspotsStatus = "Saved " + filename;
+                    else
+                        _heapHotspotsStatus = "Failed to save " + filename;
+                }
+            }
+            else
+            {
+                ImGui::TextDisabled("Save Snapshot Dump");
+            }
+
+            if (!_heapHotspotsStatus.empty())
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", _heapHotspotsStatus.c_str());
+            }
+
+            if (!_heapHotspotsReport.valid)
+            {
+                ImGui::TextDisabled(
+                    "No snapshot yet. Capture is performed only when the button is pressed.");
+                return;
+            }
+
+            const HeapHotspotReport& report = _heapHotspotsReport;
+            if (ImGui::BeginTable(
+                    "heap snapshot summary", 4,
+                    ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV))
+            {
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Tracked");
+                ImGui::Text("%.1f MiB", heapMiB(report.trackedBytes()));
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Application heap");
+                ImGui::Text("%.1f MiB", heapMiB(report.applicationHeapBytes));
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Coverage");
+                ImGui::Text("%.1f%%", report.heapCoveragePercent);
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Untracked heap");
+                ImGui::Text("%.1f MiB", heapMiB(report.untrackedApplicationHeapBytes));
+
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Live allocations");
+                ImGui::Text("%llu", static_cast<unsigned long long>(report.trackedAllocations()));
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Profiler storage");
+                ImGui::Text("%.1f MiB", heapMiB(report.profilerBytes));
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Committed heap");
+                ImGui::Text("%.1f MiB%s", heapMiB(report.heapCommittedBytes),
+                    report.heapCommittedIsEstimate ? " (est.)" : "");
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Private bytes");
+                if (report.processPrivateBytesAvailable)
+                    ImGui::Text("%.1f MiB", heapMiB(report.processPrivateBytes));
+                else
+                    ImGui::TextUnformatted("Unavailable");
+                ImGui::EndTable();
+            }
+
+            ImGui::Spacing();
+            _heapHotspotsFilter.Draw("Filter function/source", 300.0f);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(150.0f);
+            static const char* sortItems[] = {
+                "Live bytes", "Allocations", "Largest", "Function" };
+            ImGui::Combo("Sort", &_heapHotspotsSort, sortItems, 4);
+            ImGui::SameLine();
+            ImGui::Checkbox("Descending", &_heapHotspotsSortDescending);
+
+            std::vector<std::size_t> rows;
+            rows.reserve(report.sites.size());
+            for (std::size_t i = 0; i < report.sites.size(); ++i)
+            {
+                const HeapHotspotSite& site = report.sites[i];
+                if (_heapHotspotsFilter.PassFilter(site.function.c_str()) ||
+                    _heapHotspotsFilter.PassFilter(site.file.c_str()))
+                {
+                    rows.push_back(i);
+                }
+            }
+
+            const int sortColumn = _heapHotspotsSort;
+            const bool descending = _heapHotspotsSortDescending;
+            std::stable_sort(rows.begin(), rows.end(),
+                [&](std::size_t lhsIndex, std::size_t rhsIndex)
+                {
+                    const HeapHotspotSite& lhs = report.sites[lhsIndex];
+                    const HeapHotspotSite& rhs = report.sites[rhsIndex];
+                    switch (sortColumn)
+                    {
+                    case 1:
+                        if (lhs.liveAllocations != rhs.liveAllocations)
+                            return descending
+                                ? lhs.liveAllocations > rhs.liveAllocations
+                                : lhs.liveAllocations < rhs.liveAllocations;
+                        break;
+                    case 2:
+                        if (lhs.largestAllocation != rhs.largestAllocation)
+                            return descending
+                                ? lhs.largestAllocation > rhs.largestAllocation
+                                : lhs.largestAllocation < rhs.largestAllocation;
+                        break;
+                    case 3:
+                        if (lhs.function != rhs.function)
+                            return descending
+                                ? lhs.function > rhs.function
+                                : lhs.function < rhs.function;
+                        break;
+                    default:
+                        if (lhs.liveBytes != rhs.liveBytes)
+                            return descending
+                                ? lhs.liveBytes > rhs.liveBytes
+                                : lhs.liveBytes < rhs.liveBytes;
+                        break;
+                    }
+                    return lhsIndex < rhsIndex;
+                });
+
+            ImGui::TextDisabled("%zu of %zu allocation sites", rows.size(), report.sites.size());
+            const ImGuiTableFlags tableFlags =
+                ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable | ImGuiTableFlags_Borders |
+                ImGuiTableFlags_SizingFixedFit;
+            if (ImGui::BeginTable("heap hotspot sites", 5, tableFlags, ImVec2(0, 300)))
+            {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("Live MiB", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("Allocations", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn("Largest KiB", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn("Function", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
+
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(rows.size()));
+                while (clipper.Step())
+                {
+                    for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row)
+                    {
+                        const std::size_t siteIndex = rows[row];
+                        const HeapHotspotSite& site = report.sites[siteIndex];
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn(); ImGui::Text("%.2f", heapMiB(site.liveBytes));
+                        ImGui::TableNextColumn(); ImGui::Text("%llu",
+                            static_cast<unsigned long long>(site.liveAllocations));
+                        ImGui::TableNextColumn(); ImGui::Text("%.1f",
+                            static_cast<double>(site.largestAllocation) / 1024.0);
+                        ImGui::TableNextColumn();
+                        ImGui::PushID(static_cast<int>(siteIndex));
+                        const char* function = site.function.empty() ? "<unknown>" : site.function.c_str();
+                        if (ImGui::Selectable(function, _selectedHeapHotspot == siteIndex))
+                            _selectedHeapHotspot = siteIndex;
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", function);
+                        ImGui::PopID();
+                        ImGui::TableNextColumn();
+                        if (!site.file.empty())
+                        {
+                            ImGui::Text("%s:%u", site.file.c_str(), site.line);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("%s:%u", site.file.c_str(), site.line);
+                        }
+                        else
+                            ImGui::TextDisabled("No source information");
+                    }
+                }
+                ImGui::EndTable();
+            }
+
+            if (_selectedHeapHotspot < report.sites.size())
+            {
+                const HeapHotspotSite& site = report.sites[_selectedHeapHotspot];
+                ImGui::SeparatorText("Selected allocation site");
+                ImGui::TextWrapped("%s", site.function.empty() ? "<unknown>" : site.function.c_str());
+                if (!site.file.empty())
+                    ImGui::TextWrapped("%s:%u", site.file.c_str(), site.line);
+                ImGui::Text("%.2f MiB in %llu allocations; largest %.1f KiB",
+                    heapMiB(site.liveBytes),
+                    static_cast<unsigned long long>(site.liveAllocations),
+                    static_cast<double>(site.largestAllocation) / 1024.0);
+
+                if (ImGui::BeginChild("heap hotspot call stack", ImVec2(0, 180), true))
+                {
+                    for (std::size_t i = 0; i < site.callStack.size(); ++i)
+                    {
+                        const HeapHotspotFrame& frame = site.callStack[i];
+                        ImGui::TextDisabled("#%zu", i);
+                        ImGui::SameLine();
+                        if (!frame.function.empty())
+                            ImGui::TextWrapped("%s", frame.function.c_str());
+                        else
+                            ImGui::Text("0x%llx", static_cast<unsigned long long>(frame.address));
+                        if (!frame.file.empty())
+                        {
+                            ImGui::Indent();
+                            ImGui::TextWrapped("%s:%u", frame.file.c_str(), frame.line);
+                            ImGui::Unindent();
+                        }
+                    }
+                }
+                ImGui::EndChild();
+            }
+        }
 
     public:
-        SystemGUI() : ImGuiPanel("System"),
+        SystemGUI(
+            HeapHotspotsCapture heapHotspotsCapture = {},
+            HeapHotspotsWrite heapHotspotsWrite = {}) : ImGuiPanel("System"),
             _renderViewNormals(false), _renderModelNormals(false),
             _renderWinding(false), _renderOutlines(false),
-            _showArenaControls(false) {}
+            _showArenaControls(false),
+            _heapHotspotsCapture(std::move(heapHotspotsCapture)),
+            _heapHotspotsWrite(std::move(heapHotspotsWrite)) {
+        }
 
         void load(const Config& conf) override
         {
@@ -98,6 +377,8 @@ namespace osgEarth
                     (double)(pb - osgEarth::g_startupPrivateBytes) / 1048576.0);
                 ImGui::SameLine();
                 ImGui::Text(" Total: %.1lf MB", (double)pb / 1048576.0);
+
+                drawHeapHotspots();
 
                 ImGui::Separator();
                 auto flags = ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg;
@@ -150,7 +431,7 @@ namespace osgEarth
                     frame_times[f] = now - t_previous;
                     t_previous = now;
                     auto avg_timing_ms = 1e-6 * (float)get_average_timing_ns(&frame_times, 120, f);
-                    snprintf( buf, sizeof(buf), "%.2f ms / %d fps", avg_timing_ms, (int)std::ceil(1000.0 / avg_timing_ms));
+                    snprintf(buf, sizeof(buf), "%.2f ms / %d fps", avg_timing_ms, (int)std::ceil(1000.0 / avg_timing_ms));
                     ImGuiLTable::PlotLines("Frame", get_timing_ms, &frame_times, frame_count, frame_num, buf, 0.0f, 32.0f);
 
                     total_jobs[f] = jobs::get_metrics()->total();

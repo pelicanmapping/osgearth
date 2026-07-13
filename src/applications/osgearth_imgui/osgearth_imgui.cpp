@@ -46,6 +46,8 @@
 
 #include <osgEarthImGui/FeatureEditGUI>
 
+#include "HeapHotSpots.h"
+
 #define LC "[imgui] "
 
 using namespace osgEarth;
@@ -63,6 +65,10 @@ usage(const char* name)
 int
 main(int argc, char** argv)
 {
+    OE_NOTICE << "Installing HeapHotSpots" << std::endl;
+    HeapHotspots::install();
+    OE_NOTICE << "Installed HeapHotSpots" << std::endl;
+
     osg::ArgumentParser arguments(&argc, argv);
     if (arguments.read("--help"))
         return usage(argv[0]);
@@ -106,7 +112,15 @@ main(int argc, char** argv)
         ui->add("Tools", new SearchGUI());
 #endif
         ui->add("Tools", new ShaderGUI(&arguments));
-        ui->add("Tools", new SystemGUI());
+        ui->add("Tools", new SystemGUI(
+            []()
+            {
+                return HeapHotspots::capture();
+            },
+            [](const HeapHotspotReport& report, const std::string& filename)
+            {
+                return HeapHotspots::write(report, filename.c_str());
+            }));
         ui->add("Tools", new TerrainGUI());
         ui->add("Tools", new TextureInspectorGUI());
         ui->add("Tools", new ViewpointsGUI());

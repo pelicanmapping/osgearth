@@ -1,0 +1,82 @@
+/* osgEarth
+ * Copyright 2025 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace osgEarth
+{
+    struct HeapHotspotFrame
+    {
+        std::string file;
+        std::string function;
+        std::uint32_t line = 0;
+        std::uintptr_t address = 0;
+    };
+
+    struct HeapHotspotSite
+    {
+        std::string file;
+        std::string function;
+        std::uint32_t line = 0;
+        std::uint64_t liveBytes = 0;
+        std::uint64_t liveAllocations = 0;
+        std::uint64_t largestAllocation = 0;
+        std::vector<HeapHotspotFrame> callStack;
+    };
+
+    // Immutable-by-convention snapshot returned by the heap diagnostics API.
+    // All byte values are raw bytes so consumers can choose their own units.
+    struct HeapHotspotReport
+    {
+        bool valid = false;
+        std::string error;
+
+        std::size_t allocationThreshold = 0;
+        std::uint32_t patchedModules = 0;
+        std::size_t distinctCallStacks = 0;
+
+        std::uint64_t trackedHeapBytes = 0;
+        std::uint64_t trackedHeapAllocations = 0;
+        std::uint64_t trackedVirtualBytes = 0;
+        std::uint64_t trackedVirtualRegions = 0;
+
+        std::size_t processHeapCount = 0;
+        bool processHeapWalkComplete = false;
+        std::uint64_t rawHeapBytes = 0;
+        std::uint64_t rawHeapBlocks = 0;
+        std::uint64_t heapBlockOverheadBytes = 0;
+        std::uint64_t profilerBytes = 0;
+        std::uint64_t profilerBlocks = 0;
+        std::uint64_t applicationHeapBytes = 0;
+        std::uint64_t applicationHeapBlocks = 0;
+        std::uint64_t untrackedApplicationHeapBytes = 0;
+        double heapCoveragePercent = 0.0;
+
+        std::uint64_t heapCommittedBytes = 0;
+        bool heapCommittedIsEstimate = false;
+        std::uint64_t heapSegmentBackingBytes = 0;
+        std::uint64_t standaloneLargeBlockBackingBytes = 0;
+
+        bool processPrivateBytesAvailable = false;
+        std::uint64_t processPrivateBytes = 0;
+        double knownMemoryCategoriesPercent = 0.0;
+
+        std::vector<HeapHotspotSite> sites;
+
+        std::uint64_t trackedBytes() const noexcept
+        {
+            return trackedHeapBytes + trackedVirtualBytes;
+        }
+
+        std::uint64_t trackedAllocations() const noexcept
+        {
+            return trackedHeapAllocations + trackedVirtualRegions;
+        }
+    };
+}

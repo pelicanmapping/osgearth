@@ -30,6 +30,47 @@ namespace osgEarth
         std::vector<HeapHotspotFrame> callStack;
     };
 
+    struct HeapHotspotLineMetrics
+    {
+        std::uint32_t line = 0;
+        std::uint64_t directLiveBytes = 0;
+        std::uint64_t directLiveAllocations = 0;
+        std::uint64_t inclusiveLiveBytes = 0;
+        std::uint64_t inclusiveLiveAllocations = 0;
+    };
+
+    struct HeapHotspotSourceFile
+    {
+        std::string path;
+        std::vector<HeapHotspotLineMetrics> lines;
+    };
+
+    enum class HeapRecommendationKind : std::uint8_t
+    {
+        AllocationChurn,
+        RepeatedReallocation,
+        ShortLivedLargeAllocation
+    };
+
+    struct HeapRecommendation
+    {
+        HeapRecommendationKind kind = HeapRecommendationKind::AllocationChurn;
+        std::string file;
+        std::string function;
+        std::uint32_t line = 0;
+        std::vector<HeapHotspotFrame> callStack;
+
+        std::uint64_t eventCount = 0;
+        std::uint64_t totalBytes = 0;
+        std::uint64_t estimatedBytesCopied = 0;
+        std::uint64_t maximumReallocationChain = 0;
+        std::uint64_t lifetimeThresholdMilliseconds = 0;
+        std::uint64_t sizeThresholdBytes = 0;
+        double averageLifetimeMilliseconds = 0.0;
+        double eventsPerSecond = 0.0;
+        double score = 0.0;
+    };
+
     // Immutable-by-convention snapshot returned by the heap diagnostics API.
     // All byte values are raw bytes so consumers can choose their own units.
     struct HeapHotspotReport
@@ -45,6 +86,11 @@ namespace osgEarth
         std::uint64_t trackedHeapAllocations = 0;
         std::uint64_t trackedVirtualBytes = 0;
         std::uint64_t trackedVirtualRegions = 0;
+
+        // Cumulative requested-byte traffic observed since install().
+        // Successful reallocations free the old size and allocate the new size.
+        std::uint64_t cumulativeAllocatedBytes = 0;
+        std::uint64_t cumulativeFreedBytes = 0;
 
         std::size_t processHeapCount = 0;
         bool processHeapWalkComplete = false;
@@ -68,6 +114,8 @@ namespace osgEarth
         double knownMemoryCategoriesPercent = 0.0;
 
         std::vector<HeapHotspotSite> sites;
+        std::vector<HeapHotspotSourceFile> sourceFiles;
+        std::vector<HeapRecommendation> recommendations;
 
         std::uint64_t trackedBytes() const noexcept
         {

@@ -26,8 +26,16 @@
 namespace
 {
     // Start high. Lower this if the report doesn't explain enough memory.
-    constexpr std::size_t kMinimumTrackedSize = 2;//2u * 1024u;
+    constexpr std::size_t kMinimumTrackedSize = 0;//2u * 1024u;
     constexpr USHORT kMaximumFrames = 32;
+    constexpr std::uint64_t kChurnLifetimeMilliseconds = 250;
+    constexpr std::uint64_t kLargeAllocationBytes = 1024u * 1024u;
+    constexpr std::uint64_t kLargeLifetimeMilliseconds = 1000;
+    constexpr std::uint64_t kMinimumChurnEvents = 1000;
+    constexpr std::uint64_t kMinimumChurnBytes = 16u * 1024u * 1024u;
+    constexpr std::uint64_t kMinimumLargeEvents = 3;
+    constexpr std::uint64_t kMinimumLargeBytes = 16u * 1024u * 1024u;
+    constexpr std::uint64_t kMinimumReallocationChain = 3;
 
     using HeapAllocFunction = LPVOID(WINAPI*)(HANDLE, DWORD, SIZE_T);
     using HeapReAllocFunction = LPVOID(WINAPI*)(HANDLE, DWORD, LPVOID, SIZE_T);
@@ -123,6 +131,7 @@ namespace
 
     std::atomic<std::uint64_t> g_trackerStorageBytes{ 0 };
     std::atomic<std::uint64_t> g_trackerStorageBlocks{ 0 };
+    std::atomic<std::uint64_t> g_trackingStartMilliseconds{ 0 };
 
     // Count the profiler's own container storage. Calls made by this allocator
     // run under ReentryGuard, so they deliberately do not appear as application
@@ -198,6 +207,17 @@ namespace
         std::uint64_t virtualBytes = 0;
         std::uint64_t virtualCount = 0;
         std::uint64_t largestAllocation = 0;
+
+        std::uint64_t churnEvents = 0;
+        std::uint64_t churnBytes = 0;
+        std::uint64_t churnLifetimeMilliseconds = 0;
+        std::uint64_t shortLivedLargeEvents = 0;
+        std::uint64_t shortLivedLargeBytes = 0;
+        std::uint64_t shortLivedLargeLifetimeMilliseconds = 0;
+        std::uint64_t reallocationEvents = 0;
+        std::uint64_t reallocationBytesRequested = 0;
+        std::uint64_t estimatedReallocationBytesCopied = 0;
+        std::uint64_t maximumReallocationChain = 0;
         std::size_t dumpIndex = static_cast<std::size_t>(-1);
     };
 
@@ -206,6 +226,8 @@ namespace
         std::size_t requestedSize = 0;
         AllocationSource source = AllocationSource::Heap;
         StackTotals* totals = nullptr;
+        std::uint64_t createdMilliseconds = 0;
+        std::uint64_t reallocationCount = 0;
     };
 
     struct TrackerState
@@ -222,6 +244,8 @@ namespace
         std::mutex mutex;
         LiveMap live;
         StackMap stacks;
+        std::uint64_t cumulativeAllocatedBytes = 0;
+        std::uint64_t cumulativeFreedBytes = 0;
     };
 
     void addToTotals(
@@ -255,6 +279,32 @@ namespace
         // largestAllocation is recomputed from the live records during dump;
         // maintaining a per-stack size tree on every allocation would cost
         // more memory than the value is worth.
+    }
+
+    void recordCompletedAllocation(
+        StackTotals& totals,
+        const Allocation& allocation,
+        std::uint64_t nowMilliseconds) noexcept
+    {
+        const std::uint64_t lifetime =
+            nowMilliseconds >= allocation.createdMilliseconds
+                ? nowMilliseconds - allocation.createdMilliseconds
+                : 0;
+
+        if (lifetime <= kChurnLifetimeMilliseconds)
+        {
+            ++totals.churnEvents;
+            totals.churnBytes += allocation.requestedSize;
+            totals.churnLifetimeMilliseconds += lifetime;
+        }
+
+        if (allocation.requestedSize >= kLargeAllocationBytes &&
+            lifetime <= kLargeLifetimeMilliseconds)
+        {
+            ++totals.shortLivedLargeEvents;
+            totals.shortLivedLargeBytes += allocation.requestedSize;
+            totals.shortLivedLargeLifetimeMilliseconds += lifetime;
+        }
     }
 
     TrackerState& trackerState()
@@ -314,6 +364,7 @@ namespace
             allocation.requestedSize = size;
             allocation.source = source;
             allocation.totals = &stackResult.first->second;
+            allocation.createdMilliseconds = ::GetTickCount64();
 
             // If a free was missed through an unpatched path, an address can
             // be reused. Remove the stale record from its aggregate first.
@@ -332,6 +383,7 @@ namespace
             }
 
             addToTotals(stackResult.first->second, size, source);
+            state.cumulativeAllocatedBytes += size;
         }
         catch (...)
         {
@@ -354,12 +406,122 @@ namespace
             auto existing = state.live.find(pointer);
             if (existing != state.live.end())
             {
+                recordCompletedAllocation(
+                    *existing->second.totals,
+                    existing->second,
+                    ::GetTickCount64());
                 removeFromTotals(
                     *existing->second.totals,
                     existing->second.requestedSize,
                     existing->second.source);
+                state.cumulativeFreedBytes += existing->second.requestedSize;
                 state.live.erase(existing);
             }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    void trackReallocation(
+        void* oldPointer,
+        void* newPointer,
+        std::size_t newSize,
+        AllocationSource source) noexcept
+    {
+        if (!oldPointer)
+        {
+            trackAllocation(newPointer, newSize, source);
+            return;
+        }
+        if (!newPointer || g_insideTracker)
+            return;
+
+        ReentryGuard guard;
+        StackTrace trace;
+        trace.frameCount = ::CaptureStackBackTrace(
+            2, kMaximumFrames, trace.frames, nullptr);
+
+        try
+        {
+            TrackerState& state = trackerState();
+            std::lock_guard<std::mutex> lock(state.mutex);
+
+            auto old = state.live.find(oldPointer);
+            Allocation previous;
+            const bool hadPrevious = old != state.live.end();
+            if (hadPrevious)
+            {
+                previous = old->second;
+                removeFromTotals(
+                    *previous.totals,
+                    previous.requestedSize,
+                    previous.source);
+            }
+
+            if (newSize < kMinimumTrackedSize)
+            {
+                if (hadPrevious)
+                {
+                    state.cumulativeFreedBytes += previous.requestedSize;
+                    state.live.erase(old);
+                }
+                return;
+            }
+
+            auto stackResult = state.stacks.try_emplace(trace);
+            StackTotals& totals = stackResult.first->second;
+
+            Allocation allocation;
+            allocation.requestedSize = newSize;
+            allocation.source = source;
+            allocation.totals = &totals;
+            allocation.createdMilliseconds = hadPrevious
+                ? previous.createdMilliseconds
+                : ::GetTickCount64();
+            allocation.reallocationCount = hadPrevious
+                ? previous.reallocationCount + 1
+                : 1;
+
+            ++totals.reallocationEvents;
+            totals.reallocationBytesRequested += newSize;
+            totals.maximumReallocationChain = (std::max)(
+                totals.maximumReallocationChain,
+                allocation.reallocationCount);
+            if (hadPrevious && oldPointer != newPointer)
+            {
+                totals.estimatedReallocationBytesCopied +=
+                    (std::min)(previous.requestedSize, newSize);
+            }
+
+            if (hadPrevious && oldPointer == newPointer)
+            {
+                old->second = allocation;
+            }
+            else
+            {
+                if (hadPrevious)
+                    state.live.erase(old);
+
+                auto existingNew = state.live.find(newPointer);
+                if (existingNew != state.live.end())
+                {
+                    removeFromTotals(
+                        *existingNew->second.totals,
+                        existingNew->second.requestedSize,
+                        existingNew->second.source);
+                    existingNew->second = allocation;
+                }
+                else
+                {
+                    state.live.emplace(newPointer, allocation);
+                }
+            }
+
+            addToTotals(totals, newSize, source);
+            state.cumulativeAllocatedBytes += newSize;
+            if (hadPrevious)
+                state.cumulativeFreedBytes += previous.requestedSize;
         }
         catch (...)
         {
@@ -394,10 +556,7 @@ namespace
             reallocated = g_heapReAlloc(heap, flags, pointer, size);
         }
         if (shouldTrack && reallocated)
-        {
-            trackFree(pointer);
-            trackAllocation(reallocated, size, AllocationSource::Heap);
-        }
+            trackReallocation(pointer, reallocated, size, AllocationSource::Heap);
         return reallocated;
     }
 
@@ -446,10 +605,7 @@ namespace
         }
 
         if (shouldTrack && reallocated)
-        {
-            trackFree(pointer);
-            trackAllocation(reallocated, size, AllocationSource::Heap);
-        }
+            trackReallocation(pointer, reallocated, size, AllocationSource::Heap);
 
         return reallocated;
     }
@@ -534,10 +690,7 @@ namespace
         }
         // GMEM_MODIFY changes attributes only; the size argument is ignored.
         if (shouldTrack && reallocated && (flags & GMEM_MODIFY) == 0)
-        {
-            trackFree(memory);
-            trackAllocation(reallocated, size, AllocationSource::Heap);
-        }
+            trackReallocation(memory, reallocated, size, AllocationSource::Heap);
         return reallocated;
     }
 
@@ -580,10 +733,7 @@ namespace
             reallocated = g_localReAlloc(memory, size, flags);
         }
         if (shouldTrack && reallocated && (flags & LMEM_MODIFY) == 0)
-        {
-            trackFree(memory);
-            trackAllocation(reallocated, size, AllocationSource::Heap);
-        }
+            trackReallocation(memory, reallocated, size, AllocationSource::Heap);
         return reallocated;
     }
 
@@ -1098,6 +1248,12 @@ namespace
         std::vector<ResolvedFrame> callStack;
     };
 
+    struct SourceFileAggregate
+    {
+        std::string path;
+        std::unordered_map<std::uint32_t, osgEarth::HeapHotspotLineMetrics> lines;
+    };
+
     class SymbolSession
     {
     public:
@@ -1293,6 +1449,8 @@ namespace HeapHotspots
                 ReentryGuard guard;
                 try
                 {
+                    g_trackingStartMilliseconds.store(
+                        ::GetTickCount64(), std::memory_order_relaxed);
                     installHeapHooks();
                 }
                 catch (...)
@@ -1349,22 +1507,37 @@ namespace HeapHotspots
         };
 
         std::vector<StackSnapshot> snapshot;
+        std::size_t liveStackCount = 0;
+        std::uint64_t cumulativeAllocatedBytes = 0;
+        std::uint64_t cumulativeFreedBytes = 0;
 
         {
             TrackerState& state = trackerState();
             std::lock_guard<std::mutex> lock(state.mutex);
+
+            cumulativeAllocatedBytes = state.cumulativeAllocatedBytes;
+            cumulativeFreedBytes = state.cumulativeFreedBytes;
 
             snapshot.reserve(state.stacks.size());
 
             for (auto& entry : state.stacks)
             {
                 StackTotals& totals = entry.second;
-                if (totals.heapCount == 0 && totals.virtualCount == 0)
+                const bool isLive = totals.heapCount != 0 || totals.virtualCount != 0;
+                const bool hasRecommendationData =
+                    (totals.churnEvents >= kMinimumChurnEvents &&
+                        totals.churnBytes >= kMinimumChurnBytes) ||
+                    totals.shortLivedLargeEvents >= kMinimumLargeEvents ||
+                    totals.shortLivedLargeBytes >= kMinimumLargeBytes ||
+                    totals.maximumReallocationChain >= kMinimumReallocationChain;
+                if (!isLive && !hasRecommendationData)
                     continue;
 
                 totals.dumpIndex = snapshot.size();
                 snapshot.push_back({ entry.first, totals });
                 snapshot.back().totals.largestAllocation = 0;
+                if (isLive)
+                    ++liveStackCount;
             }
 
             // The per-stack maximum is inexpensive to reconstruct here and
@@ -1407,12 +1580,279 @@ namespace HeapHotspots
         }
 
         std::unordered_map<std::string, Aggregate> grouped;
+        std::unordered_map<std::string, SourceFileAggregate> sourceFiles;
+        std::unordered_map<std::string, std::size_t> recommendationIndices;
+        const std::uint64_t recommendationNowMilliseconds = ::GetTickCount64();
+        const std::uint64_t trackingStartMilliseconds =
+            g_trackingStartMilliseconds.load(std::memory_order_relaxed);
+        const double observationSeconds = (std::max)(
+            0.001,
+            static_cast<double>(
+                recommendationNowMilliseconds >= trackingStartMilliseconds
+                    ? recommendationNowMilliseconds - trackingStartMilliseconds
+                    : 0) / 1000.0);
+
+        const auto normalizedSourcePath = [](std::string path)
+        {
+            std::replace(path.begin(), path.end(), '/', '\\');
+            return lowerCase(std::move(path));
+        };
+
+        const auto addSourceMetrics =
+            [&](const std::string& file,
+                std::uint32_t line,
+                std::uint64_t bytes,
+                std::uint64_t allocations,
+                bool inclusive)
+        {
+            if (file.empty() || line == 0)
+                return;
+
+            SourceFileAggregate& source = sourceFiles[normalizedSourcePath(file)];
+            if (source.path.empty())
+                source.path = file;
+
+            osgEarth::HeapHotspotLineMetrics& metrics = source.lines[line];
+            metrics.line = line;
+            if (inclusive)
+            {
+                metrics.inclusiveLiveBytes += bytes;
+                metrics.inclusiveLiveAllocations += allocations;
+            }
+            else
+            {
+                metrics.directLiveBytes += bytes;
+                metrics.directLiveAllocations += allocations;
+            }
+        };
+
+        const auto addRecommendation =
+            [&](osgEarth::HeapRecommendationKind kind,
+                const ResolvedFrame& frame,
+                const std::vector<ResolvedFrame>& callStack,
+                std::uint64_t eventCount,
+                std::uint64_t totalBytes,
+                std::uint64_t estimatedBytesCopied,
+                std::uint64_t maximumReallocationChain,
+                std::uint64_t lifetimeThresholdMilliseconds,
+                std::uint64_t sizeThresholdBytes,
+                double averageLifetimeMilliseconds)
+        {
+            osgEarth::HeapRecommendation recommendation;
+            recommendation.kind = kind;
+            recommendation.file = frame.file;
+            recommendation.function = frame.function;
+            recommendation.line = frame.line;
+            recommendation.eventCount = eventCount;
+            recommendation.totalBytes = totalBytes;
+            recommendation.estimatedBytesCopied = estimatedBytesCopied;
+            recommendation.maximumReallocationChain = maximumReallocationChain;
+            recommendation.lifetimeThresholdMilliseconds = lifetimeThresholdMilliseconds;
+            recommendation.sizeThresholdBytes = sizeThresholdBytes;
+            recommendation.averageLifetimeMilliseconds = averageLifetimeMilliseconds;
+            recommendation.eventsPerSecond =
+                static_cast<double>(eventCount) / observationSeconds;
+            recommendation.callStack.reserve(callStack.size());
+            for (const ResolvedFrame& stackFrame : callStack)
+            {
+                osgEarth::HeapHotspotFrame publicFrame;
+                publicFrame.file = stackFrame.file;
+                publicFrame.function = stackFrame.function;
+                publicFrame.line = stackFrame.line;
+                publicFrame.address = stackFrame.address;
+                recommendation.callStack.push_back(std::move(publicFrame));
+            }
+
+            std::string key = std::to_string(static_cast<unsigned>(kind));
+            key.push_back('|');
+            if (!frame.file.empty() && frame.line != 0)
+            {
+                key += normalizedSourcePath(frame.file);
+                key.push_back(':');
+                key += std::to_string(frame.line);
+            }
+            else if (!frame.function.empty())
+            {
+                key += frame.function;
+            }
+            else
+            {
+                // Keep unresolved sites distinct by their raw stack. This
+                // avoids collapsing unrelated allocations into one finding.
+                for (const ResolvedFrame& stackFrame : callStack)
+                {
+                    key += std::to_string(
+                        static_cast<unsigned long long>(stackFrame.address));
+                    key.push_back(',');
+                }
+            }
+
+            const auto updateScore = [](osgEarth::HeapRecommendation& value)
+            {
+                switch (value.kind)
+                {
+                case osgEarth::HeapRecommendationKind::AllocationChurn:
+                    value.score =
+                        static_cast<double>(value.totalBytes) / 1048576.0 +
+                        value.eventsPerSecond;
+                    break;
+                case osgEarth::HeapRecommendationKind::RepeatedReallocation:
+                    value.score =
+                        static_cast<double>(value.estimatedBytesCopied) / 1048576.0 * 2.0 +
+                        static_cast<double>(value.eventCount) +
+                        static_cast<double>(value.maximumReallocationChain) * 10.0;
+                    break;
+                case osgEarth::HeapRecommendationKind::ShortLivedLargeAllocation:
+                    value.score =
+                        static_cast<double>(value.totalBytes) / 1048576.0 * 4.0 +
+                        static_cast<double>(value.eventCount);
+                    break;
+                }
+            };
+
+            const auto existingIndex = recommendationIndices.find(key);
+            if (existingIndex == recommendationIndices.end())
+            {
+                updateScore(recommendation);
+                recommendationIndices.emplace(
+                    std::move(key), report.recommendations.size());
+                report.recommendations.push_back(std::move(recommendation));
+                return;
+            }
+
+            osgEarth::HeapRecommendation& existing =
+                report.recommendations[existingIndex->second];
+            const std::uint64_t combinedEvents =
+                existing.eventCount + recommendation.eventCount;
+            if (combinedEvents > 0)
+            {
+                existing.averageLifetimeMilliseconds =
+                    (existing.averageLifetimeMilliseconds *
+                        static_cast<double>(existing.eventCount) +
+                        recommendation.averageLifetimeMilliseconds *
+                        static_cast<double>(recommendation.eventCount)) /
+                    static_cast<double>(combinedEvents);
+            }
+            existing.eventCount = combinedEvents;
+            existing.totalBytes += recommendation.totalBytes;
+            existing.estimatedBytesCopied += recommendation.estimatedBytesCopied;
+            existing.maximumReallocationChain = (std::max)(
+                existing.maximumReallocationChain,
+                recommendation.maximumReallocationChain);
+            existing.lifetimeThresholdMilliseconds = (std::max)(
+                existing.lifetimeThresholdMilliseconds,
+                recommendation.lifetimeThresholdMilliseconds);
+            existing.sizeThresholdBytes = (std::max)(
+                existing.sizeThresholdBytes,
+                recommendation.sizeThresholdBytes);
+            existing.eventsPerSecond =
+                static_cast<double>(combinedEvents) / observationSeconds;
+            updateScore(existing);
+        };
 
         for (const StackSnapshot& stack : snapshot)
         {
             std::vector<ResolvedFrame> callStack;
             ResolvedFrame frame =
                 findUsefulFrame(symbols.handle(), stack.trace, &callStack);
+
+            const std::uint64_t stackBytes =
+                stack.totals.heapBytes + stack.totals.virtualBytes;
+            const std::uint64_t stackAllocations =
+                stack.totals.heapCount + stack.totals.virtualCount;
+
+            const double churnRate =
+                static_cast<double>(stack.totals.churnEvents) / observationSeconds;
+            if (stack.totals.churnEvents >= kMinimumChurnEvents &&
+                stack.totals.churnBytes >= kMinimumChurnBytes &&
+                (churnRate >= 25.0 || stack.totals.churnBytes >= 64u * 1024u * 1024u))
+            {
+                addRecommendation(
+                    osgEarth::HeapRecommendationKind::AllocationChurn,
+                    frame,
+                    callStack,
+                    stack.totals.churnEvents,
+                    stack.totals.churnBytes,
+                    0,
+                    0,
+                    kChurnLifetimeMilliseconds,
+                    0,
+                    static_cast<double>(stack.totals.churnLifetimeMilliseconds) /
+                        static_cast<double>(stack.totals.churnEvents));
+            }
+
+            if (stack.totals.shortLivedLargeEvents >= kMinimumLargeEvents ||
+                stack.totals.shortLivedLargeBytes >= kMinimumLargeBytes)
+            {
+                addRecommendation(
+                    osgEarth::HeapRecommendationKind::ShortLivedLargeAllocation,
+                    frame,
+                    callStack,
+                    stack.totals.shortLivedLargeEvents,
+                    stack.totals.shortLivedLargeBytes,
+                    0,
+                    0,
+                    kLargeLifetimeMilliseconds,
+                    kLargeAllocationBytes,
+                    stack.totals.shortLivedLargeEvents > 0
+                        ? static_cast<double>(stack.totals.shortLivedLargeLifetimeMilliseconds) /
+                            static_cast<double>(stack.totals.shortLivedLargeEvents)
+                        : 0.0);
+            }
+
+            if (stack.totals.maximumReallocationChain >= kMinimumReallocationChain)
+            {
+                addRecommendation(
+                    osgEarth::HeapRecommendationKind::RepeatedReallocation,
+                    frame,
+                    callStack,
+                    stack.totals.reallocationEvents,
+                    stack.totals.reallocationBytesRequested,
+                    stack.totals.estimatedReallocationBytesCopied,
+                    stack.totals.maximumReallocationChain,
+                    0,
+                    0,
+                    0.0);
+            }
+
+            if (stackBytes == 0)
+                continue;
+
+            addSourceMetrics(
+                frame.file,
+                static_cast<std::uint32_t>(frame.line),
+                stackBytes,
+                stackAllocations,
+                false);
+
+            // Attribute a stack's totals once to every source line it passes
+            // through. Deduplicating within a stack avoids inflating recursive
+            // traces that visit the same source line more than once.
+            std::vector<std::pair<std::string, std::uint32_t>> attributedLines;
+            attributedLines.reserve(callStack.size());
+            for (const ResolvedFrame& stackFrame : callStack)
+            {
+                if (!stackFrame.hasLine || stackFrame.file.empty() || stackFrame.line == 0)
+                    continue;
+
+                const std::string normalized = normalizedSourcePath(stackFrame.file);
+                const auto attributed = std::find_if(
+                    attributedLines.begin(), attributedLines.end(),
+                    [&](const auto& value)
+                    {
+                        return value.first == normalized && value.second == stackFrame.line;
+                    });
+                if (attributed != attributedLines.end())
+                    continue;
+
+                attributedLines.emplace_back(normalized, stackFrame.line);
+                addSourceMetrics(
+                    stackFrame.file,
+                    static_cast<std::uint32_t>(stackFrame.line),
+                    stackBytes,
+                    stackAllocations,
+                    true);
+            }
 
             std::string key;
 
@@ -1443,10 +1883,8 @@ namespace HeapHotspots
                 aggregate.callStack = std::move(callStack);
             }
 
-            aggregate.liveBytes +=
-                stack.totals.heapBytes + stack.totals.virtualBytes;
-            aggregate.liveAllocations +=
-                stack.totals.heapCount + stack.totals.virtualCount;
+            aggregate.liveBytes += stackBytes;
+            aggregate.liveAllocations += stackAllocations;
 
             aggregate.largestAllocation =
                 (std::max)(
@@ -1521,11 +1959,13 @@ namespace HeapHotspots
         report.valid = true;
         report.allocationThreshold = kMinimumTrackedSize;
         report.patchedModules = g_patchedModuleCount.load();
-        report.distinctCallStacks = snapshot.size();
+        report.distinctCallStacks = liveStackCount;
         report.trackedHeapBytes = trackedHeapBytes;
         report.trackedHeapAllocations = trackedHeapCount;
         report.trackedVirtualBytes = trackedVirtualBytes;
         report.trackedVirtualRegions = trackedVirtualCount;
+        report.cumulativeAllocatedBytes = cumulativeAllocatedBytes;
+        report.cumulativeFreedBytes = cumulativeFreedBytes;
         report.processHeapCount = heapTotals.heapCount;
         report.processHeapWalkComplete = heapTotals.complete;
         report.rawHeapBytes = heapTotals.busyBytes;
@@ -1567,6 +2007,37 @@ namespace HeapHotspots
             }
             report.sites.push_back(std::move(site));
         }
+
+        report.sourceFiles.reserve(sourceFiles.size());
+        for (auto& entry : sourceFiles)
+        {
+            SourceFileAggregate& aggregate = entry.second;
+            osgEarth::HeapHotspotSourceFile source;
+            source.path = std::move(aggregate.path);
+            source.lines.reserve(aggregate.lines.size());
+            for (auto& line : aggregate.lines)
+                source.lines.push_back(std::move(line.second));
+
+            std::sort(
+                source.lines.begin(), source.lines.end(),
+                [](const auto& lhs, const auto& rhs)
+                {
+                    return lhs.line < rhs.line;
+                });
+            report.sourceFiles.push_back(std::move(source));
+        }
+        std::sort(
+            report.sourceFiles.begin(), report.sourceFiles.end(),
+            [](const auto& lhs, const auto& rhs)
+            {
+                return lowerCase(lhs.path) < lowerCase(rhs.path);
+            });
+        std::sort(
+            report.recommendations.begin(), report.recommendations.end(),
+            [](const auto& lhs, const auto& rhs)
+            {
+                return lhs.score > rhs.score;
+            });
 
         return report;
         }
@@ -1610,6 +2081,10 @@ namespace HeapHotspots
             "  heap:    %.2f MiB in %llu allocations\n"
             "  virtual: %.2f MiB in %llu regions\n"
             "\n"
+            "Tracked allocation traffic since install():\n"
+            "  allocated: %.2f MiB\n"
+            "  freed:     %.2f MiB\n"
+            "\n"
             "Process heaps: %zu%s\n"
             "  raw in use: %.2f MiB in %llu blocks (+ %.2f MiB block overhead)\n"
             "  profiler bookkeeping: %.2f MiB requested in %llu heap blocks\n"
@@ -1628,6 +2103,8 @@ namespace HeapHotspots
             static_cast<unsigned long long>(report.trackedHeapAllocations),
             toMiB(report.trackedVirtualBytes),
             static_cast<unsigned long long>(report.trackedVirtualRegions),
+            toMiB(report.cumulativeAllocatedBytes),
+            toMiB(report.cumulativeFreedBytes),
             report.processHeapCount,
             report.processHeapWalkComplete ? "" : " (walk incomplete)",
             toMiB(report.rawHeapBytes),
@@ -1671,6 +2148,65 @@ namespace HeapHotspots
             "Not tracked by design: allocations made before install() (static\n"
             "initializers, CRT/loader startup) and heap calls made from inside\n"
             "ntdll/kernel32/kernelbase on behalf of other APIs.\n\n");
+
+        const std::size_t recommendationCount =
+            maxResults == 0
+                ? report.recommendations.size()
+                : (std::min)(maxResults, report.recommendations.size());
+        std::fprintf(
+            output,
+            "Recommendations: %zu (includes allocations freed before capture)\n",
+            report.recommendations.size());
+        for (std::size_t i = 0; i < recommendationCount; ++i)
+        {
+            const osgEarth::HeapRecommendation& recommendation =
+                report.recommendations[i];
+            const char* pattern = "Memory pattern";
+            switch (recommendation.kind)
+            {
+            case osgEarth::HeapRecommendationKind::AllocationChurn:
+                pattern = "Allocation churn";
+                break;
+            case osgEarth::HeapRecommendationKind::RepeatedReallocation:
+                pattern = "Repeated buffer growth";
+                break;
+            case osgEarth::HeapRecommendationKind::ShortLivedLargeAllocation:
+                pattern = "Short-lived large allocation";
+                break;
+            }
+
+            std::fprintf(output, "  %zu. %s: %llu events, %.2f MiB observed\n",
+                i + 1,
+                pattern,
+                static_cast<unsigned long long>(recommendation.eventCount),
+                toMiB(recommendation.totalBytes));
+            if (!recommendation.file.empty())
+            {
+                std::fprintf(output, "     %s:%lu\n",
+                    recommendation.file.c_str(),
+                    static_cast<unsigned long>(recommendation.line));
+            }
+            if (!recommendation.function.empty())
+                std::fprintf(output, "     %s\n", recommendation.function.c_str());
+
+            if (recommendation.kind ==
+                osgEarth::HeapRecommendationKind::RepeatedReallocation)
+            {
+                std::fprintf(output,
+                    "     longest chain: %llu; estimated copying when moved: %.2f MiB\n",
+                    static_cast<unsigned long long>(
+                        recommendation.maximumReallocationChain),
+                    toMiB(recommendation.estimatedBytesCopied));
+            }
+            else
+            {
+                std::fprintf(output,
+                    "     average lifetime: %.1f ms; rate: %.1f events/sec\n",
+                    recommendation.averageLifetimeMilliseconds,
+                    recommendation.eventsPerSecond);
+            }
+        }
+        std::fprintf(output, "\nLive allocation sites:\n\n");
 
         const std::size_t resultCount =
             maxResults == 0

@@ -15,6 +15,7 @@
 #include <osgEarthImGui/ViewpointsGUI>
 #include <osgEarthImGui/LiveCamerasGUI>
 #include <osgEarthImGui/SystemGUI>
+#include <osgEarthImGui/HeapHotspotsGUI>
 #include <osgEarthImGui/EnvironmentGUI>
 #include <osgEarthImGui/TerrainGUI>
 #include <osgEarthImGui/ShaderGUI>
@@ -112,7 +113,8 @@ main(int argc, char** argv)
         ui->add("Tools", new SearchGUI());
 #endif
         ui->add("Tools", new ShaderGUI(&arguments));
-        ui->add("Tools", new SystemGUI(
+        ui->add("Tools", new SystemGUI());
+        ui->add("Tools", new HeapHotspotsGUI(
             []()
             {
                 return HeapHotspots::capture();

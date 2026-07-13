@@ -20,6 +20,7 @@ set(STOCK_PANELS
     DecalsGUI
     #DateTimeGUI
     EnvironmentGUI    
+    HeapHotspotsGUI
     LayersGUI
     NetworkMonitorGUI
     NotifyGUI

@@ -1,0 +1,817 @@
+/* osgEarth
+ * Copyright 2025 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarthImGui/HeapHotspotReport>
+#include <osgEarthImGui/ImGuiPanel>
+
+#include <algorithm>
+#include <chrono>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <ctime>
+#include <fstream>
+#include <functional>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace osgEarth
+{
+    class HeapHotspotsGUI : public ImGuiPanel
+    {
+    public:
+        using CaptureFunction = std::function<HeapHotspotReport()>;
+        using WriteFunction = std::function<
+            bool(const HeapHotspotReport&, const std::string&)>;
+
+        HeapHotspotsGUI(
+            CaptureFunction capture,
+            WriteFunction write = {}) :
+            ImGuiPanel("Heap Hotspots"),
+            _capture(std::move(capture)),
+            _write(std::move(write))
+        {
+        }
+
+        void draw(osg::RenderInfo&) override
+        {
+            if (!isVisible())
+                return;
+
+            ImGui::Begin(name(), visible());
+            drawContents();
+            ImGui::End();
+        }
+
+    private:
+        CaptureFunction _capture;
+        WriteFunction _write;
+        HeapHotspotReport _report;
+        ImGuiTextFilter _filter;
+        int _sort = 0;
+        bool _sortDescending = true;
+        std::size_t _selectedSite = static_cast<std::size_t>(-1);
+        std::size_t _selectedRecommendation = static_cast<std::size_t>(-1);
+        std::string _status;
+
+        std::string _sourcePath;
+        std::string _sourceError;
+        std::vector<std::string> _sourceLines;
+        std::vector<HeapHotspotLineMetrics> _sourceMetrics;
+        float _sourceTextWidth = 0.0f;
+        std::uint32_t _selectedSourceLine = 0;
+        bool _selectSourceTab = false;
+        bool _scrollToSourceLine = false;
+        int _attributionMode = 0; // 0=inclusive stack, 1=direct allocation site
+
+        static double toMiB(std::uint64_t bytes)
+        {
+            return static_cast<double>(bytes) / 1048576.0;
+        }
+
+        static std::string formatBytes(std::uint64_t bytes)
+        {
+            char text[64];
+            if (bytes >= 1073741824)
+                std::snprintf(text, sizeof(text), "%.2f GiB", static_cast<double>(bytes) / 1073741824.0);
+            else if (bytes >= 1048576)
+                std::snprintf(text, sizeof(text), "%.2f MiB", toMiB(bytes));
+            else if (bytes >= 1024)
+                std::snprintf(text, sizeof(text), "%.1f KiB", static_cast<double>(bytes) / 1024.0);
+            else
+                std::snprintf(text, sizeof(text), "%llu B", static_cast<unsigned long long>(bytes));
+            return text;
+        }
+
+        static std::string normalizedPath(std::string path)
+        {
+            std::replace(path.begin(), path.end(), '/', '\\');
+#ifdef _WIN32
+            std::transform(
+                path.begin(), path.end(), path.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+#endif
+            return path;
+        }
+
+        static std::string snapshotFilename()
+        {
+            const auto now = std::chrono::system_clock::now();
+            const std::time_t time = std::chrono::system_clock::to_time_t(now);
+            std::tm localTime = {};
+#ifdef _WIN32
+            localtime_s(&localTime, &time);
+#else
+            localtime_r(&time, &localTime);
+#endif
+            char timestamp[32];
+            std::strftime(timestamp, sizeof(timestamp), "%Y%m%d-%H%M%S", &localTime);
+            return std::string("heap-hotspots-") + timestamp + ".txt";
+        }
+
+        const HeapHotspotSourceFile* findSourceMetrics(const std::string& path) const
+        {
+            const std::string normalized = normalizedPath(path);
+            const auto found = std::find_if(
+                _report.sourceFiles.begin(), _report.sourceFiles.end(),
+                [&](const HeapHotspotSourceFile& source)
+                {
+                    return normalizedPath(source.path) == normalized;
+                });
+            return found == _report.sourceFiles.end() ? nullptr : &*found;
+        }
+
+        void rebuildSourceMetrics()
+        {
+            _sourceMetrics.assign(_sourceLines.size() + 1, HeapHotspotLineMetrics());
+            const HeapHotspotSourceFile* source = findSourceMetrics(_sourcePath);
+            if (!source)
+                return;
+
+            for (const HeapHotspotLineMetrics& metrics : source->lines)
+            {
+                if (metrics.line < _sourceMetrics.size())
+                    _sourceMetrics[metrics.line] = metrics;
+            }
+        }
+
+        void openSource(const std::string& path, std::uint32_t line)
+        {
+            _sourcePath = path;
+            _sourceError.clear();
+            _sourceLines.clear();
+            _sourceMetrics.clear();
+            _sourceTextWidth = 0.0f;
+            _selectedSourceLine = line;
+            _scrollToSourceLine = true;
+            _selectSourceTab = true;
+
+            std::ifstream input(path);
+            if (!input)
+            {
+                _sourceError = "Unable to open source file: " + path;
+                return;
+            }
+
+            std::string text;
+            while (std::getline(input, text))
+            {
+                if (!text.empty() && text.back() == '\r')
+                    text.pop_back();
+                _sourceTextWidth = (std::max)(
+                    _sourceTextWidth,
+                    ImGui::CalcTextSize(text.c_str()).x);
+                _sourceLines.push_back(std::move(text));
+            }
+            rebuildSourceMetrics();
+        }
+
+        void clearDiagnosticStorage()
+        {
+            // The snapshot and source text are diagnostic allocations. Release
+            // them before measuring so they do not appear as application data.
+            _report = HeapHotspotReport();
+            std::string().swap(_sourcePath);
+            std::string().swap(_sourceError);
+            std::string().swap(_status);
+            std::vector<std::string>().swap(_sourceLines);
+            std::vector<HeapHotspotLineMetrics>().swap(_sourceMetrics);
+            _sourceTextWidth = 0.0f;
+            _selectedSite = static_cast<std::size_t>(-1);
+            _selectedRecommendation = static_cast<std::size_t>(-1);
+            _selectedSourceLine = 0;
+        }
+
+        void capture()
+        {
+            clearDiagnosticStorage();
+            _report = _capture ? _capture() : HeapHotspotReport();
+            _status = _report.valid ? "Snapshot captured" : _report.error;
+        }
+
+        void drawToolbar()
+        {
+            if (ImGui::Button("Capture Heap Snapshot"))
+                capture();
+
+            ImGui::SameLine();
+            if (_report.valid && _write)
+            {
+                if (ImGui::Button("Save Snapshot Dump"))
+                {
+                    const std::string filename = snapshotFilename();
+                    _status = _write(_report, filename)
+                        ? "Saved " + filename
+                        : "Failed to save " + filename;
+                }
+            }
+            else
+            {
+                ImGui::TextDisabled("Save Snapshot Dump");
+            }
+
+            if (!_status.empty())
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", _status.c_str());
+            }
+        }
+
+        void drawSummary() const
+        {
+            if (ImGui::BeginTable(
+                    "heap snapshot summary", 4,
+                    ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV))
+            {
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Tracked");
+                ImGui::Text("%.1f MiB", toMiB(_report.trackedBytes()));
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Application heap");
+                ImGui::Text("%.1f MiB", toMiB(_report.applicationHeapBytes));
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Coverage");
+                ImGui::Text("%.1f%%", _report.heapCoveragePercent);
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Untracked heap");
+                ImGui::Text("%.1f MiB", toMiB(_report.untrackedApplicationHeapBytes));
+
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Live allocations");
+                ImGui::Text("%llu", static_cast<unsigned long long>(_report.trackedAllocations()));
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Profiler storage");
+                ImGui::Text("%.1f MiB", toMiB(_report.profilerBytes));
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Committed heap");
+                ImGui::Text("%.1f MiB%s", toMiB(_report.heapCommittedBytes),
+                    _report.heapCommittedIsEstimate ? " (est.)" : "");
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Private bytes");
+                if (_report.processPrivateBytesAvailable)
+                    ImGui::Text("%.1f MiB", toMiB(_report.processPrivateBytes));
+                else
+                    ImGui::TextUnformatted("Unavailable");
+
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Allocated since install");
+                ImGui::TextUnformatted(formatBytes(_report.cumulativeAllocatedBytes).c_str());
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Cumulative requested bytes observed by the tracker. "
+                        "A successful reallocation contributes its new requested size.");
+                }
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("Freed since install");
+                ImGui::TextUnformatted(formatBytes(_report.cumulativeFreedBytes).c_str());
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Cumulative requested bytes released through tracked frees. "
+                        "A successful reallocation contributes its old requested size.");
+                }
+                ImGui::EndTable();
+            }
+        }
+
+        std::vector<std::size_t> filteredSites() const
+        {
+            std::vector<std::size_t> rows;
+            rows.reserve(_report.sites.size());
+            for (std::size_t i = 0; i < _report.sites.size(); ++i)
+            {
+                const HeapHotspotSite& site = _report.sites[i];
+                if (_filter.PassFilter(site.function.c_str()) ||
+                    _filter.PassFilter(site.file.c_str()))
+                {
+                    rows.push_back(i);
+                }
+            }
+
+            std::stable_sort(
+                rows.begin(), rows.end(),
+                [&](std::size_t lhsIndex, std::size_t rhsIndex)
+                {
+                    const HeapHotspotSite& lhs = _report.sites[lhsIndex];
+                    const HeapHotspotSite& rhs = _report.sites[rhsIndex];
+                    switch (_sort)
+                    {
+                    case 1:
+                        if (lhs.liveAllocations != rhs.liveAllocations)
+                            return _sortDescending
+                                ? lhs.liveAllocations > rhs.liveAllocations
+                                : lhs.liveAllocations < rhs.liveAllocations;
+                        break;
+                    case 2:
+                        if (lhs.largestAllocation != rhs.largestAllocation)
+                            return _sortDescending
+                                ? lhs.largestAllocation > rhs.largestAllocation
+                                : lhs.largestAllocation < rhs.largestAllocation;
+                        break;
+                    case 3:
+                        if (lhs.function != rhs.function)
+                            return _sortDescending
+                                ? lhs.function > rhs.function
+                                : lhs.function < rhs.function;
+                        break;
+                    default:
+                        if (lhs.liveBytes != rhs.liveBytes)
+                            return _sortDescending
+                                ? lhs.liveBytes > rhs.liveBytes
+                                : lhs.liveBytes < rhs.liveBytes;
+                        break;
+                    }
+                    return lhsIndex < rhsIndex;
+                });
+            return rows;
+        }
+
+        void sourceLink(
+            const char* id,
+            const std::string& file,
+            std::uint32_t line)
+        {
+            if (file.empty())
+                return;
+
+            ImGui::PushID(id);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 0.65f, 1.0f, 1.0f));
+            const std::string label = file + ":" + std::to_string(line);
+            if (ImGui::Selectable(label.c_str(), false))
+                openSource(file, line);
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Open %s at line %u", file.c_str(), line);
+            ImGui::PopID();
+        }
+
+        void drawSelectedSite()
+        {
+            if (_selectedSite >= _report.sites.size())
+                return;
+
+            const HeapHotspotSite& site = _report.sites[_selectedSite];
+            ImGui::SeparatorText("Selected allocation site");
+            ImGui::TextWrapped("%s", site.function.empty() ? "<unknown>" : site.function.c_str());
+            sourceLink("site-source", site.file, site.line);
+            ImGui::Text("%.2f MiB in %llu allocations; largest %.1f KiB",
+                toMiB(site.liveBytes),
+                static_cast<unsigned long long>(site.liveAllocations),
+                static_cast<double>(site.largestAllocation) / 1024.0);
+
+            // Consume the remainder of the tab instead of leaving a fixed
+            // blank area below short call-stack panes.
+            if (ImGui::BeginChild("heap hotspot call stack", ImVec2(0, 0), true))
+            {
+                for (std::size_t i = 0; i < site.callStack.size(); ++i)
+                {
+                    const HeapHotspotFrame& frame = site.callStack[i];
+                    ImGui::PushID(static_cast<int>(i));
+                    ImGui::TextDisabled("#%zu", i);
+                    ImGui::SameLine();
+                    if (!frame.function.empty())
+                        ImGui::TextWrapped("%s", frame.function.c_str());
+                    else
+                        ImGui::Text("0x%llx", static_cast<unsigned long long>(frame.address));
+                    if (!frame.file.empty())
+                    {
+                        ImGui::Indent();
+                        sourceLink("frame-source", frame.file, frame.line);
+                        ImGui::Unindent();
+                    }
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndChild();
+        }
+
+        void drawSites()
+        {
+            _filter.Draw("Filter function/source", 300.0f);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(150.0f);
+            static const char* sortItems[] = {
+                "Live bytes", "Allocations", "Largest", "Function" };
+            ImGui::Combo("Sort", &_sort, sortItems, 4);
+            ImGui::SameLine();
+            ImGui::Checkbox("Descending", &_sortDescending);
+
+            const std::vector<std::size_t> rows = filteredSites();
+            ImGui::TextDisabled("%zu of %zu allocation sites", rows.size(), _report.sites.size());
+
+            const ImGuiTableFlags flags =
+                ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable | ImGuiTableFlags_Borders |
+                ImGuiTableFlags_SizingFixedFit;
+            const bool showDetails = _selectedSite < _report.sites.size();
+            const float availableHeight = ImGui::GetContentRegionAvail().y;
+            const float tableHeight = showDetails
+                ? (std::min)(
+                    availableHeight,
+                    (std::min)(
+                        (std::max)(180.0f, availableHeight * 0.44f),
+                        (std::max)(180.0f, availableHeight - 240.0f)))
+                : availableHeight;
+            if (ImGui::BeginTable(
+                    "heap hotspot sites", 5, flags, ImVec2(0, tableHeight)))
+            {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("Live MiB", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("Allocations", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn("Largest KiB", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn("Function", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
+
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(rows.size()));
+                while (clipper.Step())
+                {
+                    for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row)
+                    {
+                        const std::size_t siteIndex = rows[row];
+                        const HeapHotspotSite& site = _report.sites[siteIndex];
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn(); ImGui::Text("%.2f", toMiB(site.liveBytes));
+                        ImGui::TableNextColumn(); ImGui::Text("%llu",
+                            static_cast<unsigned long long>(site.liveAllocations));
+                        ImGui::TableNextColumn(); ImGui::Text("%.1f",
+                            static_cast<double>(site.largestAllocation) / 1024.0);
+                        ImGui::TableNextColumn();
+                        ImGui::PushID(static_cast<int>(siteIndex));
+                        const char* function = site.function.empty() ? "<unknown>" : site.function.c_str();
+                        if (ImGui::Selectable(function, _selectedSite == siteIndex))
+                            _selectedSite = siteIndex;
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", function);
+                        ImGui::PopID();
+                        ImGui::TableNextColumn();
+                        if (!site.file.empty())
+                        {
+                            ImGui::PushID(static_cast<int>(siteIndex));
+                            sourceLink("table-source", site.file, site.line);
+                            ImGui::PopID();
+                        }
+                        else
+                            ImGui::TextDisabled("No source information");
+                    }
+                }
+                ImGui::EndTable();
+            }
+            drawSelectedSite();
+        }
+
+        static const char* recommendationName(HeapRecommendationKind kind)
+        {
+            switch (kind)
+            {
+            case HeapRecommendationKind::AllocationChurn:
+                return "Allocation churn";
+            case HeapRecommendationKind::RepeatedReallocation:
+                return "Repeated buffer growth";
+            case HeapRecommendationKind::ShortLivedLargeAllocation:
+                return "Short-lived large allocation";
+            }
+            return "Memory pattern";
+        }
+
+        void drawRecommendationDetail()
+        {
+            if (_selectedRecommendation >= _report.recommendations.size())
+                return;
+
+            const HeapRecommendation& recommendation =
+                _report.recommendations[_selectedRecommendation];
+            ImGui::SeparatorText(recommendationName(recommendation.kind));
+            ImGui::TextWrapped("%s",
+                recommendation.function.empty()
+                    ? "<unknown>"
+                    : recommendation.function.c_str());
+            sourceLink("recommendation-source", recommendation.file, recommendation.line);
+
+            switch (recommendation.kind)
+            {
+            case HeapRecommendationKind::AllocationChurn:
+                ImGui::TextWrapped(
+                    "%llu allocations totaling %s were freed within %llu ms "
+                    "(average lifetime %.1f ms, %.1f events/sec).",
+                    static_cast<unsigned long long>(recommendation.eventCount),
+                    formatBytes(recommendation.totalBytes).c_str(),
+                    static_cast<unsigned long long>(
+                        recommendation.lifetimeThresholdMilliseconds),
+                    recommendation.averageLifetimeMilliseconds,
+                    recommendation.eventsPerSecond);
+                ImGui::TextWrapped(
+                    "These allocations are individually temporary but collectively expensive. "
+                    "Consider stack storage, object reuse, pooling, or batching work at this site.");
+                break;
+            case HeapRecommendationKind::RepeatedReallocation:
+                ImGui::TextWrapped(
+                    "%llu reallocations requested %s in total. A single buffer was resized "
+                    "at least %llu times; pointer moves imply up to %s of copying.",
+                    static_cast<unsigned long long>(recommendation.eventCount),
+                    formatBytes(recommendation.totalBytes).c_str(),
+                    static_cast<unsigned long long>(
+                        recommendation.maximumReallocationChain),
+                    formatBytes(recommendation.estimatedBytesCopied).c_str());
+                ImGui::TextWrapped(
+                    "If the final size is predictable, reserve capacity before filling the "
+                    "buffer or grow it geometrically instead of extending it in small steps.");
+                break;
+            case HeapRecommendationKind::ShortLivedLargeAllocation:
+                ImGui::TextWrapped(
+                    "%llu allocations of at least %s, totaling %s, were released within "
+                    "%llu ms (average lifetime %.1f ms).",
+                    static_cast<unsigned long long>(recommendation.eventCount),
+                    formatBytes(recommendation.sizeThresholdBytes).c_str(),
+                    formatBytes(recommendation.totalBytes).c_str(),
+                    static_cast<unsigned long long>(
+                        recommendation.lifetimeThresholdMilliseconds),
+                    recommendation.averageLifetimeMilliseconds);
+                ImGui::TextWrapped(
+                    "Consider retaining a reusable scratch buffer, writing into the final "
+                    "destination, or processing the data in smaller chunks.");
+                break;
+            }
+
+            ImGui::TextDisabled(
+                "Recommendations are heuristic observations accumulated since tracking began.");
+            if (ImGui::BeginChild("recommendation call stack", ImVec2(0, 0), true))
+            {
+                for (std::size_t i = 0; i < recommendation.callStack.size(); ++i)
+                {
+                    const HeapHotspotFrame& frame = recommendation.callStack[i];
+                    ImGui::PushID(static_cast<int>(i));
+                    ImGui::TextDisabled("#%zu", i);
+                    ImGui::SameLine();
+                    if (!frame.function.empty())
+                        ImGui::TextWrapped("%s", frame.function.c_str());
+                    else
+                        ImGui::Text("0x%llx", static_cast<unsigned long long>(frame.address));
+                    if (!frame.file.empty())
+                    {
+                        ImGui::Indent();
+                        sourceLink("recommendation-frame", frame.file, frame.line);
+                        ImGui::Unindent();
+                    }
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndChild();
+        }
+
+        void drawRecommendations()
+        {
+            if (_report.recommendations.empty())
+            {
+                ImGui::TextDisabled(
+                    "No high-confidence memory patterns have crossed the recommendation thresholds.");
+                ImGui::TextWrapped(
+                    "This analysis includes allocations that were freed before the snapshot.");
+                return;
+            }
+
+            if (_selectedRecommendation >= _report.recommendations.size())
+                _selectedRecommendation = 0;
+
+            ImGui::TextWrapped(
+                "These findings include historical allocations and reallocations, not only "
+                "objects that remain live in the snapshot.");
+            const ImGuiTableFlags flags =
+                ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable | ImGuiTableFlags_Borders |
+                ImGuiTableFlags_SizingFixedFit;
+            const float availableHeight = ImGui::GetContentRegionAvail().y;
+            const float tableHeight = (std::min)(
+                availableHeight,
+                (std::min)(
+                    (std::max)(160.0f, availableHeight * 0.38f),
+                    (std::max)(160.0f, availableHeight - 300.0f)));
+            if (ImGui::BeginTable(
+                    "heap recommendations", 4, flags, ImVec2(0, tableHeight)))
+            {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("Pattern", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+                ImGui::TableSetupColumn("Events", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn("Observed impact", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+                ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
+
+                for (std::size_t i = 0; i < _report.recommendations.size(); ++i)
+                {
+                    const HeapRecommendation& recommendation = _report.recommendations[i];
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::PushID(static_cast<int>(i));
+                    if (ImGui::Selectable(
+                            recommendationName(recommendation.kind),
+                            _selectedRecommendation == i))
+                    {
+                        _selectedRecommendation = i;
+                    }
+                    ImGui::PopID();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%llu", static_cast<unsigned long long>(recommendation.eventCount));
+                    ImGui::TableNextColumn();
+                    if (recommendation.kind == HeapRecommendationKind::RepeatedReallocation)
+                    {
+                        ImGui::Text("%llu-step chain",
+                            static_cast<unsigned long long>(
+                                recommendation.maximumReallocationChain));
+                        if (ImGui::IsItemHovered())
+                        {
+                            ImGui::SetTooltip(
+                                "%s requested; up to %s copied when buffers moved",
+                                formatBytes(recommendation.totalBytes).c_str(),
+                                formatBytes(recommendation.estimatedBytesCopied).c_str());
+                        }
+                    }
+                    else
+                    {
+                        ImGui::TextUnformatted(formatBytes(recommendation.totalBytes).c_str());
+                    }
+                    ImGui::TableNextColumn();
+                    if (!recommendation.file.empty())
+                    {
+                        ImGui::PushID(static_cast<int>(i));
+                        sourceLink(
+                            "recommendation-table-source",
+                            recommendation.file,
+                            recommendation.line);
+                        ImGui::PopID();
+                    }
+                    else if (!recommendation.function.empty())
+                    {
+                        ImGui::TextUnformatted(recommendation.function.c_str());
+                    }
+                    else
+                    {
+                        ImGui::TextDisabled("No source information");
+                    }
+                }
+                ImGui::EndTable();
+            }
+            drawRecommendationDetail();
+        }
+
+        void drawSourceViewer()
+        {
+            if (_sourcePath.empty())
+            {
+                ImGui::TextDisabled(
+                    "Click a source location in the allocation table or call stack.");
+                return;
+            }
+
+            ImGui::TextWrapped("%s", _sourcePath.c_str());
+            if (!_sourceError.empty())
+            {
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "%s", _sourceError.c_str());
+                return;
+            }
+
+            ImGui::RadioButton("Inclusive stack", &_attributionMode, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("Direct allocation site", &_attributionMode, 1);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Direct metrics count only the source line selected as the allocation site.");
+            ImGui::SameLine();
+            ImGui::TextDisabled(
+                _attributionMode == 0
+                    ? "Each live allocation is charged to every source line in its captured stack."
+                    : "Only allocations directly attributed to each source line are counted.");
+
+            std::uint64_t maximumBytes = 0;
+            for (const HeapHotspotLineMetrics& metrics : _sourceMetrics)
+            {
+                maximumBytes = (std::max)(
+                    maximumBytes,
+                    _attributionMode == 0
+                        ? metrics.inclusiveLiveBytes
+                        : metrics.directLiveBytes);
+            }
+
+            const ImGuiTableFlags flags =
+                ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX |
+                ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
+                ImGuiTableFlags_SizingFixedFit;
+            const float fixedColumnWidth = 90.0f + 90.0f + 55.0f;
+            const float visibleSourceWidth = (std::max)(
+                200.0f,
+                ImGui::GetContentRegionAvail().x - fixedColumnWidth);
+            const float sourceColumnWidth = (std::max)(
+                visibleSourceWidth,
+                _sourceTextWidth + ImGui::GetStyle().CellPadding.x * 2.0f + 8.0f);
+            if (ImGui::BeginTable("annotated source", 4, flags, ImVec2(0, -1)))
+            {
+                ImGui::TableSetupScrollFreeze(3, 1);
+                ImGui::TableSetupColumn("Live bytes", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn("Allocations", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                ImGui::TableSetupColumn("Line", ImGuiTableColumnFlags_WidthFixed, 55.0f);
+                ImGui::TableSetupColumn(
+                    "Source", ImGuiTableColumnFlags_WidthFixed, sourceColumnWidth);
+                ImGui::TableHeadersRow();
+
+                if (_scrollToSourceLine && _selectedSourceLine > 0)
+                {
+                    const float target =
+                        static_cast<float>(_selectedSourceLine > 5 ? _selectedSourceLine - 5 : 0) *
+                        ImGui::GetTextLineHeightWithSpacing();
+                    ImGui::SetScrollY(target);
+                    _scrollToSourceLine = false;
+                }
+
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(_sourceLines.size()));
+                while (clipper.Step())
+                {
+                    for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row)
+                    {
+                        const std::uint32_t line = static_cast<std::uint32_t>(row + 1);
+                        const HeapHotspotLineMetrics& metrics = _sourceMetrics[line];
+                        const std::uint64_t bytes = _attributionMode == 0
+                            ? metrics.inclusiveLiveBytes
+                            : metrics.directLiveBytes;
+                        const std::uint64_t allocations = _attributionMode == 0
+                            ? metrics.inclusiveLiveAllocations
+                            : metrics.directLiveAllocations;
+
+                        ImGui::TableNextRow();
+                        if (bytes > 0 && maximumBytes > 0)
+                        {
+                            const float intensity = static_cast<float>(
+                                static_cast<double>(bytes) / static_cast<double>(maximumBytes));
+                            ImGui::TableSetBgColor(
+                                ImGuiTableBgTarget_RowBg0,
+                                ImGui::GetColorU32(ImVec4(0.55f, 0.20f, 0.08f, 0.18f + 0.32f * intensity)));
+                        }
+                        if (line == _selectedSourceLine)
+                        {
+                            ImGui::TableSetBgColor(
+                                ImGuiTableBgTarget_RowBg1,
+                                ImGui::GetColorU32(ImVec4(0.15f, 0.42f, 0.72f, 0.45f)));
+                        }
+
+                        ImGui::TableNextColumn();
+                        if (bytes > 0)
+                            ImGui::TextUnformatted(formatBytes(bytes).c_str());
+                        ImGui::TableNextColumn();
+                        if (allocations > 0)
+                            ImGui::Text("%llu", static_cast<unsigned long long>(allocations));
+                        ImGui::TableNextColumn();
+                        ImGui::TextDisabled("%u", line);
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(_sourceLines[row].c_str());
+                    }
+                }
+                ImGui::EndTable();
+            }
+        }
+
+        void drawContents()
+        {
+            drawToolbar();
+            if (!_report.valid)
+            {
+                ImGui::TextDisabled(
+                    "No snapshot yet. Capture is performed only when the button is pressed.");
+                return;
+            }
+
+            drawSummary();
+            ImGui::Spacing();
+            if (ImGui::BeginTabBar("heap hotspot views"))
+            {
+                if (ImGui::BeginTabItem("Allocation Sites"))
+                {
+                    drawSites();
+                    ImGui::EndTabItem();
+                }
+
+                const std::string recommendationsLabel =
+                    "Recommendations (" +
+                    std::to_string(_report.recommendations.size()) + ")";
+                if (ImGui::BeginTabItem(recommendationsLabel.c_str()))
+                {
+                    drawRecommendations();
+                    ImGui::EndTabItem();
+                }
+
+                const ImGuiTabItemFlags sourceFlags =
+                    _selectSourceTab ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+                if (ImGui::BeginTabItem("Source", nullptr, sourceFlags))
+                {
+                    _selectSourceTab = false;
+                    drawSourceViewer();
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
+        }
+    };
+}

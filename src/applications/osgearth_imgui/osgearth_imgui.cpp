@@ -122,6 +122,10 @@ main(int argc, char** argv)
             [](const HeapHotspotReport& report, const std::string& filename)
             {
                 return HeapHotspots::write(report, filename.c_str());
+            },
+            []()
+            {
+                return HeapHotspots::sampleLive();
             }));
         ui->add("Tools", new TerrainGUI());
         ui->add("Tools", new TextureInspectorGUI());

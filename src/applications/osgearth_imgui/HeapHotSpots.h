@@ -7,6 +7,7 @@
 namespace HeapHotspots
 {
     using Report = osgEarth::HeapHotspotReport;
+    using LiveSnapshot = osgEarth::HeapHotspotLiveSnapshot;
 
     // Installs heap API interception. Modules already loaded are patched
     // immediately; modules loaded later (OpenGL drivers, osgDB plugins, GDAL
@@ -17,6 +18,10 @@ namespace HeapHotspots
     // Captures a self-contained snapshot. This is the primary API for UIs,
     // telemetry, tests, and custom serializers.
     Report capture();
+
+    // Copies current active-stack totals without heap walking or symbol
+    // resolution. Intended for low-latency UI sampling.
+    LiveSnapshot sampleLive();
 
     // Writes a previously captured report without walking the heaps or
     // resolving symbols again. A maxResults value of zero writes every site.

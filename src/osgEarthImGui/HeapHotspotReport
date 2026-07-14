@@ -21,6 +21,8 @@ namespace osgEarth
 
     struct HeapHotspotSite
     {
+        // Stable for the same resolved site so consumers can correlate snapshots.
+        std::uint64_t id = 0;
         std::string file;
         std::string function;
         std::uint32_t line = 0;
@@ -28,6 +30,28 @@ namespace osgEarth
         std::uint64_t liveAllocations = 0;
         std::uint64_t largestAllocation = 0;
         std::vector<HeapHotspotFrame> callStack;
+
+        // Raw stack IDs folded into this resolved site. This lets live views
+        // carry observations made before symbol resolution into the site.
+        std::vector<std::uint64_t> allocationStackIds;
+    };
+
+    struct HeapHotspotLiveSite
+    {
+        std::uint64_t id = 0;
+        std::uint64_t liveBytes = 0;
+        std::uint64_t liveAllocations = 0;
+        std::uintptr_t topAddress = 0;
+        bool resolved = false;
+    };
+
+    struct HeapHotspotLiveSnapshot
+    {
+        bool valid = false;
+        std::string error;
+        std::uint64_t liveBytes = 0;
+        std::uint64_t liveAllocations = 0;
+        std::vector<HeapHotspotLiveSite> sites;
     };
 
     struct HeapHotspotLineMetrics

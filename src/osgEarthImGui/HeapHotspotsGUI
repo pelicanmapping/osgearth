@@ -25,15 +25,18 @@ namespace osgEarth
     {
     public:
         using CaptureFunction = std::function<HeapHotspotReport()>;
+        using LiveCaptureFunction = std::function<HeapHotspotLiveSnapshot()>;
         using WriteFunction = std::function<
             bool(const HeapHotspotReport&, const std::string&)>;
 
         HeapHotspotsGUI(
             CaptureFunction capture,
-            WriteFunction write = {}) :
+            WriteFunction write = {},
+            LiveCaptureFunction liveCapture = {}) :
             ImGuiPanel("Heap Hotspots"),
             _capture(std::move(capture)),
-            _write(std::move(write))
+            _write(std::move(write)),
+            _liveCapture(std::move(liveCapture))
         {
         }
 
@@ -48,15 +51,67 @@ namespace osgEarth
         }
 
     private:
+        struct SitePeakHistory
+        {
+            std::uint64_t siteId = 0;
+            std::uint64_t peakBytes = 0;
+            std::uint64_t peakAllocations = 0;
+            std::uint64_t bytesPeakEvents = 0;
+            std::uint64_t allocationsPeakEvents = 0;
+            double bytesPeakTime = -1000.0;
+            double allocationsPeakTime = -1000.0;
+            std::uint64_t firstSeenOrder = 0;
+        };
+
+        struct ActivityRow
+        {
+            std::uint64_t siteId = 0;
+            std::uint64_t currentBytes = 0;
+            std::uint64_t currentAllocations = 0;
+            std::uintptr_t topAddress = 0;
+            std::size_t siteIndex = static_cast<std::size_t>(-1);
+            std::size_t historyIndex = 0;
+            bool resolved = false;
+        };
+
+        struct ResolvedSiteIndex
+        {
+            std::uint64_t siteId = 0;
+            std::size_t siteIndex = 0;
+        };
+
         CaptureFunction _capture;
         WriteFunction _write;
+        LiveCaptureFunction _liveCapture;
         HeapHotspotReport _report;
+        HeapHotspotLiveSnapshot _liveSnapshot;
         ImGuiTextFilter _filter;
         int _sort = 0;
         bool _sortDescending = true;
         std::size_t _selectedSite = static_cast<std::size_t>(-1);
         std::size_t _selectedRecommendation = static_cast<std::size_t>(-1);
         std::string _status;
+        std::string _liveStatus;
+
+        std::vector<SitePeakHistory> _sitePeakHistory;
+        std::vector<SitePeakHistory> _pendingPeakHistory;
+        std::vector<ActivityRow> _activityRows;
+        std::vector<ActivityRow> _pendingActivityRows;
+        std::vector<std::size_t> _visibleActivityRows;
+        std::vector<ResolvedSiteIndex> _resolvedSiteIndices;
+        int _activityMetric = 0; // 0=live bytes, 1=allocation count
+        int _activitySort = 0; // 0=stable, 1=current, 2=peak, 3=events, 4=site
+        bool _activitySortDescending = false;
+        std::uint64_t _nextActivityOrder = 0;
+        bool _showInactiveActivitySites = true;
+        double _minimumActiveMiB = 0.0;
+        double _minimumPeakMiB = 0.0;
+        int _minimumActiveAllocations = 0;
+        int _minimumPeakAllocations = 0;
+        float _liveSampleInterval = 0.1f;
+        double _nextLiveSampleTime = 0.0;
+        bool _liveSamplingPaused = false;
+        std::uint64_t _selectedActivitySiteId = 0;
 
         std::string _sourcePath;
         std::string _sourceError;
@@ -172,24 +227,612 @@ namespace osgEarth
 
         void clearDiagnosticStorage()
         {
-            // The snapshot and source text are diagnostic allocations. Release
-            // them before measuring so they do not appear as application data.
+            // Release snapshot/source scratch before measuring. Observed
+            // activity rows intentionally survive captures so lifetime peaks
+            // remain explorable even when inactive rows are temporarily hidden.
             _report = HeapHotspotReport();
+            _liveSnapshot = HeapHotspotLiveSnapshot();
             std::string().swap(_sourcePath);
             std::string().swap(_sourceError);
             std::string().swap(_status);
+            std::string().swap(_liveStatus);
             std::vector<std::string>().swap(_sourceLines);
             std::vector<HeapHotspotLineMetrics>().swap(_sourceMetrics);
+            std::vector<SitePeakHistory>().swap(_pendingPeakHistory);
+            std::vector<ActivityRow>().swap(_pendingActivityRows);
+            std::vector<std::size_t>().swap(_visibleActivityRows);
+            for (ActivityRow& row : _activityRows)
+                row.siteIndex = static_cast<std::size_t>(-1);
+            std::vector<ResolvedSiteIndex>().swap(_resolvedSiteIndices);
             _sourceTextWidth = 0.0f;
             _selectedSite = static_cast<std::size_t>(-1);
             _selectedRecommendation = static_cast<std::size_t>(-1);
             _selectedSourceLine = 0;
         }
 
+        void rebuildActivityRows()
+        {
+            _pendingActivityRows.clear();
+            _pendingActivityRows.reserve(_report.sites.size());
+            for (std::size_t siteIndex = 0;
+                 siteIndex < _report.sites.size();
+                 ++siteIndex)
+            {
+                const std::uint64_t siteId = _report.sites[siteIndex].id;
+                const auto history = std::lower_bound(
+                    _sitePeakHistory.begin(),
+                    _sitePeakHistory.end(),
+                    siteId,
+                    [](const SitePeakHistory& value, std::uint64_t id)
+                    {
+                        return value.siteId < id;
+                    });
+                if (history == _sitePeakHistory.end() || history->siteId != siteId)
+                    continue;
+
+                const HeapHotspotSite& site = _report.sites[siteIndex];
+                ActivityRow row;
+                row.siteId = site.id;
+                row.currentBytes = site.liveBytes;
+                row.currentAllocations = site.liveAllocations;
+                row.topAddress = site.callStack.empty()
+                    ? 0
+                    : site.callStack.front().address;
+                row.siteIndex = siteIndex;
+                row.historyIndex = static_cast<std::size_t>(
+                    history - _sitePeakHistory.begin());
+                row.resolved = true;
+                _pendingActivityRows.push_back(row);
+            }
+
+            publishActivityRows();
+        }
+
+        void publishActivityRows()
+        {
+            for (ActivityRow& row : _activityRows)
+            {
+                row.currentBytes = 0;
+                row.currentAllocations = 0;
+                row.siteIndex = resolvedSiteIndex(row.siteId);
+                if (row.siteIndex < _report.sites.size())
+                    row.resolved = true;
+            }
+
+            const auto bySiteId = [](const ActivityRow& lhs, const ActivityRow& rhs)
+            {
+                return lhs.siteId < rhs.siteId;
+            };
+            std::sort(_activityRows.begin(), _activityRows.end(), bySiteId);
+            std::sort(
+                _pendingActivityRows.begin(),
+                _pendingActivityRows.end(),
+                bySiteId);
+
+            const std::size_t oldSize = _activityRows.size();
+            _activityRows.insert(
+                _activityRows.end(),
+                _pendingActivityRows.begin(),
+                _pendingActivityRows.end());
+            std::inplace_merge(
+                _activityRows.begin(),
+                _activityRows.begin() + oldSize,
+                _activityRows.end(),
+                bySiteId);
+
+            std::size_t writeIndex = 0;
+            for (std::size_t readIndex = 0;
+                 readIndex < _activityRows.size();
+                 ++readIndex)
+            {
+                if (writeIndex > 0 &&
+                    _activityRows[writeIndex - 1].siteId ==
+                        _activityRows[readIndex].siteId)
+                {
+                    // Stable merge places the freshly sampled row after the
+                    // retained inactive row, so it replaces the zero values.
+                    _activityRows[writeIndex - 1] = _activityRows[readIndex];
+                }
+                else
+                {
+                    _activityRows[writeIndex++] = _activityRows[readIndex];
+                }
+            }
+            _activityRows.resize(writeIndex);
+            _pendingActivityRows.clear();
+
+            // Peak history is sorted independently by ID, so refresh indices
+            // after merging retained and active rows.
+            for (ActivityRow& row : _activityRows)
+            {
+                const auto history = std::lower_bound(
+                    _sitePeakHistory.begin(),
+                    _sitePeakHistory.end(),
+                    row.siteId,
+                    [](const SitePeakHistory& value, std::uint64_t id)
+                    {
+                        return value.siteId < id;
+                    });
+                if (history != _sitePeakHistory.end() &&
+                    history->siteId == row.siteId)
+                {
+                    row.historyIndex = static_cast<std::size_t>(
+                        history - _sitePeakHistory.begin());
+                }
+            }
+            sortActivityRows();
+        }
+
+        void sortActivityRows()
+        {
+            std::stable_sort(
+                _activityRows.begin(),
+                _activityRows.end(),
+                [&](const ActivityRow& lhs, const ActivityRow& rhs)
+                {
+                    const SitePeakHistory& leftHistory =
+                        _sitePeakHistory[lhs.historyIndex];
+                    const SitePeakHistory& rightHistory =
+                        _sitePeakHistory[rhs.historyIndex];
+                    const std::uint64_t leftCurrent = _activityMetric == 0
+                        ? lhs.currentBytes
+                        : lhs.currentAllocations;
+                    const std::uint64_t rightCurrent = _activityMetric == 0
+                        ? rhs.currentBytes
+                        : rhs.currentAllocations;
+                    const std::uint64_t leftPeak = _activityMetric == 0
+                        ? leftHistory.peakBytes
+                        : leftHistory.peakAllocations;
+                    const std::uint64_t rightPeak = _activityMetric == 0
+                        ? rightHistory.peakBytes
+                        : rightHistory.peakAllocations;
+                    const std::uint64_t leftPeakEvents = _activityMetric == 0
+                        ? leftHistory.bytesPeakEvents
+                        : leftHistory.allocationsPeakEvents;
+                    const std::uint64_t rightPeakEvents = _activityMetric == 0
+                        ? rightHistory.bytesPeakEvents
+                        : rightHistory.allocationsPeakEvents;
+
+                    std::uint64_t leftValue = leftHistory.firstSeenOrder;
+                    std::uint64_t rightValue = rightHistory.firstSeenOrder;
+                    if (_activitySort == 1)
+                    {
+                        leftValue = leftCurrent;
+                        rightValue = rightCurrent;
+                    }
+                    else if (_activitySort == 2)
+                    {
+                        leftValue = leftPeak;
+                        rightValue = rightPeak;
+                    }
+                    else if (_activitySort == 3)
+                    {
+                        leftValue = leftPeakEvents;
+                        rightValue = rightPeakEvents;
+                    }
+
+                    if (_activitySort == 4)
+                    {
+                        const HeapHotspotSite* leftSite =
+                            lhs.siteIndex < _report.sites.size()
+                                ? &_report.sites[lhs.siteIndex]
+                                : nullptr;
+                        const HeapHotspotSite* rightSite =
+                            rhs.siteIndex < _report.sites.size()
+                                ? &_report.sites[rhs.siteIndex]
+                                : nullptr;
+                        const std::string* leftName = leftSite
+                            ? (!leftSite->function.empty()
+                                ? &leftSite->function
+                                : (!leftSite->file.empty()
+                                    ? &leftSite->file
+                                    : nullptr))
+                            : nullptr;
+                        const std::string* rightName = rightSite
+                            ? (!rightSite->function.empty()
+                                ? &rightSite->function
+                                : (!rightSite->file.empty()
+                                    ? &rightSite->file
+                                    : nullptr))
+                            : nullptr;
+
+                        if (leftName && rightName && *leftName != *rightName)
+                        {
+                            return _activitySortDescending
+                                ? *leftName > *rightName
+                                : *leftName < *rightName;
+                        }
+                        if (leftName != nullptr && rightName == nullptr)
+                            return true;
+                        if (leftName == nullptr && rightName != nullptr)
+                            return false;
+                        if (lhs.topAddress != rhs.topAddress)
+                        {
+                            return _activitySortDescending
+                                ? lhs.topAddress > rhs.topAddress
+                                : lhs.topAddress < rhs.topAddress;
+                        }
+                    }
+                    else if (leftValue != rightValue)
+                    {
+                        return _activitySortDescending
+                            ? leftValue > rightValue
+                            : leftValue < rightValue;
+                    }
+
+                    if (leftHistory.firstSeenOrder != rightHistory.firstSeenOrder)
+                    {
+                        return leftHistory.firstSeenOrder <
+                            rightHistory.firstSeenOrder;
+                    }
+                    return lhs.siteId < rhs.siteId;
+                });
+        }
+
+        void rebuildResolvedSiteIndices()
+        {
+            _resolvedSiteIndices.clear();
+            _resolvedSiteIndices.reserve(_report.sites.size());
+            for (std::size_t siteIndex = 0;
+                 siteIndex < _report.sites.size();
+                 ++siteIndex)
+            {
+                _resolvedSiteIndices.push_back({
+                    _report.sites[siteIndex].id, siteIndex });
+            }
+            std::sort(
+                _resolvedSiteIndices.begin(),
+                _resolvedSiteIndices.end(),
+                [](const ResolvedSiteIndex& lhs, const ResolvedSiteIndex& rhs)
+                {
+                    return lhs.siteId < rhs.siteId;
+                });
+        }
+
+        std::size_t resolvedSiteIndex(std::uint64_t siteId) const
+        {
+            const auto found = std::lower_bound(
+                _resolvedSiteIndices.begin(),
+                _resolvedSiteIndices.end(),
+                siteId,
+                [](const ResolvedSiteIndex& value, std::uint64_t id)
+                {
+                    return value.siteId < id;
+                });
+            return found != _resolvedSiteIndices.end() && found->siteId == siteId
+                ? found->siteIndex
+                : static_cast<std::size_t>(-1);
+        }
+
+        void updateActivityHistory(bool flashNewPeaks)
+        {
+            const double now = ImGui::GetTime();
+            std::vector<std::uint64_t> resolvedRawStackIds;
+            _pendingPeakHistory.clear();
+            for (const HeapHotspotSite& site : _report.sites)
+            {
+                const auto position = std::lower_bound(
+                    _sitePeakHistory.begin(),
+                    _sitePeakHistory.end(),
+                    site.id,
+                    [](const SitePeakHistory& value, std::uint64_t id)
+                    {
+                        return value.siteId < id;
+                    });
+
+                if (position == _sitePeakHistory.end() || position->siteId != site.id)
+                {
+                    SitePeakHistory value;
+                    value.siteId = site.id;
+                    value.firstSeenOrder = _nextActivityOrder++;
+                    _pendingPeakHistory.push_back(value);
+                }
+            }
+
+            if (!_pendingPeakHistory.empty())
+            {
+                std::sort(
+                    _pendingPeakHistory.begin(),
+                    _pendingPeakHistory.end(),
+                    [](const SitePeakHistory& lhs, const SitePeakHistory& rhs)
+                    {
+                        return lhs.siteId < rhs.siteId;
+                    });
+                _pendingPeakHistory.erase(
+                    std::unique(
+                        _pendingPeakHistory.begin(),
+                        _pendingPeakHistory.end(),
+                        [](const SitePeakHistory& lhs, const SitePeakHistory& rhs)
+                        {
+                            return lhs.siteId == rhs.siteId;
+                        }),
+                    _pendingPeakHistory.end());
+                _sitePeakHistory.insert(
+                    _sitePeakHistory.end(),
+                    _pendingPeakHistory.begin(),
+                    _pendingPeakHistory.end());
+                std::sort(
+                    _sitePeakHistory.begin(),
+                    _sitePeakHistory.end(),
+                    [](const SitePeakHistory& lhs, const SitePeakHistory& rhs)
+                    {
+                        return lhs.siteId < rhs.siteId;
+                    });
+            }
+
+            for (const HeapHotspotSite& site : _report.sites)
+            {
+                const auto position = std::lower_bound(
+                    _sitePeakHistory.begin(),
+                    _sitePeakHistory.end(),
+                    site.id,
+                    [](const SitePeakHistory& value, std::uint64_t id)
+                    {
+                        return value.siteId < id;
+                    });
+                if (position == _sitePeakHistory.end() || position->siteId != site.id)
+                    continue;
+
+                SitePeakHistory* history = &*position;
+                // A full capture changes a row from its raw stack ID to a
+                // resolved source-site ID. Carry the observations forward so
+                // resolving symbols never looks like a peak reset.
+                std::uint64_t inheritedBytesPeakEvents = 0;
+                std::uint64_t inheritedAllocationsPeakEvents = 0;
+                for (std::uint64_t rawStackId : site.allocationStackIds)
+                {
+                    if (rawStackId != site.id)
+                        resolvedRawStackIds.push_back(rawStackId);
+                    if (_selectedActivitySiteId == rawStackId)
+                        _selectedActivitySiteId = site.id;
+
+                    const auto rawPosition = std::lower_bound(
+                        _sitePeakHistory.begin(),
+                        _sitePeakHistory.end(),
+                        rawStackId,
+                        [](const SitePeakHistory& value, std::uint64_t id)
+                        {
+                            return value.siteId < id;
+                        });
+                    if (rawPosition == _sitePeakHistory.end() ||
+                        rawPosition->siteId != rawStackId)
+                    {
+                        continue;
+                    }
+
+                    history->firstSeenOrder = (std::min)(
+                        history->firstSeenOrder,
+                        rawPosition->firstSeenOrder);
+                    if (rawPosition->peakBytes > history->peakBytes)
+                    {
+                        history->peakBytes = rawPosition->peakBytes;
+                        history->bytesPeakTime = rawPosition->bytesPeakTime;
+                    }
+                    if (rawPosition->peakAllocations > history->peakAllocations)
+                    {
+                        history->peakAllocations = rawPosition->peakAllocations;
+                        history->allocationsPeakTime =
+                            rawPosition->allocationsPeakTime;
+                    }
+                    inheritedBytesPeakEvents +=
+                        rawPosition->bytesPeakEvents;
+                    inheritedAllocationsPeakEvents +=
+                        rawPosition->allocationsPeakEvents;
+                }
+                history->bytesPeakEvents = (std::max)(
+                    history->bytesPeakEvents,
+                    inheritedBytesPeakEvents);
+                history->allocationsPeakEvents = (std::max)(
+                    history->allocationsPeakEvents,
+                    inheritedAllocationsPeakEvents);
+
+                if (site.liveBytes > history->peakBytes)
+                {
+                    history->peakBytes = site.liveBytes;
+                    ++history->bytesPeakEvents;
+                    history->bytesPeakTime = flashNewPeaks ? now : -1000.0;
+                }
+                if (site.liveAllocations > history->peakAllocations)
+                {
+                    history->peakAllocations = site.liveAllocations;
+                    ++history->allocationsPeakEvents;
+                    history->allocationsPeakTime = flashNewPeaks ? now : -1000.0;
+                }
+            }
+
+            if (!resolvedRawStackIds.empty())
+            {
+                std::sort(
+                    resolvedRawStackIds.begin(), resolvedRawStackIds.end());
+                resolvedRawStackIds.erase(
+                    std::unique(
+                        resolvedRawStackIds.begin(), resolvedRawStackIds.end()),
+                    resolvedRawStackIds.end());
+                _activityRows.erase(
+                    std::remove_if(
+                        _activityRows.begin(),
+                        _activityRows.end(),
+                        [&](const ActivityRow& row)
+                        {
+                            return std::binary_search(
+                                resolvedRawStackIds.begin(),
+                                resolvedRawStackIds.end(),
+                                row.siteId);
+                        }),
+                    _activityRows.end());
+            }
+            _pendingPeakHistory.clear();
+            rebuildActivityRows();
+        }
+
+        void resetActivityPeaks()
+        {
+            _pendingPeakHistory.clear();
+            _pendingPeakHistory.reserve(_activityRows.size());
+            for (const ActivityRow& row : _activityRows)
+            {
+                SitePeakHistory history;
+                history.siteId = row.siteId;
+                history.peakBytes = row.currentBytes;
+                history.peakAllocations = row.currentAllocations;
+                history.firstSeenOrder =
+                    _sitePeakHistory[row.historyIndex].firstSeenOrder;
+                _pendingPeakHistory.push_back(history);
+            }
+            std::sort(
+                _pendingPeakHistory.begin(),
+                _pendingPeakHistory.end(),
+                [](const SitePeakHistory& lhs, const SitePeakHistory& rhs)
+                {
+                    return lhs.siteId < rhs.siteId;
+                });
+            _sitePeakHistory.swap(_pendingPeakHistory);
+            _pendingPeakHistory.clear();
+
+            for (ActivityRow& row : _activityRows)
+            {
+                const auto history = std::lower_bound(
+                    _sitePeakHistory.begin(),
+                    _sitePeakHistory.end(),
+                    row.siteId,
+                    [](const SitePeakHistory& value, std::uint64_t id)
+                    {
+                        return value.siteId < id;
+                    });
+                if (history != _sitePeakHistory.end() && history->siteId == row.siteId)
+                {
+                    row.historyIndex = static_cast<std::size_t>(
+                        history - _sitePeakHistory.begin());
+                }
+            }
+            sortActivityRows();
+        }
+
+        void updateLiveActivity()
+        {
+            if (!_liveCapture || _liveSamplingPaused)
+                return;
+
+            const double now = ImGui::GetTime();
+            if (now < _nextLiveSampleTime)
+                return;
+            _nextLiveSampleTime = now + static_cast<double>(_liveSampleInterval);
+
+            _liveSnapshot = _liveCapture();
+            if (!_liveSnapshot.valid)
+            {
+                _liveStatus = _liveSnapshot.error;
+                return;
+            }
+            _liveStatus.clear();
+
+            _pendingPeakHistory.clear();
+            for (const HeapHotspotLiveSite& site : _liveSnapshot.sites)
+            {
+                const auto history = std::lower_bound(
+                    _sitePeakHistory.begin(),
+                    _sitePeakHistory.end(),
+                    site.id,
+                    [](const SitePeakHistory& value, std::uint64_t id)
+                    {
+                        return value.siteId < id;
+                    });
+                if (history == _sitePeakHistory.end() || history->siteId != site.id)
+                {
+                    SitePeakHistory value;
+                    value.siteId = site.id;
+                    value.firstSeenOrder = _nextActivityOrder++;
+                    _pendingPeakHistory.push_back(value);
+                }
+            }
+            if (!_pendingPeakHistory.empty())
+            {
+                std::sort(
+                    _pendingPeakHistory.begin(),
+                    _pendingPeakHistory.end(),
+                    [](const SitePeakHistory& lhs, const SitePeakHistory& rhs)
+                    {
+                        return lhs.siteId < rhs.siteId;
+                    });
+                _pendingPeakHistory.erase(
+                    std::unique(
+                        _pendingPeakHistory.begin(),
+                        _pendingPeakHistory.end(),
+                        [](const SitePeakHistory& lhs, const SitePeakHistory& rhs)
+                        {
+                            return lhs.siteId == rhs.siteId;
+                        }),
+                    _pendingPeakHistory.end());
+                _sitePeakHistory.insert(
+                    _sitePeakHistory.end(),
+                    _pendingPeakHistory.begin(),
+                    _pendingPeakHistory.end());
+                std::sort(
+                    _sitePeakHistory.begin(),
+                    _sitePeakHistory.end(),
+                    [](const SitePeakHistory& lhs, const SitePeakHistory& rhs)
+                    {
+                        return lhs.siteId < rhs.siteId;
+                    });
+            }
+
+            _pendingActivityRows.clear();
+            _pendingActivityRows.reserve(_liveSnapshot.sites.size());
+            for (const HeapHotspotLiveSite& site : _liveSnapshot.sites)
+            {
+                const auto historyPosition = std::lower_bound(
+                    _sitePeakHistory.begin(),
+                    _sitePeakHistory.end(),
+                    site.id,
+                    [](const SitePeakHistory& value, std::uint64_t id)
+                    {
+                        return value.siteId < id;
+                    });
+                if (historyPosition == _sitePeakHistory.end() ||
+                    historyPosition->siteId != site.id)
+                {
+                    continue;
+                }
+
+                SitePeakHistory& history = *historyPosition;
+                if (site.liveBytes > history.peakBytes)
+                {
+                    history.peakBytes = site.liveBytes;
+                    ++history.bytesPeakEvents;
+                    history.bytesPeakTime = now;
+                }
+                if (site.liveAllocations > history.peakAllocations)
+                {
+                    history.peakAllocations = site.liveAllocations;
+                    ++history.allocationsPeakEvents;
+                    history.allocationsPeakTime = now;
+                }
+
+                ActivityRow row;
+                row.siteId = site.id;
+                row.currentBytes = site.liveBytes;
+                row.currentAllocations = site.liveAllocations;
+                row.topAddress = site.topAddress;
+                row.siteIndex = resolvedSiteIndex(site.id);
+                row.historyIndex = static_cast<std::size_t>(
+                    historyPosition - _sitePeakHistory.begin());
+                row.resolved = site.resolved;
+                _pendingActivityRows.push_back(row);
+            }
+            _pendingPeakHistory.clear();
+            publishActivityRows();
+        }
+
         void capture()
         {
             clearDiagnosticStorage();
             _report = _capture ? _capture() : HeapHotspotReport();
+            if (_report.valid)
+            {
+                rebuildResolvedSiteIndices();
+                updateActivityHistory(true);
+            }
+            _nextLiveSampleTime = 0.0;
             _status = _report.valid ? "Snapshot captured" : _report.error;
         }
 
@@ -464,6 +1107,528 @@ namespace osgEarth
                 ImGui::EndTable();
             }
             drawSelectedSite();
+        }
+
+        std::string formatActivityValue(std::uint64_t value) const
+        {
+            return _activityMetric == 0
+                ? formatBytes(value)
+                : std::to_string(value);
+        }
+
+        bool activityRowIsVisible(const ActivityRow& row) const
+        {
+            if (row.historyIndex >= _sitePeakHistory.size())
+                return false;
+            if (!_showInactiveActivitySites && row.currentAllocations == 0)
+                return false;
+
+            const SitePeakHistory& history =
+                _sitePeakHistory[row.historyIndex];
+            if (_activityMetric == 0)
+            {
+                return toMiB(row.currentBytes) >= _minimumActiveMiB &&
+                    toMiB(history.peakBytes) >= _minimumPeakMiB;
+            }
+            return row.currentAllocations >= static_cast<std::uint64_t>(
+                    _minimumActiveAllocations) &&
+                history.peakAllocations >= static_cast<std::uint64_t>(
+                    _minimumPeakAllocations);
+        }
+
+        void drawActivityBar(
+            const ActivityRow& row,
+            const HeapHotspotSite* site,
+            const SitePeakHistory& history,
+            std::uint64_t scaleMaximum,
+            std::size_t rowIndex)
+        {
+            const std::uint64_t current = _activityMetric == 0
+                ? row.currentBytes
+                : row.currentAllocations;
+            const std::uint64_t peak = _activityMetric == 0
+                ? history.peakBytes
+                : history.peakAllocations;
+            const double peakTime = _activityMetric == 0
+                ? history.bytesPeakTime
+                : history.allocationsPeakTime;
+
+            const float width = (std::max)(1.0f, ImGui::GetContentRegionAvail().x);
+            const float height = (std::max)(12.0f, ImGui::GetFrameHeight() - 3.0f);
+            ImGui::PushID(static_cast<int>(rowIndex));
+            const bool clicked = ImGui::InvisibleButton(
+                "allocation activity bar", ImVec2(width, height));
+            const bool hovered = ImGui::IsItemHovered();
+            const ImVec2 minimum = ImGui::GetItemRectMin();
+            const ImVec2 maximum = ImGui::GetItemRectMax();
+            ImGui::PopID();
+
+            const double denominator = static_cast<double>(
+                scaleMaximum > 0 ? scaleMaximum : 1);
+            const float currentFraction = static_cast<float>(
+                static_cast<double>(current) / denominator);
+            const float peakFraction = static_cast<float>(
+                static_cast<double>(peak) / denominator);
+            const float currentX = minimum.x + width * currentFraction;
+            const float peakX = minimum.x + width * peakFraction;
+
+            const ImVec4 currentColor = _activityMetric == 0
+                ? ImVec4(0.20f, 0.55f, 0.95f, 0.90f)
+                : ImVec4(0.20f, 0.76f, 0.50f, 0.90f);
+            const ImVec4 ghostColor = _activityMetric == 0
+                ? ImVec4(0.20f, 0.55f, 0.95f, 0.18f)
+                : ImVec4(0.20f, 0.76f, 0.50f, 0.18f);
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            drawList->AddRectFilled(
+                minimum, maximum, ImGui::GetColorU32(ImVec4(0.08f, 0.10f, 0.14f, 0.72f)), 3.0f);
+            if (peak > 0)
+            {
+                drawList->AddRectFilled(
+                    minimum,
+                    ImVec2(peakX, maximum.y),
+                    ImGui::GetColorU32(ghostColor),
+                    3.0f);
+            }
+            if (current > 0)
+            {
+                drawList->AddRectFilled(
+                    minimum,
+                    ImVec2(currentX, maximum.y),
+                    ImGui::GetColorU32(currentColor),
+                    3.0f);
+            }
+            if (peak > 0)
+            {
+                drawList->AddLine(
+                    ImVec2(peakX, minimum.y - 1.0f),
+                    ImVec2(peakX, maximum.y + 1.0f),
+                    ImGui::GetColorU32(ImVec4(0.78f, 0.84f, 0.94f, 0.82f)),
+                    2.0f);
+            }
+
+            constexpr double flashDuration = 1.25;
+            const double peakAge = ImGui::GetTime() - peakTime;
+            if (peakAge >= 0.0 && peakAge < flashDuration)
+            {
+                const float intensity = static_cast<float>(
+                    1.0 - peakAge / flashDuration);
+                drawList->AddRect(
+                    minimum,
+                    maximum,
+                    ImGui::GetColorU32(
+                        ImVec4(1.0f, 0.72f, 0.18f, 0.30f + intensity * 0.70f)),
+                    3.0f,
+                    0,
+                    1.0f + intensity * 2.0f);
+            }
+
+            if (hovered)
+            {
+                ImGui::SetTooltip(
+                    "%s\nCurrent: %s\nPeak: %s\nObserved new peaks: %llu",
+                    site && !site->function.empty()
+                        ? site->function.c_str()
+                        : (row.resolved ? "Resolved site" : "Unresolved stack"),
+                    formatActivityValue(current).c_str(),
+                    formatActivityValue(peak).c_str(),
+                    static_cast<unsigned long long>(
+                        _activityMetric == 0
+                            ? history.bytesPeakEvents
+                            : history.allocationsPeakEvents));
+            }
+            if (clicked)
+                _selectedActivitySiteId = row.siteId;
+        }
+
+        void drawActivityDetails()
+        {
+            const auto selected = std::find_if(
+                _activityRows.begin(),
+                _activityRows.end(),
+                [&](const ActivityRow& row)
+                {
+                    return row.siteId == _selectedActivitySiteId;
+                });
+            if (selected == _activityRows.end())
+                return;
+            if (!activityRowIsVisible(*selected))
+                return;
+
+            const SitePeakHistory& history =
+                _sitePeakHistory[selected->historyIndex];
+            const HeapHotspotSite* site =
+                selected->siteIndex < _report.sites.size()
+                    ? &_report.sites[selected->siteIndex]
+                    : nullptr;
+            ImGui::SeparatorText(
+                site && !site->function.empty()
+                    ? site->function.c_str()
+                    : "Live allocation stack");
+            ImGui::Text("Current: %s    Peak: %s",
+                formatActivityValue(
+                    _activityMetric == 0
+                        ? selected->currentBytes
+                        : selected->currentAllocations).c_str(),
+                formatActivityValue(
+                    _activityMetric == 0
+                        ? history.peakBytes
+                        : history.peakAllocations).c_str());
+            ImGui::Text(
+                "Observed new peaks: %llu size, %llu allocation count",
+                static_cast<unsigned long long>(history.bytesPeakEvents),
+                static_cast<unsigned long long>(
+                    history.allocationsPeakEvents));
+
+            if (!site)
+            {
+                ImGui::TextDisabled(
+                    "This stack has not been resolved in the current full snapshot. "
+                    "Use Capture Heap Snapshot to load its function, source, and call stack.");
+                return;
+            }
+
+            sourceLink("activity-detail-source", site->file, site->line);
+            if (ImGui::BeginChild("activity call stack", ImVec2(0, 0), true))
+            {
+                for (std::size_t frameIndex = 0;
+                     frameIndex < site->callStack.size();
+                     ++frameIndex)
+                {
+                    const HeapHotspotFrame& frame = site->callStack[frameIndex];
+                    ImGui::PushID(static_cast<int>(frameIndex));
+                    ImGui::TextDisabled("#%zu", frameIndex);
+                    ImGui::SameLine();
+                    if (!frame.function.empty())
+                        ImGui::TextWrapped("%s", frame.function.c_str());
+                    else
+                        ImGui::Text("0x%llx",
+                            static_cast<unsigned long long>(frame.address));
+                    if (!frame.file.empty())
+                    {
+                        ImGui::Indent();
+                        sourceLink("activity-frame-source", frame.file, frame.line);
+                        ImGui::Unindent();
+                    }
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndChild();
+        }
+
+        void drawAllocationActivity()
+        {
+            bool metricChanged = ImGui::RadioButton(
+                "Live bytes", &_activityMetric, 0);
+            ImGui::SameLine();
+            metricChanged = ImGui::RadioButton(
+                "Allocation count", &_activityMetric, 1) || metricChanged;
+            ImGui::SameLine();
+            if (ImGui::Button("Reset peaks"))
+                resetActivityPeaks();
+            if (metricChanged)
+                sortActivityRows();
+
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Pause live", &_liveSamplingPaused))
+                _nextLiveSampleTime = 0.0;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(115.0f);
+            if (ImGui::SliderFloat(
+                    "Refresh seconds",
+                    &_liveSampleInterval,
+                    0.033f,
+                    0.5f,
+                    "%.3f s"))
+            {
+                _nextLiveSampleTime = 0.0;
+            }
+
+            static const char* sortOptions[] = {
+                "Stable (first seen)",
+                "Current value",
+                "Peak value",
+                "Peak events",
+                "Allocation site"
+            };
+            ImGui::SetNextItemWidth(170.0f);
+            if (ImGui::Combo(
+                    "Sort by",
+                    &_activitySort,
+                    sortOptions,
+                    IM_ARRAYSIZE(sortOptions)))
+            {
+                _activitySortDescending =
+                    _activitySort == 1 || _activitySort == 2 ||
+                    _activitySort == 3;
+                sortActivityRows();
+            }
+            ImGui::SameLine();
+            if (ImGui::Checkbox(
+                    "Descending", &_activitySortDescending))
+            {
+                sortActivityRows();
+            }
+            ImGui::SameLine();
+            ImGui::Checkbox("Show inactive", &_showInactiveActivitySites);
+
+            ImGui::SetNextItemWidth(135.0f);
+            if (_activityMetric == 0)
+            {
+                if (ImGui::InputDouble(
+                        "Min active (MiB)",
+                        &_minimumActiveMiB,
+                        0.1,
+                        1.0,
+                        "%.3f"))
+                {
+                    _minimumActiveMiB = (std::max)(0.0, _minimumActiveMiB);
+                }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(135.0f);
+                if (ImGui::InputDouble(
+                        "Min peak (MiB)",
+                        &_minimumPeakMiB,
+                        0.1,
+                        1.0,
+                        "%.3f"))
+                {
+                    _minimumPeakMiB = (std::max)(0.0, _minimumPeakMiB);
+                }
+            }
+            else
+            {
+                if (ImGui::InputInt(
+                        "Min active allocations",
+                        &_minimumActiveAllocations,
+                        1,
+                        100))
+                {
+                    _minimumActiveAllocations =
+                        (std::max)(0, _minimumActiveAllocations);
+                }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(135.0f);
+                if (ImGui::InputInt(
+                        "Min peak allocations",
+                        &_minimumPeakAllocations,
+                        1,
+                        100))
+                {
+                    _minimumPeakAllocations =
+                        (std::max)(0, _minimumPeakAllocations);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Clear filters"))
+            {
+                _minimumActiveMiB = 0.0;
+                _minimumPeakMiB = 0.0;
+                _minimumActiveAllocations = 0;
+                _minimumPeakAllocations = 0;
+            }
+
+            updateLiveActivity();
+
+            _visibleActivityRows.clear();
+            _visibleActivityRows.reserve(_activityRows.size());
+            for (std::size_t rowIndex = 0;
+                 rowIndex < _activityRows.size();
+                 ++rowIndex)
+            {
+                const ActivityRow& row = _activityRows[rowIndex];
+                if (activityRowIsVisible(row))
+                    _visibleActivityRows.push_back(rowIndex);
+            }
+
+            if (_liveCapture)
+            {
+                ImGui::TextDisabled(
+                    "Live sampling copies active totals only; muted bars and markers show "
+                    "the global observed peak. Gold flashes mark a new peak; inactive "
+                    "sites remain as zero bars when enabled. Peak events count observed "
+                    "high-water-mark increases for the selected metric.");
+            }
+            else
+            {
+                ImGui::TextDisabled(
+                    "Live sampling is unavailable; bars update with heap snapshots.");
+            }
+            if (!_liveStatus.empty())
+                ImGui::TextColored(
+                    ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "%s", _liveStatus.c_str());
+
+            const bool activityFiltersActive = _activityMetric == 0
+                ? _minimumActiveMiB > 0.0 || _minimumPeakMiB > 0.0
+                : _minimumActiveAllocations > 0 ||
+                    _minimumPeakAllocations > 0;
+            if (_visibleActivityRows.empty())
+            {
+                ImGui::TextDisabled(
+                    _activityRows.empty()
+                        ? "No allocation sites observed yet."
+                        : (activityFiltersActive
+                            ? "No allocation sites match the current filters."
+                            : "No allocation sites are currently active."));
+                return;
+            }
+
+            std::uint64_t scaleMaximum = 0;
+            for (std::size_t rowIndex : _visibleActivityRows)
+            {
+                const ActivityRow& row = _activityRows[rowIndex];
+                const SitePeakHistory& history =
+                    _sitePeakHistory[row.historyIndex];
+                scaleMaximum = (std::max)(
+                    scaleMaximum,
+                    _activityMetric == 0
+                        ? history.peakBytes
+                        : history.peakAllocations);
+            }
+            if (_liveSnapshot.valid)
+            {
+                ImGui::Text(
+                    "Live total: %s across %zu active sites (%zu shown, "
+                    "%zu observed)    Scale maximum: %s",
+                    formatActivityValue(
+                        _activityMetric == 0
+                            ? _liveSnapshot.liveBytes
+                            : _liveSnapshot.liveAllocations).c_str(),
+                    _liveSnapshot.sites.size(),
+                    _visibleActivityRows.size(),
+                    _activityRows.size(),
+                    formatActivityValue(scaleMaximum).c_str());
+            }
+            else
+            {
+                ImGui::Text(
+                    "Scale maximum: %s",
+                    formatActivityValue(scaleMaximum).c_str());
+            }
+
+            const ImGuiTableFlags flags =
+                ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable | ImGuiTableFlags_Borders |
+                ImGuiTableFlags_SizingStretchProp;
+            const bool showDetails = std::any_of(
+                _visibleActivityRows.begin(),
+                _visibleActivityRows.end(),
+                [&](std::size_t rowIndex)
+                {
+                    return _activityRows[rowIndex].siteId ==
+                        _selectedActivitySiteId;
+                });
+            const float availableHeight = ImGui::GetContentRegionAvail().y;
+            const float tableHeight = showDetails
+                ? (std::min)(
+                    availableHeight,
+                    (std::max)(180.0f, availableHeight * 0.52f))
+                : availableHeight;
+            if (ImGui::BeginTable(
+                    "allocation activity", 5, flags, ImVec2(0, tableHeight)))
+            {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn(
+                    "Allocation site", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableSetupColumn(
+                    "Current", ImGuiTableColumnFlags_WidthFixed, 105.0f);
+                ImGui::TableSetupColumn(
+                    "Peak", ImGuiTableColumnFlags_WidthFixed, 105.0f);
+                ImGui::TableSetupColumn(
+                    _activityMetric == 0
+                        ? "Size peak events"
+                        : "Count peak events",
+                    ImGuiTableColumnFlags_WidthFixed,
+                    105.0f);
+                ImGui::TableSetupColumn(
+                    "Current / peak", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+                ImGui::TableHeadersRow();
+
+                ImGuiListClipper clipper;
+                clipper.Begin(
+                    static_cast<int>(_visibleActivityRows.size()),
+                    ImGui::GetFrameHeightWithSpacing());
+                while (clipper.Step())
+                {
+                    for (int visibleIndex = clipper.DisplayStart;
+                         visibleIndex < clipper.DisplayEnd;
+                         ++visibleIndex)
+                    {
+                        const std::size_t rowIndex =
+                            _visibleActivityRows[visibleIndex];
+                        const ActivityRow& row = _activityRows[rowIndex];
+                        const HeapHotspotSite* site =
+                            row.siteIndex < _report.sites.size()
+                                ? &_report.sites[row.siteIndex]
+                                : nullptr;
+                        const SitePeakHistory& history =
+                            _sitePeakHistory[row.historyIndex];
+                        const std::uint64_t current = _activityMetric == 0
+                            ? row.currentBytes
+                            : row.currentAllocations;
+                        const std::uint64_t peak = _activityMetric == 0
+                            ? history.peakBytes
+                            : history.peakAllocations;
+                        const std::uint64_t peakEvents = _activityMetric == 0
+                            ? history.bytesPeakEvents
+                            : history.allocationsPeakEvents;
+
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::PushID(static_cast<int>(rowIndex));
+                        char unresolvedLabel[80];
+                        std::snprintf(
+                            unresolvedLabel,
+                            sizeof(unresolvedLabel),
+                            row.resolved
+                                ? "Resolved site 0x%llx"
+                                : "Unresolved stack 0x%llx",
+                            static_cast<unsigned long long>(row.topAddress));
+                        const char* label = site && !site->function.empty()
+                            ? site->function.c_str()
+                            : unresolvedLabel;
+                        if (ImGui::Selectable(
+                                label, row.siteId == _selectedActivitySiteId))
+                        {
+                            _selectedActivitySiteId = row.siteId;
+                        }
+                        if (ImGui::IsItemHovered())
+                        {
+                            if (site && !site->file.empty())
+                            {
+                                ImGui::SetTooltip(
+                                    "%s\n%s:%u\nClick to inspect the live call stack",
+                                    label,
+                                    site->file.c_str(),
+                                    site->line);
+                            }
+                            else if (!site)
+                            {
+                                ImGui::SetTooltip(
+                                    "%s\nUse Capture Heap Snapshot to resolve this call stack",
+                                    label);
+                            }
+                            else
+                            {
+                                ImGui::SetTooltip("%s", label);
+                            }
+                        }
+                        ImGui::PopID();
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(formatActivityValue(current).c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(formatActivityValue(peak).c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%llu",
+                            static_cast<unsigned long long>(peakEvents));
+                        ImGui::TableNextColumn();
+                        drawActivityBar(
+                            row, site, history, scaleMaximum,
+                            rowIndex);
+                    }
+                }
+                ImGui::EndTable();
+            }
+            drawActivityDetails();
         }
 
         static const char* recommendationName(HeapRecommendationKind kind)
@@ -779,17 +1944,32 @@ namespace osgEarth
             if (!_report.valid)
             {
                 ImGui::TextDisabled(
-                    "No snapshot yet. Capture is performed only when the button is pressed.");
-                return;
+                    "No resolved snapshot yet. Live activity is available below; capture "
+                    "a snapshot to resolve source paths and call stacks.");
             }
-
-            drawSummary();
+            else
+            {
+                drawSummary();
+            }
             ImGui::Spacing();
             if (ImGui::BeginTabBar("heap hotspot views"))
             {
                 if (ImGui::BeginTabItem("Allocation Sites"))
                 {
-                    drawSites();
+                    if (_report.valid)
+                        drawSites();
+                    else
+                        ImGui::TextDisabled("Capture a heap snapshot to resolve allocation sites.");
+                    ImGui::EndTabItem();
+                }
+
+                const ImGuiTabItemFlags activityFlags = !_report.valid
+                    ? ImGuiTabItemFlags_SetSelected
+                    : ImGuiTabItemFlags_None;
+                if (ImGui::BeginTabItem(
+                        "Allocation Activity", nullptr, activityFlags))
+                {
+                    drawAllocationActivity();
                     ImGui::EndTabItem();
                 }
 
@@ -798,7 +1978,10 @@ namespace osgEarth
                     std::to_string(_report.recommendations.size()) + ")";
                 if (ImGui::BeginTabItem(recommendationsLabel.c_str()))
                 {
-                    drawRecommendations();
+                    if (_report.valid)
+                        drawRecommendations();
+                    else
+                        ImGui::TextDisabled("Capture a heap snapshot to generate recommendations.");
                     ImGui::EndTabItem();
                 }
 

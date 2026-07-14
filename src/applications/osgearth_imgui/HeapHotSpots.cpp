@@ -200,6 +200,23 @@ namespace
         }
     };
 
+    std::uint64_t rawStackSiteId(const StackTrace& trace) noexcept
+    {
+        std::uint64_t hash = 1469598103934665603ull;
+        for (USHORT frameIndex = 0; frameIndex < trace.frameCount; ++frameIndex)
+        {
+            std::uintptr_t address = reinterpret_cast<std::uintptr_t>(
+                trace.frames[frameIndex]);
+            for (std::size_t byteIndex = 0; byteIndex < sizeof(address); ++byteIndex)
+            {
+                hash ^= static_cast<unsigned char>(address & 0xffu);
+                hash *= 1099511628211ull;
+                address >>= 8u;
+            }
+        }
+        return (hash | 0x8000000000000000ull);
+    }
+
     struct StackTotals
     {
         std::uint64_t heapBytes = 0;
@@ -218,8 +235,25 @@ namespace
         std::uint64_t reallocationBytesRequested = 0;
         std::uint64_t estimatedReallocationBytesCopied = 0;
         std::uint64_t maximumReallocationChain = 0;
+        std::uint64_t rawSiteId = 0;
+        std::uint64_t resolvedSiteId = 0;
+        std::uintptr_t topAddress = 0;
+        std::size_t activeIndex = static_cast<std::size_t>(-1);
         std::size_t dumpIndex = static_cast<std::size_t>(-1);
     };
+
+    void initializeStackIdentity(
+        StackTotals& totals,
+        const StackTrace& trace) noexcept
+    {
+        if (totals.rawSiteId != 0)
+            return;
+
+        totals.rawSiteId = rawStackSiteId(trace);
+        totals.topAddress = trace.frameCount > 0
+            ? reinterpret_cast<std::uintptr_t>(trace.frames[0])
+            : 0;
+    }
 
     struct Allocation
     {
@@ -240,16 +274,50 @@ namespace
         using StackMap = std::unordered_map<
             StackTrace, StackTotals, StackTraceHash, std::equal_to<StackTrace>,
             TrackerAllocator<StackValue>>;
+        using ActiveVector = std::vector<
+            StackTotals*, TrackerAllocator<StackTotals*>>;
 
         std::mutex mutex;
         LiveMap live;
         StackMap stacks;
+        ActiveVector activeStacks;
         std::uint64_t cumulativeAllocatedBytes = 0;
         std::uint64_t cumulativeFreedBytes = 0;
     };
 
+    bool hasLiveAllocations(const StackTotals& totals) noexcept
+    {
+        return totals.heapCount != 0 || totals.virtualCount != 0;
+    }
+
+    void activateStack(TrackerState& state, StackTotals& totals)
+    {
+        if (totals.activeIndex != static_cast<std::size_t>(-1))
+            return;
+
+        const std::size_t activeIndex = state.activeStacks.size();
+        state.activeStacks.push_back(&totals);
+        totals.activeIndex = activeIndex;
+    }
+
+    void deactivateStack(TrackerState& state, StackTotals& totals) noexcept
+    {
+        if (totals.activeIndex == static_cast<std::size_t>(-1))
+            return;
+
+        const std::size_t removedIndex = totals.activeIndex;
+        StackTotals* moved = state.activeStacks.back();
+        state.activeStacks[removedIndex] = moved;
+        moved->activeIndex = removedIndex;
+        state.activeStacks.pop_back();
+        totals.activeIndex = static_cast<std::size_t>(-1);
+    }
+
     void addToTotals(
-        StackTotals& totals, std::size_t size, AllocationSource source) noexcept
+        TrackerState& state,
+        StackTotals& totals,
+        std::size_t size,
+        AllocationSource source) noexcept
     {
         if (source == AllocationSource::Virtual)
         {
@@ -261,10 +329,27 @@ namespace
             totals.heapBytes += size;
             ++totals.heapCount;
         }
+
+        // The aggregate is authoritative; the active index is only a live-view
+        // accelerator. If growing that index fails, retain correct accounting
+        // and retry on the next allocation for this stack.
+        if (totals.activeIndex == static_cast<std::size_t>(-1))
+        {
+            try
+            {
+                activateStack(state, totals);
+            }
+            catch (...)
+            {
+            }
+        }
     }
 
     void removeFromTotals(
-        StackTotals& totals, std::size_t size, AllocationSource source) noexcept
+        TrackerState& state,
+        StackTotals& totals,
+        std::size_t size,
+        AllocationSource source) noexcept
     {
         if (source == AllocationSource::Virtual)
         {
@@ -276,6 +361,8 @@ namespace
             totals.heapBytes -= size;
             --totals.heapCount;
         }
+        if (!hasLiveAllocations(totals))
+            deactivateStack(state, totals);
         // largestAllocation is recomputed from the live records during dump;
         // maintaining a per-stack size tree on every allocation would cost
         // more memory than the value is worth.
@@ -359,6 +446,7 @@ namespace
             std::lock_guard<std::mutex> lock(state.mutex);
 
             auto stackResult = state.stacks.try_emplace(trace);
+            initializeStackIdentity(stackResult.first->second, trace);
 
             Allocation allocation;
             allocation.requestedSize = size;
@@ -372,6 +460,7 @@ namespace
             if (existing != state.live.end())
             {
                 removeFromTotals(
+                    state,
                     *existing->second.totals,
                     existing->second.requestedSize,
                     existing->second.source);
@@ -382,7 +471,7 @@ namespace
                 state.live.emplace(pointer, allocation);
             }
 
-            addToTotals(stackResult.first->second, size, source);
+            addToTotals(state, stackResult.first->second, size, source);
             state.cumulativeAllocatedBytes += size;
         }
         catch (...)
@@ -411,6 +500,7 @@ namespace
                     existing->second,
                     ::GetTickCount64());
                 removeFromTotals(
+                    state,
                     *existing->second.totals,
                     existing->second.requestedSize,
                     existing->second.source);
@@ -454,6 +544,7 @@ namespace
             {
                 previous = old->second;
                 removeFromTotals(
+                    state,
                     *previous.totals,
                     previous.requestedSize,
                     previous.source);
@@ -471,6 +562,7 @@ namespace
 
             auto stackResult = state.stacks.try_emplace(trace);
             StackTotals& totals = stackResult.first->second;
+            initializeStackIdentity(totals, trace);
 
             Allocation allocation;
             allocation.requestedSize = newSize;
@@ -507,6 +599,7 @@ namespace
                 if (existingNew != state.live.end())
                 {
                     removeFromTotals(
+                        state,
                         *existingNew->second.totals,
                         existingNew->second.requestedSize,
                         existingNew->second.source);
@@ -518,7 +611,7 @@ namespace
                 }
             }
 
-            addToTotals(totals, newSize, source);
+            addToTotals(state, totals, newSize, source);
             state.cumulativeAllocatedBytes += newSize;
             if (hadPrevious)
                 state.cumulativeFreedBytes += previous.requestedSize;
@@ -1238,6 +1331,7 @@ namespace
 
     struct Aggregate
     {
+        std::uint64_t id = 0;
         std::string file;
         std::string function;
         DWORD line = 0;
@@ -1246,7 +1340,20 @@ namespace
         std::uint64_t liveAllocations = 0;
         std::uint64_t largestAllocation = 0;
         std::vector<ResolvedFrame> callStack;
+        std::vector<std::uint64_t> allocationStackIds;
     };
+
+    std::uint64_t hashSiteKey(const std::string& key) noexcept
+    {
+        std::uint64_t hash = 1469598103934665603ull;
+        for (unsigned char value : key)
+        {
+            hash ^= value;
+            hash *= 1099511628211ull;
+        }
+        hash &= 0x7fffffffffffffffull;
+        return hash != 0 ? hash : 1;
+    }
 
     struct SourceFileAggregate
     {
@@ -1461,6 +1568,108 @@ namespace HeapHotspots
             });
     }
 
+    LiveSnapshot sampleLive()
+    {
+        LiveSnapshot result;
+        if (g_insideTracker)
+        {
+            result.error = "Live heap sampling cannot run recursively";
+            return result;
+        }
+
+        try
+        {
+            ReentryGuard guard;
+            struct ActiveStackSnapshot
+            {
+                std::uint64_t id = 0;
+                std::uint64_t liveBytes = 0;
+                std::uint64_t liveAllocations = 0;
+                std::uintptr_t topAddress = 0;
+                bool resolved = false;
+            };
+
+            std::vector<ActiveStackSnapshot> active;
+            std::size_t activeCapacity = 0;
+            {
+                TrackerState& state = trackerState();
+                std::lock_guard<std::mutex> lock(state.mutex);
+                activeCapacity = state.activeStacks.size();
+            }
+            active.resize(activeCapacity);
+            std::size_t copied = 0;
+            {
+                TrackerState& state = trackerState();
+                std::lock_guard<std::mutex> lock(state.mutex);
+                const std::size_t count = (std::min)(
+                    active.size(), state.activeStacks.size());
+                for (std::size_t activeIndex = 0;
+                     activeIndex < count;
+                     ++activeIndex)
+                {
+                    const StackTotals* totals = state.activeStacks[activeIndex];
+                    if (!totals || !hasLiveAllocations(*totals))
+                        continue;
+
+                    ActiveStackSnapshot& value = active[copied++];
+                    value.resolved = totals->resolvedSiteId != 0;
+                    value.id = value.resolved
+                        ? totals->resolvedSiteId
+                        : totals->rawSiteId;
+                    value.liveBytes = totals->heapBytes + totals->virtualBytes;
+                    value.liveAllocations = totals->heapCount + totals->virtualCount;
+                    value.topAddress = totals->topAddress;
+                }
+            }
+            active.resize(copied);
+
+            std::unordered_map<std::uint64_t, std::size_t> indices;
+            indices.reserve(active.size());
+            result.sites.reserve(active.size());
+            for (const ActiveStackSnapshot& value : active)
+            {
+                const auto inserted = indices.emplace(
+                    value.id, result.sites.size());
+                if (inserted.second)
+                {
+                    osgEarth::HeapHotspotLiveSite site;
+                    site.id = value.id;
+                    site.topAddress = value.topAddress;
+                    site.resolved = value.resolved;
+                    result.sites.push_back(site);
+                }
+
+                osgEarth::HeapHotspotLiveSite& site =
+                    result.sites[inserted.first->second];
+                site.liveBytes += value.liveBytes;
+                site.liveAllocations += value.liveAllocations;
+                result.liveBytes += value.liveBytes;
+                result.liveAllocations += value.liveAllocations;
+            }
+
+            std::sort(
+                result.sites.begin(), result.sites.end(),
+                [](const auto& lhs, const auto& rhs)
+                {
+                    return lhs.liveBytes > rhs.liveBytes;
+                });
+            result.valid = true;
+            return result;
+        }
+        catch (const std::exception& e)
+        {
+            result = LiveSnapshot();
+            result.error = e.what();
+            return result;
+        }
+        catch (...)
+        {
+            result = LiveSnapshot();
+            result.error = "Unknown error while sampling live heap activity";
+            return result;
+        }
+    }
+
     Report capture()
     {
         Report report;
@@ -1504,6 +1713,8 @@ namespace HeapHotspots
         {
             StackTrace trace;
             StackTotals totals;
+            StackTotals* source = nullptr;
+            std::uint64_t resolvedSiteId = 0;
         };
 
         std::vector<StackSnapshot> snapshot;
@@ -1534,7 +1745,7 @@ namespace HeapHotspots
                     continue;
 
                 totals.dumpIndex = snapshot.size();
-                snapshot.push_back({ entry.first, totals });
+                snapshot.push_back({ entry.first, totals, &totals, 0 });
                 snapshot.back().totals.largestAllocation = 0;
                 if (isLive)
                     ++liveStackCount;
@@ -1750,7 +1961,7 @@ namespace HeapHotspots
             updateScore(existing);
         };
 
-        for (const StackSnapshot& stack : snapshot)
+        for (StackSnapshot& stack : snapshot)
         {
             std::vector<ResolvedFrame> callStack;
             ResolvedFrame frame =
@@ -1873,10 +2084,13 @@ namespace HeapHotspots
                     std::to_string(frame.address);
             }
 
+            stack.resolvedSiteId = hashSiteKey(key);
+
             Aggregate& aggregate = grouped[key];
 
-            if (aggregate.file.empty())
+            if (aggregate.id == 0)
             {
+                aggregate.id = stack.resolvedSiteId;
                 aggregate.file = std::move(frame.file);
                 aggregate.function = std::move(frame.function);
                 aggregate.line = frame.line;
@@ -1885,6 +2099,7 @@ namespace HeapHotspots
 
             aggregate.liveBytes += stackBytes;
             aggregate.liveAllocations += stackAllocations;
+            aggregate.allocationStackIds.push_back(stack.totals.rawSiteId);
 
             aggregate.largestAllocation =
                 (std::max)(
@@ -1989,12 +2204,14 @@ namespace HeapHotspots
         for (Aggregate& result : results)
         {
             osgEarth::HeapHotspotSite site;
+            site.id = result.id;
             site.file = std::move(result.file);
             site.function = std::move(result.function);
             site.line = result.line;
             site.liveBytes = result.liveBytes;
             site.liveAllocations = result.liveAllocations;
             site.largestAllocation = result.largestAllocation;
+            site.allocationStackIds = std::move(result.allocationStackIds);
             site.callStack.reserve(result.callStack.size());
             for (ResolvedFrame& frame : result.callStack)
             {
@@ -2038,6 +2255,16 @@ namespace HeapHotspots
             {
                 return lhs.score > rhs.score;
             });
+
+        {
+            TrackerState& state = trackerState();
+            std::lock_guard<std::mutex> lock(state.mutex);
+            for (const StackSnapshot& stack : snapshot)
+            {
+                if (stack.source && stack.resolvedSiteId != 0)
+                    stack.source->resolvedSiteId = stack.resolvedSiteId;
+            }
+        }
 
         return report;
         }

@@ -15,6 +15,12 @@ namespace HeapHotspots
     // notification. Call this as early as possible in main().
     void install();
 
+    // Suppresses new allocation tracking on the calling thread. Calls may be
+    // nested and must be balanced. Frees still retire any record that was
+    // tracked before suppression began.
+    void pushTrackingSuppression() noexcept;
+    void popTrackingSuppression() noexcept;
+
     // Captures a self-contained snapshot. This is the primary API for UIs,
     // telemetry, tests, and custom serializers.
     Report capture();

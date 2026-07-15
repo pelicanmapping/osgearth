@@ -81,6 +81,7 @@ namespace
 
     thread_local bool g_insideTracker = false;
     thread_local unsigned g_heapApiCallDepth = 0;
+    thread_local unsigned g_trackingSuppressionDepth = 0;
 
     class ReentryGuard
     {
@@ -107,7 +108,12 @@ namespace
     {
     public:
         HeapApiCallGuard() noexcept
-            : shouldTrack_(!g_insideTracker && g_heapApiCallDepth == 0)
+            : shouldTrackAllocation_(
+                !g_insideTracker &&
+                g_trackingSuppressionDepth == 0 &&
+                g_heapApiCallDepth == 0),
+              shouldProcessRelease_(
+                !g_insideTracker && g_heapApiCallDepth == 0)
         {
             ++g_heapApiCallDepth;
         }
@@ -117,10 +123,15 @@ namespace
             --g_heapApiCallDepth;
         }
 
-        bool shouldTrack() const noexcept { return shouldTrack_; }
+        bool shouldTrack() const noexcept { return shouldTrackAllocation_; }
+        bool shouldProcessRelease() const noexcept
+        {
+            return shouldProcessRelease_;
+        }
 
     private:
-        bool shouldTrack_;
+        bool shouldTrackAllocation_;
+        bool shouldProcessRelease_;
     };
 
     enum class AllocationSource : std::uint8_t
@@ -133,10 +144,11 @@ namespace
     std::atomic<std::uint64_t> g_trackerStorageBlocks{ 0 };
     std::atomic<std::uint64_t> g_trackingStartMilliseconds{ 0 };
 
-    // Count the profiler's own container storage. Calls made by this allocator
-    // run under ReentryGuard, so they deliberately do not appear as application
-    // allocations, but they still occupy the process heap and must be removed
-    // from the HeapWalk totals in the report.
+    // Count the profiler's own container storage. This allocator establishes
+    // its own ReentryGuard so its storage can never appear as application data,
+    // even if a future caller grows a container outside another tracker guard.
+    // The bytes still occupy the process heap and are removed from HeapWalk
+    // totals in the report.
     template<typename T>
     class TrackerAllocator
     {
@@ -152,6 +164,7 @@ namespace
 
         T* allocate(std::size_t count)
         {
+            ReentryGuard guard;
             T* result = std::allocator<T>{}.allocate(count);
             g_trackerStorageBytes.fetch_add(
                 count * sizeof(T), std::memory_order_relaxed);
@@ -161,6 +174,7 @@ namespace
 
         void deallocate(T* pointer, std::size_t count) noexcept
         {
+            ReentryGuard guard;
             g_trackerStorageBytes.fetch_sub(
                 count * sizeof(T), std::memory_order_relaxed);
             g_trackerStorageBlocks.fetch_sub(1, std::memory_order_relaxed);
@@ -423,7 +437,8 @@ namespace
     {
         if (!pointer ||
             size < kMinimumTrackedSize ||
-            g_insideTracker)
+            g_insideTracker ||
+            g_trackingSuppressionDepth != 0)
         {
             return;
         }
@@ -643,13 +658,17 @@ namespace
     {
         LPVOID reallocated;
         bool shouldTrack;
+        bool shouldProcessRelease;
         {
             HeapApiCallGuard guard;
             shouldTrack = guard.shouldTrack();
+            shouldProcessRelease = guard.shouldProcessRelease();
             reallocated = g_heapReAlloc(heap, flags, pointer, size);
         }
         if (shouldTrack && reallocated)
             trackReallocation(pointer, reallocated, size, AllocationSource::Heap);
+        else if (shouldProcessRelease && reallocated)
+            trackFree(pointer);
         return reallocated;
     }
 
@@ -659,7 +678,7 @@ namespace
         bool shouldTrack;
         {
             HeapApiCallGuard guard;
-            shouldTrack = guard.shouldTrack();
+            shouldTrack = guard.shouldProcessRelease();
             freed = g_heapFree(heap, flags, pointer);
         }
         if (shouldTrack && freed)
@@ -691,14 +710,18 @@ namespace
     {
         PVOID reallocated;
         bool shouldTrack;
+        bool shouldProcessRelease;
         {
             HeapApiCallGuard guard;
             shouldTrack = guard.shouldTrack();
+            shouldProcessRelease = guard.shouldProcessRelease();
             reallocated = g_rtlReAllocateHeap(heap, flags, pointer, size);
         }
 
         if (shouldTrack && reallocated)
             trackReallocation(pointer, reallocated, size, AllocationSource::Heap);
+        else if (shouldProcessRelease && reallocated)
+            trackFree(pointer);
 
         return reallocated;
     }
@@ -709,7 +732,7 @@ namespace
         bool shouldTrack;
         {
             HeapApiCallGuard guard;
-            shouldTrack = guard.shouldTrack();
+            shouldTrack = guard.shouldProcessRelease();
             freed = g_rtlFreeHeap(heap, flags, pointer);
         }
 
@@ -748,7 +771,7 @@ namespace
         bool shouldTrack;
         {
             HeapApiCallGuard guard;
-            shouldTrack = guard.shouldTrack();
+            shouldTrack = guard.shouldProcessRelease();
             freed = g_virtualFree(address, size, freeType);
         }
 
@@ -776,14 +799,19 @@ namespace
     {
         HGLOBAL reallocated;
         bool shouldTrack;
+        bool shouldProcessRelease;
         {
             HeapApiCallGuard guard;
             shouldTrack = guard.shouldTrack();
+            shouldProcessRelease = guard.shouldProcessRelease();
             reallocated = g_globalReAlloc(memory, size, flags);
         }
         // GMEM_MODIFY changes attributes only; the size argument is ignored.
         if (shouldTrack && reallocated && (flags & GMEM_MODIFY) == 0)
             trackReallocation(memory, reallocated, size, AllocationSource::Heap);
+        else if (shouldProcessRelease && reallocated &&
+            (flags & GMEM_MODIFY) == 0)
+            trackFree(memory);
         return reallocated;
     }
 
@@ -793,7 +821,7 @@ namespace
         bool shouldTrack;
         {
             HeapApiCallGuard guard;
-            shouldTrack = guard.shouldTrack();
+            shouldTrack = guard.shouldProcessRelease();
             result = g_globalFree(memory);
         }
         // GlobalFree returns NULL on success.
@@ -820,13 +848,18 @@ namespace
     {
         HLOCAL reallocated;
         bool shouldTrack;
+        bool shouldProcessRelease;
         {
             HeapApiCallGuard guard;
             shouldTrack = guard.shouldTrack();
+            shouldProcessRelease = guard.shouldProcessRelease();
             reallocated = g_localReAlloc(memory, size, flags);
         }
         if (shouldTrack && reallocated && (flags & LMEM_MODIFY) == 0)
             trackReallocation(memory, reallocated, size, AllocationSource::Heap);
+        else if (shouldProcessRelease && reallocated &&
+            (flags & LMEM_MODIFY) == 0)
+            trackFree(memory);
         return reallocated;
     }
 
@@ -836,7 +869,7 @@ namespace
         bool shouldTrack;
         {
             HeapApiCallGuard guard;
-            shouldTrack = guard.shouldTrack();
+            shouldTrack = guard.shouldProcessRelease();
             result = g_localFree(memory);
         }
         // LocalFree returns NULL on success.
@@ -1548,6 +1581,17 @@ namespace
 
 namespace HeapHotspots
 {
+    void pushTrackingSuppression() noexcept
+    {
+        ++g_trackingSuppressionDepth;
+    }
+
+    void popTrackingSuppression() noexcept
+    {
+        if (g_trackingSuppressionDepth != 0)
+            --g_trackingSuppressionDepth;
+    }
+
     void install()
     {
         static std::once_flag once;
@@ -2290,6 +2334,7 @@ namespace HeapHotspots
         if (!report.valid || !filename)
             return false;
 
+        ReentryGuard guard;
         FILE* output = nullptr;
         if (::fopen_s(&output, filename, "w") != 0 || !output)
             return false;

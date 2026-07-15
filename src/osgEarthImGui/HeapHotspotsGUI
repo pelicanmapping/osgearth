@@ -26,17 +26,20 @@ namespace osgEarth
     public:
         using CaptureFunction = std::function<HeapHotspotReport()>;
         using LiveCaptureFunction = std::function<HeapHotspotLiveSnapshot()>;
+        using TrackingSuppressionFunction = std::function<void(bool)>;
         using WriteFunction = std::function<
             bool(const HeapHotspotReport&, const std::string&)>;
 
         HeapHotspotsGUI(
             CaptureFunction capture,
             WriteFunction write = {},
-            LiveCaptureFunction liveCapture = {}) :
+            LiveCaptureFunction liveCapture = {},
+            TrackingSuppressionFunction trackingSuppression = {}) :
             ImGuiPanel("Heap Hotspots"),
             _capture(std::move(capture)),
             _write(std::move(write)),
-            _liveCapture(std::move(liveCapture))
+            _liveCapture(std::move(liveCapture)),
+            _trackingSuppression(std::move(trackingSuppression))
         {
         }
 
@@ -45,12 +48,57 @@ namespace osgEarth
             if (!isVisible())
                 return;
 
+            TrackingSuppressionGuard suppression(_trackingSuppression);
             ImGui::Begin(name(), visible());
             drawContents();
             ImGui::End();
         }
 
     private:
+        class TrackingSuppressionGuard
+        {
+        public:
+            explicit TrackingSuppressionGuard(
+                const TrackingSuppressionFunction& function) noexcept :
+                _function(function ? &function : nullptr)
+            {
+                if (_function)
+                {
+                    try
+                    {
+                        (*_function)(true);
+                        _active = true;
+                    }
+                    catch (...)
+                    {
+                        _function = nullptr;
+                    }
+                }
+            }
+
+            ~TrackingSuppressionGuard()
+            {
+                if (_active)
+                {
+                    try
+                    {
+                        (*_function)(false);
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            }
+
+            TrackingSuppressionGuard(const TrackingSuppressionGuard&) = delete;
+            TrackingSuppressionGuard& operator=(
+                const TrackingSuppressionGuard&) = delete;
+
+        private:
+            const TrackingSuppressionFunction* _function = nullptr;
+            bool _active = false;
+        };
+
         struct SitePeakHistory
         {
             std::uint64_t siteId = 0;
@@ -83,6 +131,7 @@ namespace osgEarth
         CaptureFunction _capture;
         WriteFunction _write;
         LiveCaptureFunction _liveCapture;
+        TrackingSuppressionFunction _trackingSuppression;
         HeapHotspotReport _report;
         HeapHotspotLiveSnapshot _liveSnapshot;
         ImGuiTextFilter _filter;

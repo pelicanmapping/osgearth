@@ -3,6 +3,10 @@
  * MIT License
  */
 #include <osgEarth/DrawInstanced>
+#include <osgEarth/BuildConfig>
+#ifdef OSGEARTH_USE_TINYBVH
+#include <osgEarth/TinyBVHShape>
+#endif
 #include <osgEarth/CullingUtils>
 #include <osgEarth/Registry>
 #include <osgEarth/Capabilities>
@@ -335,8 +339,13 @@ void InstanceGeometry::setMatrices(const std::vector< osg::Matrixf >& matrices)
 
     if (osgDB::Registry::instance()->getKdTreeBuilder())
     {
-        osg::ref_ptr< osg::KdTreeBuilder > kdTreeBuilder = osgDB::Registry::instance()->getKdTreeBuilder()->clone();
-        _mesh->accept(*kdTreeBuilder.get());
+        osg::ref_ptr<osg::NodeVisitor> builder;
+#ifdef OSGEARTH_USE_TINYBVH
+        builder = new TinyBVHBuilder();
+#else
+        builder = osgDB::Registry::instance()->getKdTreeBuilder()->clone();
+#endif
+        _mesh->accept(*builder);
         if (_mesh->getShape())
         {
             setShape(_mesh->getShape());

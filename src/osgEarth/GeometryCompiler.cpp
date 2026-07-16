@@ -3,6 +3,10 @@
  * MIT License
  */
 #include "GeometryCompiler"
+#include <osgEarth/BuildConfig>
+#ifdef OSGEARTH_USE_TINYBVH
+#include <osgEarth/TinyBVHShape>
+#endif
 
 #include <osgEarth/BuildGeometryFilter>
 #include <osgEarth/BuildTextFilter>
@@ -607,9 +611,14 @@ GeometryCompiler::compile(FeatureList&          workingSet,
     // Build kdtrees to increase intersection speed.
     if ((_options.buildKDTrees() == true) && osgDB::Registry::instance()->getKdTreeBuilder())
     {
+#ifdef OSGEARTH_USE_TINYBVH
+        osg::ref_ptr<TinyBVHBuilder> builder = new TinyBVHBuilder();
+        resultGroup->accept(*builder);
+#else
         osg::ref_ptr< osg::KdTreeBuilder > kdTreeBuilder = osgDB::Registry::instance()->getKdTreeBuilder()->clone();
         resultGroup->accept(*kdTreeBuilder.get());
         Util::trimKdTrees(resultGroup.get());
+#endif
     }
 
     return resultGroup.release();

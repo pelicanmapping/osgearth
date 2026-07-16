@@ -438,6 +438,8 @@ SET(TARGET_H
     TileVisitor
     TimeControl
     TimeSeriesImage
+    TinyBVHLineSegmentIntersector
+    TinyBVHShape
     TMS
     TMSBackFiller
     TopologyGraph
@@ -470,6 +472,7 @@ SET(TARGET_H
     tl_optional.hpp
     mpark_variant.hpp
     polyfill_string_view.hpp
+    tiny_bvh.h
 
     tinyxml/tinyxml.h
     tinyxml/tinystr.h
@@ -777,6 +780,8 @@ set(TARGET_SRC
     TileVisitor.cpp
     TimeControl.cpp
     TimeSeriesImage.cpp
+    TinyBVHLineSegmentIntersector.cpp
+    TinyBVHShape.cpp
     TMS.cpp
     TMSBackFiller.cpp
     TopologyGraph.cpp
@@ -846,6 +851,20 @@ add_osgearth_library(
     SOURCES ${TARGET_SRC}
     SHADERS ${TARGET_GLSL}
     TEMPLATES ${TARGET_IN} )
+
+if(OSGEARTH_TINYBVH_BUILDER STREQUAL "QUICK")
+    target_compile_definitions(${LIB_NAME} PUBLIC
+        OSGEARTH_TINYBVH_USE_BUILD_QUICK
+        TINYBVH_NO_SIMD)
+elseif(OSGEARTH_TINYBVH_BUILDER STREQUAL "AVX")
+    if(MSVC)
+        target_compile_options(${LIB_NAME} PUBLIC /arch:AVX2)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${LIB_NAME} PUBLIC -mavx2 -mfma)
+    else()
+        message(FATAL_ERROR "OSGEARTH_TINYBVH_BUILDER=AVX is unsupported by this compiler")
+    endif()
+endif()
 
 
 # google protocol buffers

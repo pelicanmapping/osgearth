@@ -64,6 +64,7 @@ if(NOT OSGEARTH_BUILD_PLATFORM_IPHONE)
         add_subdirectory(osgearth_infinitescroll)
         add_subdirectory(osgearth_video)
         add_subdirectory(osgearth_heatmap)
+        add_subdirectory(osgearth_bvh)
         
         if(OSGEARTH_BUILD_LEGACY_CONTROLS_API)
             add_subdirectory(osgearth_cluster)

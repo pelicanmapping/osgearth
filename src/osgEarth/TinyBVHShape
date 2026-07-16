@@ -1,0 +1,219 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/Common>
+#include <osg/Geometry>
+#include <osg/NodeVisitor>
+#include <osg/Shape>
+
+#include "tiny_bvh.h"
+
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+namespace osgEarth { namespace Util
+{
+    /**
+     * An osg::Shape containing a TinyBVH acceleration structure for one or more
+     * GL_TRIANGLES primitive sets. The shape references the Geometry's existing
+     * vertex and index data instead of copying triangle vertices into the BVH.
+     * Those references also keep intersection-only proxy data alive when the
+     * temporary Geometry used to build the shape goes out of scope.
+     */
+    class OSGEARTH_EXPORT TinyBVHShape : public osg::Shape
+    {
+    public:
+        static constexpr unsigned DEFAULT_MAX_PRIMITIVES_PER_LEAF = 8u;
+
+        TinyBVHShape();
+        explicit TinyBVHShape(
+            osg::Geometry* geometry,
+            unsigned maxPrimitivesPerLeaf = DEFAULT_MAX_PRIMITIVES_PER_LEAF);
+        TinyBVHShape(const TinyBVHShape& rhs, const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
+
+        osg::Object* cloneType() const override { return new TinyBVHShape(); }
+        osg::Object* clone(const osg::CopyOp& copyop) const override { return new TinyBVHShape(*this, copyop); }
+        bool isSameKindAs(const osg::Object* object) const override
+        {
+            return dynamic_cast<const TinyBVHShape*>(object) != nullptr;
+        }
+        const char* libraryName() const override { return "osgEarth"; }
+        const char* className() const override { return "TinyBVHShape"; }
+        void accept(osg::ShapeVisitor& visitor) override { visitor.apply(static_cast<osg::Shape&>(*this)); }
+        void accept(osg::ConstShapeVisitor& visitor) const override { visitor.apply(static_cast<const osg::Shape&>(*this)); }
+
+        bool build(osg::Geometry* geometry);
+        bool valid() const;
+
+        std::size_t getNodeCount() const;
+        std::size_t getPrimitiveCount() const;
+        std::size_t getMemoryUsage() const;
+        unsigned getMaxPrimitivesPerLeaf() const { return _maxPrimitivesPerLeaf; }
+        static const char* getBuilderName();
+
+        bool getTriangle(
+            unsigned primitiveIndex,
+            osg::Vec3d& v0,
+            osg::Vec3d& v1,
+            osg::Vec3d& v2,
+            unsigned& i0,
+            unsigned& i1,
+            unsigned& i2) const;
+
+        /**
+         * Visits triangles in leaves whose bounds intersect the segment.
+         * Return false from the visitor to stop traversal.
+         */
+        template<typename Visitor>
+        void visitSegment(const osg::Vec3d& start, const osg::Vec3d& end, Visitor&& visitor) const
+        {
+            if (!valid())
+                return;
+
+            const osg::Vec3d delta = end - start;
+            if (delta.length2() <= 0.0)
+                return;
+
+            auto intersectsSegment = [&](const tinybvh::BVH::BVHNode& node)
+            {
+                constexpr double boundsEpsilon = 1e-6;
+                double tmin = 0.0;
+                double tmax = 1.0;
+                for (unsigned axis = 0u; axis < 3u; ++axis)
+                {
+                    const double bmin = node.aabbMin[axis] - boundsEpsilon;
+                    const double bmax = node.aabbMax[axis] + boundsEpsilon;
+                    if (std::abs(delta[axis]) <= 1e-15)
+                    {
+                        if (start[axis] < bmin || start[axis] > bmax)
+                            return false;
+                        continue;
+                    }
+
+                    double first = (bmin - start[axis]) / delta[axis];
+                    double second = (bmax - start[axis]) / delta[axis];
+                    if (first > second)
+                        std::swap(first, second);
+                    tmin = (std::max)(tmin, first);
+                    tmax = (std::min)(tmax, second);
+                    if (tmin > tmax)
+                        return false;
+                }
+                return true;
+            };
+
+            std::vector<unsigned> stack;
+            stack.reserve(64u);
+            unsigned nodeIndex = 0u;
+
+            for (;;)
+            {
+                const tinybvh::BVH::BVHNode& node = _bvh.bvhNode[nodeIndex];
+                const bool intersects = intersectsSegment(node);
+
+                if (intersects)
+                {
+                    if (node.isLeaf())
+                    {
+                        for (unsigned i = 0u; i < node.triCount; ++i)
+                        {
+                            const unsigned primitiveIndex = _bvh.primIdx[node.leftFirst + i];
+                            if (!visitor(primitiveIndex))
+                                return;
+                        }
+                    }
+                    else
+                    {
+                        stack.push_back(node.leftFirst + 1u);
+                        nodeIndex = node.leftFirst;
+                        continue;
+                    }
+                }
+
+                if (stack.empty())
+                    return;
+
+                nodeIndex = stack.back();
+                stack.pop_back();
+            }
+        }
+
+        /**
+         * Visits every BVH node for diagnostics and visualization. The visitor
+         * receives (bounds, isLeaf, depth, primitiveCount) and returns false to stop.
+         */
+        template<typename Visitor>
+        void visitNodes(Visitor&& visitor) const
+        {
+            if (!valid())
+                return;
+
+            struct PendingNode
+            {
+                unsigned index;
+                unsigned depth;
+            };
+
+            std::vector<PendingNode> stack(1u, { 0u, 0u });
+            while (!stack.empty())
+            {
+                const PendingNode pending = stack.back();
+                stack.pop_back();
+
+                const tinybvh::BVH::BVHNode& node = _bvh.bvhNode[pending.index];
+                const osg::BoundingBox bounds(
+                    node.aabbMin.x, node.aabbMin.y, node.aabbMin.z,
+                    node.aabbMax.x, node.aabbMax.y, node.aabbMax.z);
+                if (!visitor(bounds, node.isLeaf(), pending.depth, node.triCount))
+                    return;
+
+                if (!node.isLeaf())
+                {
+                    stack.push_back({ node.leftFirst + 1u, pending.depth + 1u });
+                    stack.push_back({ node.leftFirst, pending.depth + 1u });
+                }
+            }
+        }
+
+    protected:
+        ~TinyBVHShape() override;
+
+    private:
+        unsigned collapseLeaves(unsigned nodeIndex);
+        void compact();
+        void releaseBuildData();
+
+        osg::ref_ptr<osg::Vec3Array> _vertices;
+        std::vector<osg::ref_ptr<osg::PrimitiveSet>> _primitiveSets;
+        std::vector<unsigned> _primitiveStarts;
+        tinybvh::BVH _bvh;
+        unsigned _primitiveCount = 0u;
+        unsigned _maxPrimitivesPerLeaf = DEFAULT_MAX_PRIMITIVES_PER_LEAF;
+    };
+
+    /** Builds a TinyBVHShape on each compatible Geometry in a subgraph. */
+    class OSGEARTH_EXPORT TinyBVHBuilder : public osg::NodeVisitor
+    {
+    public:
+        explicit TinyBVHBuilder(
+            unsigned maxPrimitivesPerLeaf = TinyBVHShape::DEFAULT_MAX_PRIMITIVES_PER_LEAF);
+        TinyBVHBuilder(const TinyBVHBuilder& rhs);
+
+        META_NodeVisitor(osgEarth, TinyBVHBuilder)
+
+        TinyBVHBuilder* clone() const { return new TinyBVHBuilder(*this); }
+        void apply(osg::Geometry& geometry) override;
+
+        unsigned getMaxPrimitivesPerLeaf() const { return _maxPrimitivesPerLeaf; }
+
+    protected:
+        ~TinyBVHBuilder() override = default;
+
+    private:
+        unsigned _maxPrimitivesPerLeaf;
+    };
+} }

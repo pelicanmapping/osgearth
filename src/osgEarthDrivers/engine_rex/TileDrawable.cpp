@@ -6,6 +6,10 @@
 #include "EngineContext"
 
 #include <osgEarth/Registry>
+#include <osgEarth/BuildConfig>
+#ifdef OSGEARTH_USE_TINYBVH
+#include <osgEarth/TinyBVHShape>
+#endif
 #include <osgEarth/ImageUtils>
 #include <osgEarth/Math>
 #include <osg/KdTree>
@@ -158,9 +162,14 @@ TileDrawable::setElevationRaster(Texture::Ptr image, const osg::Matrixf& scaleBi
 
         osg::ref_ptr<osg::KdTreeBuilder> kdTreeBuilder = osgDB::Registry::instance()->getKdTreeBuilder();
         if (kdTreeBuilder)
-        {            
-            kdTreeBuilder = kdTreeBuilder->clone();
-            tempGeom->accept(*kdTreeBuilder);
+        {
+            osg::ref_ptr<osg::NodeVisitor> builder;
+#ifdef OSGEARTH_USE_TINYBVH
+            builder = new Util::TinyBVHBuilder();
+#else
+            builder = kdTreeBuilder->clone();
+#endif
+            tempGeom->accept(*builder);
             if (tempGeom->getShape())
             {
                 setShape(tempGeom->getShape());

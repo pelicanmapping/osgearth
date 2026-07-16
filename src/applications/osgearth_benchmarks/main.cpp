@@ -15,7 +15,18 @@
 #include <osgEarth/ImageUtils>
 #include <osgEarth/MBTiles>
 #include <osgDB/ReadFile>
+#include <osg/KdTree>
+#include <osg/Geometry>
+#include <osgEarth/TinyBVHShape>
+#include <osgEarth/TinyBVHLineSegmentIntersector>
+#include <osg/Geode>
+#include <osgUtil/IntersectionVisitor>
+#include <osgUtil/LineSegmentIntersector>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <utility>
+#include <vector>
 
 using namespace osgEarth;
 namespace fs = std::filesystem;
@@ -479,5 +490,450 @@ static void BM_MipmapImage_RGBA8(benchmark::State& state)
     }
 }
 BENCHMARK(BM_MipmapImage_RGBA8)->Args({1024, 1024})->Args({2048, 2048})->Unit(benchmark::kMillisecond);
+
+static osg::ref_ptr<osg::Geometry> createTriangleGeometry(unsigned triangleCount)
+{
+    osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry();
+    osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array();
+    osg::ref_ptr<osg::DrawElementsUInt> indices =
+        new osg::DrawElementsUInt(osg::PrimitiveSet::TRIANGLES);
+
+    vertices->reserve(static_cast<std::size_t>(triangleCount) * 3u);
+    indices->reserve(static_cast<std::size_t>(triangleCount) * 3u);
+
+    for (unsigned i = 0u; i < triangleCount; ++i)
+    {
+        const unsigned x = i % 256u;
+        const unsigned y = i / 256u;
+        const float z = static_cast<float>((i * 17u) % 31u) * 0.01f;
+        const unsigned firstVertex = static_cast<unsigned>(vertices->size());
+        vertices->push_back(osg::Vec3(static_cast<float>(x), static_cast<float>(y), z));
+        vertices->push_back(osg::Vec3(static_cast<float>(x) + 0.9f, static_cast<float>(y), z + 0.02f));
+        vertices->push_back(osg::Vec3(static_cast<float>(x), static_cast<float>(y) + 0.9f, z - 0.01f));
+        indices->push_back(firstVertex);
+        indices->push_back(firstVertex + 1u);
+        indices->push_back(firstVertex + 2u);
+    }
+
+    geometry->setVertexArray(vertices.get());
+    geometry->addPrimitiveSet(indices.get());
+    return geometry;
+}
+
+static std::size_t getKdTreeAllocatedMemoryUsage(const osg::KdTree& tree)
+{
+    return tree.getNodes().capacity() * sizeof(osg::KdTree::KdNode) +
+        tree.getPrimitiveIndices().capacity() * sizeof(osg::KdTree::Indices::value_type) +
+        tree.getVertexIndices().capacity() * sizeof(osg::KdTree::Indices::value_type);
+}
+
+static std::size_t getKdTreeUsedMemoryUsage(const osg::KdTree& tree)
+{
+    return tree.getNodes().size() * sizeof(osg::KdTree::KdNode) +
+        tree.getPrimitiveIndices().size() * sizeof(osg::KdTree::Indices::value_type) +
+        tree.getVertexIndices().size() * sizeof(osg::KdTree::Indices::value_type);
+}
+
+static void BM_BuildOsgKdTree(benchmark::State& state)
+{
+    const unsigned triangleCount = static_cast<unsigned>(state.range(0));
+    osg::ref_ptr<osg::Geometry> geometry = createTriangleGeometry(triangleCount);
+
+    osg::ref_ptr<osg::KdTree> sample = new osg::KdTree();
+    osg::KdTree::BuildOptions sampleOptions;
+    if (!sample->build(sampleOptions, geometry.get()))
+    {
+        state.SkipWithError("osg::KdTree build failed");
+        return;
+    }
+    state.counters["allocated_bytes"] = static_cast<double>(getKdTreeAllocatedMemoryUsage(*sample));
+    state.counters["used_bytes"] = static_cast<double>(getKdTreeUsedMemoryUsage(*sample));
+    state.counters["nodes"] = static_cast<double>(sample->getNodes().size());
+    sample = nullptr;
+
+    for (auto _ : state)
+    {
+        osg::ref_ptr<osg::KdTree> tree = new osg::KdTree();
+        osg::KdTree::BuildOptions options;
+        const bool built = tree->build(options, geometry.get());
+        benchmark::DoNotOptimize(tree.get());
+        benchmark::DoNotOptimize(built);
+
+        state.PauseTiming();
+        tree = nullptr;
+        state.ResumeTiming();
+    }
+
+    state.SetItemsProcessed(state.iterations() * triangleCount);
+}
+
+#ifdef OSGEARTH_TINYBVH_USE_BUILD_QUICK
+static void BM_BuildTinyBVHQuick(benchmark::State& state)
+#else
+static void BM_BuildTinyBVHAVX(benchmark::State& state)
+#endif
+{
+    const unsigned triangleCount = static_cast<unsigned>(state.range(0));
+    osg::ref_ptr<osg::Geometry> geometry = createTriangleGeometry(triangleCount);
+
+    osg::ref_ptr<osgEarth::Util::TinyBVHShape> sample =
+        new osgEarth::Util::TinyBVHShape(geometry.get());
+    if (!sample->valid())
+    {
+        state.SkipWithError("TinyBVH shape build failed");
+        return;
+    }
+    state.counters["allocated_bytes"] = static_cast<double>(sample->getMemoryUsage());
+    state.counters["used_bytes"] = static_cast<double>(sample->getMemoryUsage());
+    state.counters["nodes"] = static_cast<double>(sample->getNodeCount());
+    sample = nullptr;
+
+    for (auto _ : state)
+    {
+        osg::ref_ptr<osgEarth::Util::TinyBVHShape> shape =
+            new osgEarth::Util::TinyBVHShape(geometry.get());
+        benchmark::DoNotOptimize(shape.get());
+        benchmark::DoNotOptimize(shape->valid());
+
+        state.PauseTiming();
+        shape = nullptr;
+        state.ResumeTiming();
+    }
+
+    state.SetItemsProcessed(state.iterations() * triangleCount);
+}
+
+static void BM_BuildTinyBVHLeafSize(benchmark::State& state)
+{
+    constexpr unsigned triangleCount = 16384u;
+    const unsigned leafSize = static_cast<unsigned>(state.range(0));
+    osg::ref_ptr<osg::Geometry> geometry = createTriangleGeometry(triangleCount);
+
+    osg::ref_ptr<osgEarth::Util::TinyBVHShape> sample =
+        new osgEarth::Util::TinyBVHShape(geometry.get(), leafSize);
+    state.counters["bytes"] = static_cast<double>(sample->getMemoryUsage());
+    state.counters["nodes"] = static_cast<double>(sample->getNodeCount());
+
+    for (auto _ : state)
+    {
+        osg::ref_ptr<osgEarth::Util::TinyBVHShape> shape =
+            new osgEarth::Util::TinyBVHShape(geometry.get(), leafSize);
+        benchmark::DoNotOptimize(shape.get());
+
+        state.PauseTiming();
+        shape = nullptr;
+        state.ResumeTiming();
+    }
+    state.SetItemsProcessed(state.iterations() * triangleCount);
+}
+
+static bool intersectsTriangle(
+    const osg::Vec3d& start,
+    const osg::Vec3d& end,
+    const osg::Vec3d& v0,
+    const osg::Vec3d& v1,
+    const osg::Vec3d& v2)
+{
+    const osg::Vec3d direction = end - start;
+    const osg::Vec3d edge1 = v1 - v0;
+    const osg::Vec3d edge2 = v2 - v0;
+    const osg::Vec3d p = direction ^ edge2;
+    const double determinant = edge1 * p;
+    if (std::abs(determinant) <= 1e-12)
+        return false;
+
+    const double inverseDeterminant = 1.0 / determinant;
+    const osg::Vec3d tvec = start - v0;
+    const double u = (tvec * p) * inverseDeterminant;
+    if (u < 0.0 || u > 1.0)
+        return false;
+
+    const osg::Vec3d q = tvec ^ edge1;
+    const double v = (direction * q) * inverseDeterminant;
+    if (v < 0.0 || u + v > 1.0)
+        return false;
+
+    const double ratio = (edge2 * q) * inverseDeterminant;
+    return ratio >= 0.0 && ratio <= 1.0;
+}
+
+static void BM_IntersectTinyBVHLeafSize(benchmark::State& state)
+{
+    constexpr unsigned triangleCount = 16384u;
+    constexpr unsigned rayCount = 256u;
+    const unsigned leafSize = static_cast<unsigned>(state.range(0));
+    osg::ref_ptr<osg::Geometry> geometry = createTriangleGeometry(triangleCount);
+    osg::ref_ptr<osgEarth::Util::TinyBVHShape> shape =
+        new osgEarth::Util::TinyBVHShape(geometry.get(), leafSize);
+
+    std::vector<std::pair<osg::Vec3d, osg::Vec3d>> rays;
+    rays.reserve(rayCount);
+    for (unsigned r = 0u; r < rayCount; ++r)
+    {
+        const unsigned primitiveIndex = (r * 61u) % triangleCount;
+        const double x = static_cast<double>(primitiveIndex % 256u) + 0.2;
+        const double y = static_cast<double>(primitiveIndex / 256u) + 0.2;
+        rays.emplace_back(osg::Vec3d(x, y, 10.0), osg::Vec3d(x, y, -10.0));
+    }
+
+    std::uint64_t candidates = 0u;
+    for (const auto& ray : rays)
+        shape->visitSegment(ray.first, ray.second, [&](unsigned) { ++candidates; return true; });
+    state.counters["candidates_per_ray"] = static_cast<double>(candidates) / rayCount;
+    state.counters["bytes"] = static_cast<double>(shape->getMemoryUsage());
+
+    for (auto _ : state)
+    {
+        unsigned hits = 0u;
+        for (const auto& ray : rays)
+        {
+            shape->visitSegment(ray.first, ray.second, [&](unsigned primitiveIndex)
+            {
+                osg::Vec3d v0, v1, v2;
+                unsigned i0, i1, i2;
+                if (shape->getTriangle(primitiveIndex, v0, v1, v2, i0, i1, i2) &&
+                    intersectsTriangle(ray.first, ray.second, v0, v1, v2))
+                {
+                    ++hits;
+                }
+                return true;
+            });
+        }
+        benchmark::DoNotOptimize(hits);
+    }
+    state.SetItemsProcessed(state.iterations() * rayCount);
+}
+
+struct IntersectionBenchmarkResult
+{
+    bool hit = false;
+    unsigned primitiveIndex = 0u;
+    osg::Vec3d point;
+};
+
+struct IntersectionBenchmarkData
+{
+    explicit IntersectionBenchmarkData(unsigned triangleCount, bool hitRays)
+    {
+        osg::ref_ptr<osg::Geometry> osgGeometry = createTriangleGeometry(triangleCount);
+        osg::ref_ptr<osg::KdTree> kdTree = new osg::KdTree();
+        osg::KdTree::BuildOptions options;
+        valid = kdTree->build(options, osgGeometry.get());
+        if (valid)
+        {
+            osgStructureBytes = getKdTreeUsedMemoryUsage(*kdTree);
+            osgGeometry->setShape(kdTree.get());
+            osgGeode = new osg::Geode();
+            osgGeode->addDrawable(osgGeometry.get());
+        }
+
+        osg::ref_ptr<osg::Geometry> tinyGeometry = createTriangleGeometry(triangleCount);
+        osg::ref_ptr<osgEarth::Util::TinyBVHShape> tinyShape =
+            new osgEarth::Util::TinyBVHShape(tinyGeometry.get());
+        valid = valid && tinyShape->valid();
+        if (tinyShape->valid())
+        {
+            tinyStructureBytes = tinyShape->getMemoryUsage();
+            tinyGeometry->setShape(tinyShape.get());
+            tinyGeode = new osg::Geode();
+            tinyGeode->addDrawable(tinyGeometry.get());
+        }
+
+        constexpr unsigned rayCount = 256u;
+        rays.reserve(rayCount);
+        for (unsigned r = 0u; r < rayCount; ++r)
+        {
+            const unsigned primitiveIndex = (r * 61u) % triangleCount;
+            const double offset = hitRays ? 0.2 : 0.8;
+            const double x = static_cast<double>(primitiveIndex % 256u) + offset;
+            const double y = static_cast<double>(primitiveIndex / 256u) + offset;
+            rays.emplace_back(osg::Vec3d(x, y, 10.0), osg::Vec3d(x, y, -10.0));
+        }
+    }
+
+    static IntersectionBenchmarkResult intersectOsg(
+        osg::Geode* geode,
+        const std::pair<osg::Vec3d, osg::Vec3d>& ray)
+    {
+        osg::ref_ptr<osgUtil::LineSegmentIntersector> intersector =
+            new osgUtil::LineSegmentIntersector(ray.first, ray.second);
+        intersector->setIntersectionLimit(osgUtil::Intersector::LIMIT_NEAREST);
+        osgUtil::IntersectionVisitor visitor(intersector.get());
+        visitor.setUseKdTreeWhenAvailable(true);
+        geode->accept(visitor);
+
+        IntersectionBenchmarkResult result;
+        result.hit = intersector->containsIntersections();
+        if (result.hit)
+        {
+            const auto& intersection = intersector->getFirstIntersection();
+            result.primitiveIndex = intersection.primitiveIndex;
+            result.point = intersection.getWorldIntersectPoint();
+        }
+        return result;
+    }
+
+    static IntersectionBenchmarkResult intersectTiny(
+        osg::Geode* geode,
+        const std::pair<osg::Vec3d, osg::Vec3d>& ray)
+    {
+        osg::ref_ptr<osgEarth::Util::TinyBVHLineSegmentIntersector> intersector =
+            new osgEarth::Util::TinyBVHLineSegmentIntersector(ray.first, ray.second);
+        intersector->setIntersectionLimit(osgUtil::Intersector::LIMIT_NEAREST);
+        osgUtil::IntersectionVisitor visitor(intersector.get());
+        visitor.setUseKdTreeWhenAvailable(true);
+        geode->accept(visitor);
+
+        IntersectionBenchmarkResult result;
+        result.hit = intersector->containsIntersections();
+        if (result.hit)
+        {
+            const auto& intersection = intersector->getFirstIntersection();
+            result.primitiveIndex = intersection.primitiveIndex;
+            result.point = intersection.getWorldIntersectPoint();
+        }
+        return result;
+    }
+
+    bool validate() const
+    {
+        if (!valid)
+            return false;
+
+        for (const auto& ray : rays)
+        {
+            const IntersectionBenchmarkResult osgResult = intersectOsg(osgGeode.get(), ray);
+            const IntersectionBenchmarkResult tinyResult = intersectTiny(tinyGeode.get(), ray);
+            if (osgResult.hit != tinyResult.hit ||
+                (osgResult.hit &&
+                    (osgResult.primitiveIndex != tinyResult.primitiveIndex ||
+                     (osgResult.point - tinyResult.point).length() > 1e-5)))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool valid = false;
+    std::size_t osgStructureBytes = 0u;
+    std::size_t tinyStructureBytes = 0u;
+    osg::ref_ptr<osg::Geode> osgGeode;
+    osg::ref_ptr<osg::Geode> tinyGeode;
+    std::vector<std::pair<osg::Vec3d, osg::Vec3d>> rays;
+};
+
+static void benchmarkIntersectionVisitor(
+    benchmark::State& state,
+    bool useTinyBVH,
+    bool hitRays)
+{
+    const unsigned triangleCount = static_cast<unsigned>(state.range(0));
+    IntersectionBenchmarkData data(triangleCount, hitRays);
+    if (!data.validate())
+    {
+        state.SkipWithError("OSG KdTree and TinyBVH intersection results differ");
+        return;
+    }
+
+    state.counters["structure_bytes"] = static_cast<double>(
+        useTinyBVH ? data.tinyStructureBytes : data.osgStructureBytes);
+
+    for (auto _ : state)
+    {
+        unsigned intersections = 0u;
+        for (const auto& ray : data.rays)
+        {
+            const IntersectionBenchmarkResult result = useTinyBVH ?
+                IntersectionBenchmarkData::intersectTiny(data.tinyGeode.get(), ray) :
+                IntersectionBenchmarkData::intersectOsg(data.osgGeode.get(), ray);
+            intersections += result.hit ? 1u : 0u;
+        }
+        benchmark::DoNotOptimize(intersections);
+    }
+    state.SetItemsProcessed(state.iterations() * data.rays.size());
+}
+
+static void BM_IntersectOsgKdTree_Hit(benchmark::State& state)
+{
+    benchmarkIntersectionVisitor(state, false, true);
+}
+
+static void BM_IntersectTinyBVH_Hit(benchmark::State& state)
+{
+    benchmarkIntersectionVisitor(state, true, true);
+}
+
+static void BM_IntersectOsgKdTree_Miss(benchmark::State& state)
+{
+    benchmarkIntersectionVisitor(state, false, false);
+}
+
+static void BM_IntersectTinyBVH_Miss(benchmark::State& state)
+{
+    benchmarkIntersectionVisitor(state, true, false);
+}
+
+BENCHMARK(BM_BuildOsgKdTree)
+    ->Arg(1024)
+    ->Arg(16384)
+    ->Arg(65536)
+    ->UseRealTime()
+    ->Unit(benchmark::kMillisecond);
+
+#ifdef OSGEARTH_TINYBVH_USE_BUILD_QUICK
+BENCHMARK(BM_BuildTinyBVHQuick)
+#else
+BENCHMARK(BM_BuildTinyBVHAVX)
+#endif
+    ->Arg(1024)
+    ->Arg(16384)
+    ->Arg(65536)
+    ->UseRealTime()
+    ->Unit(benchmark::kMillisecond);
+
+BENCHMARK(BM_BuildTinyBVHLeafSize)
+    ->Arg(4)
+    ->Arg(8)
+    ->Arg(16)
+    ->Arg(32)
+    ->UseRealTime()
+    ->Unit(benchmark::kMillisecond);
+
+BENCHMARK(BM_IntersectTinyBVHLeafSize)
+    ->Arg(4)
+    ->Arg(8)
+    ->Arg(16)
+    ->Arg(32)
+    ->UseRealTime()
+    ->Unit(benchmark::kMicrosecond);
+
+BENCHMARK(BM_IntersectOsgKdTree_Hit)
+    ->Arg(1024)
+    ->Arg(16384)
+    ->Arg(65536)
+    ->UseRealTime()
+    ->Unit(benchmark::kMicrosecond);
+
+BENCHMARK(BM_IntersectTinyBVH_Hit)
+    ->Arg(1024)
+    ->Arg(16384)
+    ->Arg(65536)
+    ->UseRealTime()
+    ->Unit(benchmark::kMicrosecond);
+
+BENCHMARK(BM_IntersectOsgKdTree_Miss)
+    ->Arg(1024)
+    ->Arg(16384)
+    ->Arg(65536)
+    ->UseRealTime()
+    ->Unit(benchmark::kMicrosecond);
+
+BENCHMARK(BM_IntersectTinyBVH_Miss)
+    ->Arg(1024)
+    ->Arg(16384)
+    ->Arg(65536)
+    ->UseRealTime()
+    ->Unit(benchmark::kMicrosecond);
 
 BENCHMARK_MAIN();

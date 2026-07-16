@@ -6,6 +6,10 @@
 #include "MPGeometry"
 
 #include <osgEarth/Locators>
+#include <osgEarth/BuildConfig>
+#ifdef OSGEARTH_USE_TINYBVH
+#include <osgEarth/TinyBVHShape>
+#endif
 #include <osgEarth/Registry>
 #include <osgEarth/Capabilities>
 #include "MapFrame"
@@ -2215,8 +2219,12 @@ TileModelCompiler::compile(TileModel*        model,
     // install a KdTree index if necessary
     if (osgDB::Registry::instance()->getBuildKdTreesHint()==osgDB::ReaderWriter::Options::BUILD_KDTREES &&
         osgDB::Registry::instance()->getKdTreeBuilder())
-    {            
+    {
+#ifdef OSGEARTH_USE_TINYBVH
+        osg::ref_ptr<Util::TinyBVHBuilder> builder = new Util::TinyBVHBuilder();
+#else
         osg::ref_ptr<osg::KdTreeBuilder> builder = osgDB::Registry::instance()->getKdTreeBuilder()->clone();
+#endif
         tile->accept(*builder);
     }
 

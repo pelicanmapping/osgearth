@@ -1,4 +1,8 @@
 #include <osgEarth/SimplePager>
+#include <osgEarth/BuildConfig>
+#ifdef OSGEARTH_USE_TINYBVH
+#include <osgEarth/TinyBVHShape>
+#endif
 #include <osgEarth/TileKey>
 #include <osgEarth/CullingUtils>
 #include <osgEarth/PagedNode>
@@ -269,9 +273,14 @@ SimplePager::createChildNode(const TileKey& key, ProgressCallback* progress)
             // Build kdtrees to increase intersection speed.
             if (osgDB::Registry::instance()->getKdTreeBuilder())
             {
+#ifdef OSGEARTH_USE_TINYBVH
+                osg::ref_ptr<TinyBVHBuilder> builder = new TinyBVHBuilder();
+                payload->accept(*builder);
+#else
                 osg::ref_ptr< osg::KdTreeBuilder > kdTreeBuilder = osgDB::Registry::instance()->getKdTreeBuilder()->clone();
                 payload->accept(*kdTreeBuilder.get());
                 Util::trimKdTrees(payload.get());
+#endif
             }
         }
 

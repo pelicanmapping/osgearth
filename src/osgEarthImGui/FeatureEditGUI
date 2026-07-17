@@ -6,6 +6,7 @@
 
 #include <osgEarthImGui/ImGuiPanel>
 #include <osgEarth/FeatureNode>
+#include <osgEarth/FeatureSource>
 #include <osgEarth/Geometry>
 #include <osgEarth/Draggers>
 #include <osgEarth/SelectExtentTool>

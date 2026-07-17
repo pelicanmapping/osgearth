@@ -267,6 +267,7 @@ SET(TARGET_H
     IOTypes
     JoinLines
     JsonUtils
+    Kit
     LabelNode
     LandCover
     LandCoverLayer
@@ -630,6 +631,7 @@ set(TARGET_SRC
     IOTypes.cpp
     JoinLines.cpp
     JsonUtils.cpp
+    Kit.cpp
     LabelNode.cpp
     LandCover.cpp
     LandCoverLayer.cpp

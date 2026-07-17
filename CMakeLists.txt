@@ -104,6 +104,16 @@ mark_as_advanced(OSGEARTH_BUILD_TESTS)
 option(OSGEARTH_BUILD_BENCHMARKS "Build the osgEarth benchmarks" OFF)
 mark_as_advanced(OSGEARTH_BUILD_BENCHMARKS)
 
+option(OSGEARTH_USE_TINYBVH "Use TinyBVH instead of osg::KdTree at osgEarth acceleration-structure build sites" OFF)
+set(OSGEARTH_TINYBVH_BUILDER "QUICK" CACHE STRING "TinyBVH builder algorithm (QUICK or AVX)")
+set_property(CACHE OSGEARTH_TINYBVH_BUILDER PROPERTY STRINGS QUICK AVX)
+
+if(OSGEARTH_TINYBVH_BUILDER STREQUAL "QUICK")
+    set(OSGEARTH_TINYBVH_USE_BUILD_QUICK ON)
+elseif(NOT OSGEARTH_TINYBVH_BUILDER STREQUAL "AVX")
+    message(FATAL_ERROR "OSGEARTH_TINYBVH_BUILDER must be QUICK or AVX")
+endif()
+
 option(OSGEARTH_BUILD_PROCEDURAL_NODEKIT "Build the procedural terrain nodekit (osgEarthProcedural)" OFF)
 mark_as_advanced(OSGEARTH_BUILD_PROCEDURAL_NODEKIT)
 

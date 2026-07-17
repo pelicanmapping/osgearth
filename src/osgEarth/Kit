@@ -1,0 +1,166 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#ifndef OSGEARTH_KIT_H
+#define OSGEARTH_KIT_H 1
+
+#include <osgEarth/Common>
+#include <osgEarth/Progress>
+#include <osg/Group>
+#include <osg/Quat>
+#include <osgDB/Options>
+#include <map>
+#include <limits>
+#include <string>
+#include <vector>
+
+namespace osgEarth
+{
+    /**
+     * A lightweight list of named model instances.
+     *
+     * KitNode deliberately contains no renderable geometry. Pass a graph that
+     * contains one or more KitNodes to Kit::createInstancedNode to resolve all
+     * model names and create one instanced batch per model. MatrixTransforms in
+     * the source graph are folded into the instance transforms. Each instance
+     * may also specify a [minRange, maxRange) eye-distance interval in metres;
+     * omitted ranges are always visible.
+     */
+    class OSGEARTH_EXPORT KitNode : public osg::Group
+    {
+    public:
+        struct Instance
+        {
+            std::string model;
+            osg::Vec3f position = osg::Vec3f(0.0f, 0.0f, 0.0f);
+            osg::Quat rotation;
+            osg::Vec3f scale = osg::Vec3f(1.0f, 1.0f, 1.0f);
+            //! Eye-distance visibility interval in metres: [minRange, maxRange).
+            float minRange = 0.0f;
+            float maxRange = std::numeric_limits<float>::max();
+
+            Instance() = default;
+
+            Instance(
+                const std::string& inModel,
+                const osg::Vec3f& inPosition,
+                const osg::Quat& inRotation = osg::Quat(),
+                const osg::Vec3f& inScale = osg::Vec3f(1.0f, 1.0f, 1.0f),
+                float inMinRange = 0.0f,
+                float inMaxRange = std::numeric_limits<float>::max()) :
+                model(inModel),
+                position(inPosition),
+                rotation(inRotation),
+                scale(inScale),
+                minRange(inMinRange),
+                maxRange(inMaxRange) { }
+        };
+
+        using Instances = std::vector<Instance>;
+
+        /**
+         * Compact representation for instances that share all attributes
+         * except position. Binary city files use this to avoid repeating the
+         * model string, rotation, scale, and range millions of times.
+         */
+        struct InstanceBatch
+        {
+            std::string model;
+            osg::Quat rotation;
+            osg::Vec3f scale = osg::Vec3f(1.0f, 1.0f, 1.0f);
+            float minRange = 0.0f;
+            float maxRange = std::numeric_limits<float>::max();
+            std::vector<osg::Vec3f> positions;
+        };
+
+        using InstanceBatches = std::vector<InstanceBatch>;
+
+        KitNode();
+        KitNode(const KitNode& rhs, const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
+
+        META_Node(osgEarth, KitNode);
+
+        void addInstance(const Instance& value);
+        void addInstance(
+            const std::string& model,
+            const osg::Vec3f& position,
+            const osg::Quat& rotation = osg::Quat(),
+            const osg::Vec3f& scale = osg::Vec3f(1.0f, 1.0f, 1.0f),
+            float minRange = 0.0f,
+            float maxRange = std::numeric_limits<float>::max());
+
+        void clearInstances();
+        void setInstances(Instances&& values);
+        void setInstanceBatches(InstanceBatches&& values);
+        void reserveInstances(std::size_t count);
+        const Instances& getInstances() const;
+        const InstanceBatches& getInstanceBatches() const { return _instanceBatches; }
+        std::size_t getNumInstances() const;
+
+    protected:
+        osg::BoundingSphere computeBound() const override;
+
+        void materializeInstances() const;
+
+        mutable Instances _instances;
+        mutable InstanceBatches _instanceBatches;
+    };
+
+    /**
+     * Registry of named model prototypes and compiler for KitNode graphs.
+     *
+     * Models are loaded once. Instanced batches shallow-share their immutable
+     * vertex arrays, textures, and material state with these prototypes. Only
+     * the small primitive descriptors carrying the per-batch instance count
+     * are copied.
+     */
+    class OSGEARTH_EXPORT Kit : public osg::Referenced
+    {
+    public:
+        struct BuildStats
+        {
+            unsigned instances = 0u;
+            unsigned batches = 0u;
+            unsigned drawables = 0u;
+            unsigned missingModels = 0u;
+        };
+
+        Kit() = default;
+
+        //! Load a kit manifest. The manifest may reference any osgDB model type.
+        bool load(
+            const std::string& manifestURI,
+            const osgDB::Options* readOptions = nullptr,
+            ProgressCallback* progress = nullptr);
+
+        //! Add or replace a named model in memory.
+        bool addModel(const std::string& name, osg::Node* model);
+
+        bool hasModel(const std::string& name) const;
+        osg::Node* getModel(const std::string& name);
+        const osg::Node* getModel(const std::string& name) const;
+        std::size_t getNumModels() const { return _models.size(); }
+        const std::string& getLastError() const { return _lastError; }
+        void setInstanceChunkSize(float meters) { _instanceChunkSize = meters; }
+        float getInstanceChunkSize() const { return _instanceChunkSize; }
+
+        /**
+         * Compile every KitNode below source into shared-geometry instanced
+         * batches. The source graph is not modified.
+         */
+        osg::Group* createInstancedNode(
+            osg::Node* source,
+            BuildStats* outStats = nullptr) const;
+
+    protected:
+        virtual ~Kit() = default;
+
+        using Models = std::map<std::string, osg::ref_ptr<osg::Node>>;
+        Models _models;
+        std::string _lastError;
+        float _instanceChunkSize = 0.0f;
+    };
+}
+
+#endif // OSGEARTH_KIT_H

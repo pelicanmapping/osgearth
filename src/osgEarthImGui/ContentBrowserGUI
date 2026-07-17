@@ -11,6 +11,10 @@
 #include <osgDB/ReadFile>
 #include <osgEarth/FileUtils>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace osgEarth
 {
     using namespace osgEarth::Util;

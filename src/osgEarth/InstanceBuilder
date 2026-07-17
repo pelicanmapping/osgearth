@@ -9,7 +9,9 @@
 #include <osgEarth/Export>
 #include <osg/ref_ptr>
 #include <osg/Array>
+#include <osg/BufferObject>
 #include <osg/Geometry>
+#include <osg/Uniform>
 
 namespace osgEarth
 {
@@ -18,21 +20,49 @@ namespace osgEarth
     public:
         InstanceBuilder();
         static osg::Geometry* createGeometry();
+        //! Make an instancing-capable shallow copy of existing geometry.
+        static osg::Geometry* createGeometry(
+            const osg::Geometry& geometry,
+            const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
         osg::Vec3Array* getPositions() { return _positions.get(); };
-        void setPositions(osg::Vec3Array* positions) { _positions = positions; };
+        void setPositions(osg::Vec3Array* positions);
         osg::Vec4Array* getRotations() { return _rotations.get(); };
-        void setRotations(osg::Vec4Array* rotations) { _rotations = rotations; }
+        void setRotations(osg::Vec4Array* rotations);
         osg::Vec3Array* getScales() { return _scales.get(); }
-        void setScales(osg::Vec3Array* scales) { _scales = scales; }
+        void setScales(osg::Vec3Array* scales);
+        //! Quantize per-instance attributes after their floating-point bound is known.
+        bool compressInstanceAttributes();
+        //! Precompute one conservative instance bound for an entire model batch.
+        void setBaseBoundingBox(const osg::BoundingBox& bounds) const;
+        const osg::BoundingBox& getInstancedBoundingBox() const { return _instancedBoundingBox; }
+        osg::Vec2f getRange() const { return (*_range)[0]; }
+        void setRange(const osg::Vec2f& range) { (*_range)[0] = range; }
         void installInstancing(osg::Geometry* geometry) const;
     protected:
+        // Instance arrays must not join a shared model-vertex VBO. A pager can
+        // compile new batches while older batches are drawing, and growing a
+        // shared VBO would invalidate their attribute offsets.
+        osg::ref_ptr<osg::VertexBufferObject> _instanceVBO;
         osg::ref_ptr<osg::Vec3Array> _positions;
         osg::ref_ptr<osg::Vec4Array> _rotations;
         osg::ref_ptr<osg::Vec3Array> _scales;
+        osg::ref_ptr<osg::Vec3usArray> _packedPositions;
+        osg::ref_ptr<osg::Vec4sArray> _packedRotations;
+        osg::ref_ptr<osg::Vec3usArray> _packedScales;
         // Overall values 
         osg::ref_ptr<osg::Vec3Array> _position;
         osg::ref_ptr<osg::Vec4Array> _rotation;
         osg::ref_ptr<osg::Vec3Array> _scale;
+        osg::ref_ptr<osg::Vec2Array> _range;
+        osg::ref_ptr<osg::Uniform> _positionOffsetUniform;
+        osg::ref_ptr<osg::Uniform> _positionScaleUniform;
+        osg::ref_ptr<osg::Uniform> _scaleOffsetUniform;
+        osg::ref_ptr<osg::Uniform> _scaleScaleUniform;
+        osg::Vec3f _positionOffset = osg::Vec3f(0.0f, 0.0f, 0.0f);
+        osg::Vec3f _positionScale = osg::Vec3f(1.0f, 1.0f, 1.0f);
+        osg::Vec3f _scaleOffset = osg::Vec3f(0.0f, 0.0f, 0.0f);
+        osg::Vec3f _scaleScale = osg::Vec3f(1.0f, 1.0f, 1.0f);
+        mutable osg::BoundingBox _instancedBoundingBox;
     };
 }
 #endif // OSGEARTH_INSTANCE_BUILDER_H

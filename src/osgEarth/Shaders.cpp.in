@@ -42,6 +42,10 @@ namespace osgEarth { namespace Util
         DrawInstancedAttribute = "DrawInstancedAttribute.glsl";
         _sources[DrawInstancedAttribute] = @DrawInstancedAttribute.glsl@;
 
+        // Scene-wide Kit instance collection
+        KitCollectedInstancing = "KitCollectedInstancing.glsl";
+        _sources[KitCollectedInstancing] = @KitCollectedInstancing.glsl@;
+
         // Frustum Grid Headers
         FrustumGrid_Headers = "FrustumGrid.h.glsl";
         _sources[FrustumGrid_Headers] = @FrustumGrid.h.glsl@;

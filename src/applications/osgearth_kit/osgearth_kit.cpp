@@ -21,6 +21,7 @@
 #include <osgEarth/MetadataNode>
 
 #include <osgEarthImGui/ImGuiApp>
+#include <osgEarthImGui/ImGuiPanel>
 #include <osgEarthImGui/AnnotationsGUI>
 #include <osgEarthImGui/CameraGUI>
 #include <osgEarthImGui/ContentBrowserGUI>
@@ -66,17 +67,19 @@
 #include <osgDB/Options>
 #include <osgDB/ReadFile>
 #include <osgDB/Registry>
+#include <osgDB/WriteFile>
 #include <osgViewer/Viewer>
+#include <osgViewer/ViewerEventHandlers>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <limits>
 #include <map>
-#include <mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -89,6 +92,227 @@ namespace fs = std::filesystem;
 
 namespace
 {
+    class ScreenshotWriter :
+        public osgViewer::ScreenCaptureHandler::CaptureOperation
+    {
+    public:
+        explicit ScreenshotWriter(std::string filename) :
+            _filename(std::move(filename)) { }
+
+        void operator()(const osg::Image& image, unsigned) override
+        {
+            _succeeded = osgDB::writeImageFile(image, _filename);
+        }
+
+        bool succeeded() const { return _succeeded; }
+
+    private:
+        std::string _filename;
+        bool _succeeded = false;
+    };
+
+    class KitGUI : public ImGuiPanel
+    {
+    public:
+        explicit KitGUI(Kit* kit) :
+            ImGuiPanel("Kit"),
+            _kit(kit)
+        {
+        }
+
+        void draw(osg::RenderInfo& ri) override
+        {
+            if (!isVisible() || !_kit.valid())
+                return;
+
+            const osg::FrameStamp* stamp = ri.getState() ?
+                ri.getState()->getFrameStamp() : nullptr;
+            const std::uint64_t frameNumber = stamp ? stamp->getFrameNumber() : 0u;
+            std::vector<Kit::ModelStats> models;
+            _kit->getModelStats(ri.getCurrentCamera(), frameNumber, models);
+
+            std::size_t totalInstances = 0u;
+            std::size_t totalBatches = 0u;
+            unsigned activeModels = 0u;
+            unsigned activeDrawables = 0u;
+            for (const Kit::ModelStats& model : models)
+            {
+                totalInstances += model.instances;
+                totalBatches += model.batches;
+                if (model.instances > 0u)
+                {
+                    ++activeModels;
+                    activeDrawables += model.drawables;
+                }
+            }
+
+            ImGui::SetNextWindowSize(ImVec2(760.0f, 430.0f), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin(name(), visible()))
+            {
+                ImGui::Text("Visible instances: %llu",
+                    static_cast<unsigned long long>(totalInstances));
+                ImGui::SameLine();
+                ImGui::Text("  Active models: %u / %u",
+                    activeModels, static_cast<unsigned>(models.size()));
+                ImGui::Text("Visible batches: %llu   Active geometry drawables: %u",
+                    static_cast<unsigned long long>(totalBatches), activeDrawables);
+
+                ImGui::Text("Transient ring: %.1f MiB   GPU slot waits: %llu",
+                    static_cast<double>(_kit->getInstanceRingBytes()) /
+                        (1024.0 * 1024.0),
+                    static_cast<unsigned long long>(
+                        _kit->getInstanceRingStallCount()));
+
+                const std::size_t dropped =
+                    _kit->getNumDroppedInstances(ri.getCurrentCamera());
+                if (dropped > 0u)
+                {
+                    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
+                        "Budget dropped %llu instances this frame",
+                        static_cast<unsigned long long>(dropped));
+                }
+                else
+                {
+                    ImGui::Text("Budget drops: 0");
+                }
+
+                unsigned long long budget = static_cast<unsigned long long>(
+                    _kit->getMaxVisibleInstances());
+                if (ImGui::InputScalar(
+                    "Visible instance budget", ImGuiDataType_U64, &budget))
+                {
+                    _kit->setMaxVisibleInstances(static_cast<std::size_t>(budget));
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("0 means uncapped; a cap drops whole batch tails in traversal order");
+
+                ImGui::Separator();
+                const ImGuiTableFlags flags =
+                    ImGuiTableFlags_Borders |
+                    ImGuiTableFlags_RowBg |
+                    ImGuiTableFlags_Resizable |
+                    ImGuiTableFlags_ScrollY |
+                    ImGuiTableFlags_SizingFixedFit;
+                if (ImGui::BeginTable("Kit models", 7, flags, ImVec2(0.0f, 0.0f)))
+                {
+                    ImGui::TableSetupScrollFreeze(0, 1);
+                    ImGui::TableSetupColumn("Model", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("Instances");
+                    ImGui::TableSetupColumn("Batches");
+                    ImGui::TableSetupColumn("Geometry");
+                    ImGui::TableSetupColumn("Visible data");
+                    ImGui::TableSetupColumn("Ring");
+                    ImGui::TableSetupColumn("Waits");
+                    ImGui::TableHeadersRow();
+
+                    for (const Kit::ModelStats& model : models)
+                    {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        if (model.instances == 0u)
+                            ImGui::TextDisabled("%s", model.name.c_str());
+                        else
+                            ImGui::TextUnformatted(model.name.c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%llu",
+                            static_cast<unsigned long long>(model.instances));
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%llu",
+                            static_cast<unsigned long long>(model.batches));
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%u", model.drawables);
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%.1f MiB",
+                            static_cast<double>(model.visibleBytes) /
+                                (1024.0 * 1024.0));
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%.1f MiB",
+                            static_cast<double>(model.ringBytes) /
+                                (1024.0 * 1024.0));
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%llu",
+                            static_cast<unsigned long long>(model.ringStalls));
+                    }
+                    ImGui::EndTable();
+                }
+            }
+            ImGui::End();
+        }
+
+    private:
+        osg::ref_ptr<Kit> _kit;
+    };
+
+    class ScreenshotDrawCallback : public osg::Camera::DrawCallback
+    {
+    public:
+        ScreenshotDrawCallback(
+            ScreenshotWriter* writer,
+            osg::Camera::DrawCallback* nested) :
+            _writer(writer),
+            _nested(nested) { }
+
+        void operator()(osg::RenderInfo& renderInfo) const override
+        {
+            if (_nested.valid())
+                (*_nested)(renderInfo);
+            if (_captured || !_writer.valid())
+                return;
+
+            osg::Camera* camera = renderInfo.getCurrentCamera();
+            osg::Viewport* viewport = camera ? camera->getViewport() : nullptr;
+            osg::State* state = renderInfo.getState();
+            if (!viewport || !state)
+                return;
+
+            glReadBuffer(GL_BACK);
+            osg::ref_ptr<osg::Image> image = new osg::Image();
+            image->readPixels(
+                static_cast<int>(viewport->x()),
+                static_cast<int>(viewport->y()),
+                static_cast<int>(viewport->width()),
+                static_cast<int>(viewport->height()),
+                GL_RGBA, GL_UNSIGNED_BYTE);
+            (*_writer)(*image, state->getContextID());
+            _captured = true;
+        }
+
+    private:
+        osg::ref_ptr<ScreenshotWriter> _writer;
+        osg::ref_ptr<osg::Camera::DrawCallback> _nested;
+        mutable bool _captured = false;
+    };
+
+    // osg::LOD normally measures ranges from NodeVisitor's reference view
+    // point. EarthManipulator can keep that point in a different geocentric
+    // frame from a tile-local MatrixTransform, so use the actual camera eye for
+    // metre-based city ranges.
+    class EyeDistanceLOD : public osg::LOD
+    {
+    public:
+        void traverse(osg::NodeVisitor& visitor) override
+        {
+            if (visitor.getTraversalMode() != osg::NodeVisitor::TRAVERSE_ACTIVE_CHILDREN ||
+                getRangeMode() != osg::LOD::DISTANCE_FROM_EYE_POINT)
+            {
+                osg::LOD::traverse(visitor);
+                return;
+            }
+
+            const float requiredRange =
+                visitor.getDistanceToEyePoint(getCenter(), true);
+            const unsigned count = std::min(getNumChildren(), getNumRanges());
+            for (unsigned i = 0u; i < count; ++i)
+            {
+                if (getMinRange(i) <= requiredRange &&
+                    requiredRange < getMaxRange(i))
+                {
+                    getChild(i)->accept(visitor);
+                }
+            }
+        }
+    };
+
     constexpr unsigned CITY_LEVEL = 14u;
     constexpr double PROTOTYPE_SIZE_METERS = 2445.98490512564;
 
@@ -112,7 +336,8 @@ namespace
         const CityPrototype& city,
         Kit* kit,
         bool impostorsOnly,
-        LoadedCity& loaded)
+        LoadedCity& loaded,
+        bool loadImpostor = true)
     {
         loaded = LoadedCity();
 
@@ -150,7 +375,7 @@ namespace
             // a tile does not carry both transient inputs at once.
             lightweight = nullptr;
 
-            if (!loaded.batches.valid() || loaded.batches->getNumChildren() == 0u ||
+            if (!loaded.batches.valid() || loaded.stats.batches == 0u ||
                 loaded.stats.missingModels != 0u)
             {
                 OE_WARN << LC << "Failed to compile " << city.source << std::endl;
@@ -158,19 +383,22 @@ namespace
             }
         }
 
-        const auto impostorStart = std::chrono::steady_clock::now();
-        loaded.impostor = osgDB::readRefNodeFile(city.impostorSource, options.get());
-        const auto impostorEnd = std::chrono::steady_clock::now();
-        loaded.impostorLoadMilliseconds = std::chrono::duration<double, std::milli>(
-            impostorEnd - impostorStart).count();
-
-        if (!loaded.impostor.valid())
+        if (loadImpostor)
         {
-            OE_WARN << LC << "Failed to load " << city.impostorSource << std::endl;
-            return false;
-        }
+            const auto impostorStart = std::chrono::steady_clock::now();
+            loaded.impostor = osgDB::readRefNodeFile(city.impostorSource, options.get());
+            const auto impostorEnd = std::chrono::steady_clock::now();
+            loaded.impostorLoadMilliseconds = std::chrono::duration<double, std::milli>(
+                impostorEnd - impostorStart).count();
 
-        Registry::shaderGenerator().run(loaded.impostor.get());
+            if (!loaded.impostor.valid())
+            {
+                OE_WARN << LC << "Failed to load " << city.impostorSource << std::endl;
+                return false;
+            }
+
+            Registry::shaderGenerator().run(loaded.impostor.get());
+        }
         return true;
     }
 
@@ -210,6 +438,11 @@ namespace
         unsigned getCreatedTileCount() const
         {
             return _createdTiles.load(std::memory_order_relaxed);
+        }
+
+        void setPageHighDetail(bool value)
+        {
+            _pageHighDetail = value;
         }
 
         osg::ref_ptr<osg::Node> createNode(
@@ -272,13 +505,15 @@ namespace
 
             LoadedCity loaded;
             {
-                // Kit model prototypes and osgDB's global registries are shared
-                // construction inputs. Serialize tile construction, while still
-                // giving every returned tile independent nodes, arrays, states,
-                // primitive sets, and impostor geometry.
-                //std::lock_guard<std::mutex> lock(_loadMutex);
+                // The outer L14 pager keeps only the unique low-poly tile in
+                // memory. High-detail city records have their own short-range
+                // page below and are destroyed after leaving that range.
                 if ((progress && progress->canceled()) ||
-                    !loadCity(city, _kit.get(), _impostorsOnly, loaded))
+                    !loadCity(
+                        city,
+                        _pageHighDetail ? nullptr : _kit.get(),
+                        _pageHighDetail || _impostorsOnly,
+                        loaded))
                 {
                     return {};
                 }
@@ -292,12 +527,52 @@ namespace
             }
             else
             {
-                // Both children remain resident. LOD only prevents traversal and
-                // drawing of the expensive instance batches beyond this range.
-                osg::ref_ptr<osg::LOD> lod = new osg::LOD();
+                osg::ref_ptr<osg::LOD> lod = new EyeDistanceLOD();
                 lod->setName(key.str() + " Kit city LOD");
                 lod->setRangeMode(osg::LOD::DISTANCE_FROM_EYE_POINT);
-                lod->addChild(loaded.batches.get(), 0.0f, _highDetailRange);
+                const osg::BoundingSphere cityBound = _pageHighDetail ?
+                    loaded.impostor->getBound() : loaded.batches->getBound();
+                lod->setCenter(cityBound.center());
+                lod->setRadius(cityBound.radius());
+
+                if (_pageHighDetail)
+                {
+                    osg::ref_ptr<PagedNode2> detail = new PagedNode2();
+                    detail->setName(key.str() + " unique Kit city detail");
+                    detail->setOwner(this);
+                    detail->setCenter(cityBound.center());
+                    detail->setRadius(cityBound.radius());
+                    detail->setPreCompileGLObjects(false);
+                    detail->setRefinePolicy(REFINE_REPLACE);
+                    detail->setTimeoutSeconds(3.0);
+                    // Render the already-resident impostor while the unique
+                    // high-detail file is loading. EyeDistanceLOD stops
+                    // traversing this page outside the detail range, allowing
+                    // PagingManager to unload its instance allocations.
+                    detail->addChild(loaded.impostor.get());
+
+                    osg::ref_ptr<Kit> kit = _kit;
+                    detail->setLoadFunction(
+                        [city, kit](Cancelable* cancel)
+                        {
+                            osg::ref_ptr<osg::Node> result;
+                            if ((cancel && cancel->canceled()) || !kit.valid())
+                                return result;
+                            LoadedCity highDetail;
+                            if (loadCity(
+                                city, kit.get(), false, highDetail, false))
+                            {
+                                result = highDetail.batches.get();
+                            }
+                            return result;
+                        });
+                    lod->addChild(detail.get(), 0.0f, _highDetailRange);
+                }
+                else
+                {
+                    // Direct-tile diagnostics bypass asynchronous paging.
+                    lod->addChild(loaded.batches.get(), 0.0f, _highDetailRange);
+                }
                 lod->addChild(
                     loaded.impostor.get(), _highDetailRange,
                     std::numeric_limits<float>::max());
@@ -318,15 +593,26 @@ namespace
                 }
                 else
                 {
-                    OE_NOTICE << LC
-                        << "Paged " << key.str() << " from " << fs::path(city.source).filename().string()
-                        << ": " << loaded.stats.instances << " instances in " << loaded.stats.batches
-                        << " model batches / " << loaded.stats.drawables
-                        << " tile-owned instanced drawables; load "
-                        << loaded.loadMilliseconds << " ms, batch "
-                        << loaded.buildMilliseconds << " ms, impostor "
-                        << loaded.impostorLoadMilliseconds << " ms; impostor beyond "
-                        << _highDetailRange << " m" << std::endl;
+                    if (_pageHighDetail)
+                    {
+                        OE_NOTICE << LC
+                            << "Paged " << key.str() << " from "
+                            << fs::path(city.impostorSource).filename().string()
+                            << "; unique " << fs::path(city.source).filename().string()
+                            << " detail pages inside " << _highDetailRange
+                            << " m and expires after 3 s; impostor load "
+                            << loaded.impostorLoadMilliseconds << " ms" << std::endl;
+                    }
+                    else
+                    {
+                        OE_NOTICE << LC
+                            << "Loaded direct tile " << key.str() << " from "
+                            << fs::path(city.source).filename().string() << ": "
+                            << loaded.stats.instances << " instances in "
+                            << loaded.stats.batches << " model batches / "
+                            << loaded.stats.drawables << " Kit drawables"
+                            << std::endl;
+                    }
                 }
             }
 
@@ -338,8 +624,8 @@ namespace
         osg::ref_ptr<Kit> _kit;
         float _highDetailRange;
         bool _impostorsOnly;
+        bool _pageHighDetail = true;
         osg::ref_ptr<const SpatialReference> _worldSRS;
-        std::mutex _loadMutex;
         std::atomic<unsigned> _createdTiles{ 0u };
         std::atomic<bool> _reported{ false };
     };
@@ -357,10 +643,12 @@ namespace
             << "  --validate-only    Load and batch one city without opening a viewer\n"
             << "  --direct-tile      Load the startup tile directly (diagnostic)\n"
             << "  --frames <count>   Render a fixed number of frames, then exit (smoke test)\n"
-            << "  --stress-paging    Move across adjacent L14 tiles during a fixed-frame test\n"
+            << "  --screenshot <png> Capture the final fixed frame (defaults to 120 frames)\n"
+            << "  --stress-paging    Fly continuously across L14 tiles during a fixed-frame test\n"
             << "  --impostors-only   Load and display only low-poly city impostors\n"
             << "  --lod-range <m>    High-detail instance range (default 3000 metres)\n"
             << "  --chunk-size <m>   Spatial Kit batch chunk size, 0 disables (default 512 metres)\n"
+            << "  --max-instances <n> Visible-instance ring budget; 0 is uncapped (default 0)\n"
             << "  --sky              Use the default sky quality preset\n"
             << "  --sky-low          Use the low-quality sky preset\n"
             << "  --sky-medium       Use the medium-quality sky preset\n"
@@ -375,6 +663,7 @@ namespace
         osg::ArgumentParser& arguments,
         osgViewer::Viewer& viewer,
         MapNode* mapNode,
+        Kit* kit,
         bool extras)
     {
         auto* ui = new ImGuiAppEngine(arguments);
@@ -387,6 +676,7 @@ namespace
         ui->add("File", new QuitGUI());
 
         ui->add("Tools", new CameraGUI());
+        ui->add("Tools", new KitGUI(kit));
         ui->add("Tools", new ContentBrowserGUI());
         ui->add("Tools", new DecalsGUI());
         ui->add("Tools", new EnvironmentGUI(), true);
@@ -504,19 +794,25 @@ int main(int argc, char** argv)
     std::string kitFile = "data/kit/buildings.kit";
     std::string cityDirectory = "data/kit/cities";
     std::string earthFile;
+    std::string screenshotFile;
     int frameLimit = 0;
     double highDetailRange = 3000.0;
     double instanceChunkSize = 512.0;
+    unsigned maxVisibleInstances = 0u;
     arguments.read("--kit", kitFile);
     arguments.read("--city-dir", cityDirectory);
     arguments.read("--earth", earthFile);
     arguments.read("--frames", frameLimit);
+    arguments.read("--screenshot", screenshotFile);
     arguments.read("--lod-range", highDetailRange);
     arguments.read("--chunk-size", instanceChunkSize);
+    arguments.read("--max-instances", maxVisibleInstances);
     if (highDetailRange <= 0.0)
         return usage(argv[0], "--lod-range must be greater than zero");
     if (instanceChunkSize < 0.0)
         return usage(argv[0], "--chunk-size must be zero or greater");
+    if (!screenshotFile.empty() && frameLimit <= 0)
+        frameLimit = 120;
     const bool noImagery = arguments.read("--no-imagery");
     const bool validateOnly = arguments.read("--validate-only");
     const bool stressPaging = arguments.read("--stress-paging");
@@ -541,6 +837,7 @@ int main(int argc, char** argv)
         if (!kit->load(kitFile))
             return usage(argv[0], kit->getLastError().c_str());
         kit->setInstanceChunkSize(static_cast<float>(instanceChunkSize));
+        kit->setMaxVisibleInstances(maxVisibleInstances);
     }
 
     const std::vector<std::string> cityFiles = findCities(cityDirectory);
@@ -614,9 +911,17 @@ int main(int argc, char** argv)
         root->addChild(mapNode.get());
     }
 
+    // Establish the terrain/map SRS before the pager captures the world SRS
+    // and before EarthManipulator receives the startup viewpoint. Otherwise
+    // both are deferred until traversal and the viewer initially remains at
+    // its whole-globe home range, selecting only city impostors.
+    if (!mapNode->open())
+        return usage(argv[0], "Failed to open the osgEarth map");
+
     osg::ref_ptr<KitPager> pager = new KitPager(
         mapNode->getMap(), cities, kit.get(), static_cast<float>(highDetailRange),
         impostorsOnly);
+    pager->setPageHighDetail(!directTile);
     if (directTile)
     {
         GeoPoint startup(SpatialReference::get("wgs84"), -74.0060, 40.7128, 0.0, ALTMODE_ABSOLUTE);
@@ -632,6 +937,12 @@ int main(int argc, char** argv)
         pager->build();
         root->addChild(pager.get());
     }
+
+    // City/tile graphs only submit their visible compact ranges during cull.
+    // The persistent Kit renderer consumes all submissions once per frame, so
+    // scene graph layout does not multiply instanced draw calls.
+    if (kit.valid())
+        root->addChild(kit->getRenderNode());
 
     osgViewer::Viewer viewer(arguments);
     // ImGui and its panels share state between the event, update, and draw
@@ -661,12 +972,8 @@ int main(int argc, char** argv)
     viewer.getCamera()->setSmallFeatureCullingPixelSize(-1.0f);
 
     osg::ref_ptr<EarthManipulator> manipulator = new EarthManipulator(arguments);
+    manipulator->setNode(mapNode.get());
     viewer.setCameraManipulator(manipulator.get());
-    manipulator->setViewpoint(Viewpoint(
-        "Kit city",
-        -74.0060, 40.7128, 0.0,
-        -28.0, -48.0, 2100.0),
-        0.0);
 
     LogarithmicDepthBuffer depthBuffer;
     depthBuffer.install(viewer.getCamera());
@@ -676,35 +983,140 @@ int main(int argc, char** argv)
 #endif
 
     MapNodeHelper().configureView(&viewer);
-    installGUI(arguments, viewer, mapNode.get(), extras);
+    installGUI(arguments, viewer, mapNode.get(), kit.get(), extras);
+
+    // OSG assigns scene data to the cameras during realization and calls the
+    // manipulator's home() method. Realize first so that home cannot overwrite
+    // the example's requested startup viewpoint.
+    viewer.realize();
+    manipulator->setViewpoint(Viewpoint(
+        "Kit city",
+        -74.0060, 40.7128, 0.0,
+        -28.0, -48.0, 2100.0),
+        0.0);
     if (frameLimit > 0)
     {
-        viewer.realize();
+        std::vector<double> stressFrameMilliseconds;
+        if (stressPaging)
+            stressFrameMilliseconds.reserve(static_cast<std::size_t>(frameLimit));
+
+        osg::ref_ptr<ScreenshotWriter> screenshotWriter;
+        osg::ref_ptr<ScreenshotDrawCallback> screenshotCallback;
+        osg::ref_ptr<osg::Camera::DrawCallback> previousFinalDrawCallback;
+        if (!screenshotFile.empty())
+        {
+            const fs::path output = fs::absolute(screenshotFile);
+            if (output.has_parent_path())
+            {
+                std::error_code error;
+                fs::create_directories(output.parent_path(), error);
+                if (error)
+                    return usage(argv[0], "Failed to create screenshot directory");
+            }
+            screenshotFile = output.string();
+            screenshotWriter = new ScreenshotWriter(screenshotFile);
+            previousFinalDrawCallback = viewer.getCamera()->getFinalDrawCallback();
+            screenshotCallback = new ScreenshotDrawCallback(
+                screenshotWriter.get(), previousFinalDrawCallback.get());
+        }
+
         viewer.setDone(false);
         for (int frame = 0; frame < frameLimit; ++frame)
         {
-            if (stressPaging && frame % 300 == 0)
+            if (stressPaging)
             {
-                static const std::array<std::pair<double, double>, 5> offsets = {{
-                    { 0.000, 0.000 },
-                    { 0.026, 0.000 },
-                    { 0.052, 0.018 },
-                    { 0.026, 0.036 },
-                    { 0.000, 0.018 }
-                }};
-                const auto& offset = offsets[(frame / 300) % offsets.size()];
+                // Follow a continuous aircraft-like route instead of
+                // teleporting between a few viewpoints. This steadily crosses
+                // L14 boundaries and exercises detail load, expiration, arena
+                // reuse, and impostor fallback at the same time.
+                const double t = frameLimit > 1 ?
+                    static_cast<double>(frame) /
+                        static_cast<double>(frameLimit - 1) : 0.0;
+                const double phase = t * 6.283185307179586;
+                const double longitude = -74.10 + 0.22 * t;
+                const double latitude =
+                    40.675 + 0.075 * t + 0.012 * std::sin(phase);
+                const double dLongitude = 0.22;
+                const double dLatitude =
+                    0.075 + 0.012 * 6.283185307179586 * std::cos(phase);
+                const double heading = osg::RadiansToDegrees(std::atan2(
+                    dLongitude * std::cos(osg::DegreesToRadians(latitude)),
+                    dLatitude));
                 manipulator->setViewpoint(Viewpoint(
                     "Kit paging stress",
-                    -74.0060 + offset.first, 40.7128 + offset.second, 0.0,
-                    -28.0, -48.0, 2100.0), 0.0);
+                    longitude, latitude, 0.0,
+                    heading, -48.0, 2100.0), 0.0);
             }
+            if (screenshotCallback.valid() && frame == frameLimit - 1)
+                viewer.getCamera()->setFinalDrawCallback(screenshotCallback.get());
+            const auto frameStart = std::chrono::steady_clock::now();
             viewer.frame();
             if (stressPaging)
-                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            {
+                const auto frameEnd = std::chrono::steady_clock::now();
+                stressFrameMilliseconds.push_back(
+                    std::chrono::duration<double, std::milli>(
+                        frameEnd - frameStart).count());
+            }
+            if (!stressPaging && screenshotWriter.valid())
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        if (screenshotCallback.valid())
+            viewer.getCamera()->setFinalDrawCallback(previousFinalDrawCallback.get());
         if (stressPaging)
+        {
             std::cout << "Stress-paged " << pager->getCreatedTileCount()
                 << " level-14 Kit tiles\n";
+            if (!stressFrameMilliseconds.empty())
+            {
+                double total = 0.0;
+                for (const double value : stressFrameMilliseconds)
+                    total += value;
+                std::sort(
+                    stressFrameMilliseconds.begin(),
+                    stressFrameMilliseconds.end());
+                const auto percentile = [&stressFrameMilliseconds](double p)
+                {
+                    const std::size_t index = static_cast<std::size_t>(
+                        p * static_cast<double>(stressFrameMilliseconds.size() - 1u));
+                    return stressFrameMilliseconds[index];
+                };
+                std::cout << "Frame time: average "
+                    << total / static_cast<double>(stressFrameMilliseconds.size())
+                    << " ms, p95 " << percentile(0.95)
+                    << " ms, p99 " << percentile(0.99)
+                    << " ms, max " << stressFrameMilliseconds.back() << " ms\n";
+            }
+        }
+        if (!impostorsOnly)
+        {
+            const std::size_t collected =
+                kit->getNumCollectedInstances();
+            std::cout << "Collected " << collected
+                << " visible Kit instances in the final frame\n";
+            std::cout << "Instance ring "
+                << static_cast<double>(kit->getInstanceRingBytes()) /
+                    (1024.0 * 1024.0)
+                << " MiB, dropped " << kit->getNumDroppedInstances()
+                << " instances, GPU slot waits "
+                << kit->getInstanceRingStallCount() << "\n";
+            if (collected == 0u)
+            {
+                OE_WARN << LC << "No high-detail Kit instances reached the renderer"
+                    << std::endl;
+                return 2;
+            }
+        }
+        if (screenshotWriter.valid())
+        {
+            if (!screenshotWriter->succeeded() || !fs::is_regular_file(screenshotFile))
+            {
+                OE_WARN << LC << "Failed to write screenshot " << screenshotFile
+                    << std::endl;
+                return 3;
+            }
+            std::cout << "Wrote screenshot " << screenshotFile << "\n";
+        }
         return 0;
     }
     return viewer.run();

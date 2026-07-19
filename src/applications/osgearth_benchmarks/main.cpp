@@ -13,9 +13,15 @@
 #include <osgEarth/StringUtils>
 #include <osgEarth/Cache>
 #include <osgEarth/ImageUtils>
+#include <osgEarth/InstanceBuilder>
+#include <osgEarth/Kit>
 #include <osgEarth/MBTiles>
+#include <osg/Geode>
+#include <osg/MatrixTransform>
+#include <osgDB/Options>
 #include <osgDB/ReadFile>
 #include <filesystem>
+#include <unordered_set>
 
 using namespace osgEarth;
 namespace fs = std::filesystem;
@@ -129,7 +135,314 @@ namespace
         static MBTilesReadBenchmarkData data;
         return data;
     }
+
+    osg::Node* createKitBenchmarkModel()
+    {
+        osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array();
+        vertices->push_back(osg::Vec3f(-0.5f, -0.5f, 0.0f));
+        vertices->push_back(osg::Vec3f(0.5f, -0.5f, 0.0f));
+        vertices->push_back(osg::Vec3f(0.0f, 0.5f, 1.0f));
+
+        osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry();
+        geometry->setVertexArray(vertices.get());
+        geometry->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLES, 0, 3));
+
+        osg::ref_ptr<osg::Geode> geode = new osg::Geode();
+        geode->addDrawable(geometry.get());
+        return geode.release();
+    }
+
+    struct InstanceArrayMemoryVisitor : public osg::NodeVisitor
+    {
+        InstanceArrayMemoryVisitor() : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN) { }
+
+        void apply(osg::Geode& geode) override
+        {
+            for (unsigned i = 0u; i < geode.getNumDrawables(); ++i)
+            {
+                osg::Geometry* geometry = geode.getDrawable(i)->asGeometry();
+                if (!geometry)
+                    continue;
+                const osg::BufferData* buffer =
+                    InstanceBuilder::getInstanceBuffer(geometry);
+                if (buffer && buffers.insert(buffer).second)
+                    bytes += buffer->getTotalDataSize();
+            }
+            traverse(geode);
+        }
+
+        std::unordered_set<const osg::BufferData*> buffers;
+        std::uint64_t bytes = 0u;
+    };
 }
+
+static void BM_ExpandedModelSceneBuild(benchmark::State& state)
+{
+    osg::ref_ptr<osg::Node> model = createKitBenchmarkModel();
+    const int count = static_cast<int>(state.range(0));
+
+    for (auto _ : state)
+    {
+        osg::ref_ptr<osg::Group> root = new osg::Group();
+        for (int i = 0; i < count; ++i)
+        {
+            osg::ref_ptr<osg::MatrixTransform> transform = new osg::MatrixTransform(
+                osg::Matrix::translate(static_cast<float>(i % 100), static_cast<float>(i / 100), 0.0f));
+            transform->addChild(model.get());
+            root->addChild(transform.get());
+        }
+        benchmark::DoNotOptimize(root.get());
+    }
+
+    state.SetItemsProcessed(state.iterations() * count);
+    state.counters["draw_submissions"] = static_cast<double>(count);
+}
+BENCHMARK(BM_ExpandedModelSceneBuild)
+    ->Arg(5000)
+    ->Arg(100000)
+    ->Unit(benchmark::kMicrosecond);
+
+static void BM_KitInstancedSceneBuild(benchmark::State& state)
+{
+    osg::ref_ptr<Kit> kit = new Kit();
+    kit->addModel("unit", createKitBenchmarkModel());
+    const int count = static_cast<int>(state.range(0));
+
+    for (auto _ : state)
+    {
+        osg::ref_ptr<KitNode> source = new KitNode();
+        source->reserveInstances(count);
+        for (int i = 0; i < count; ++i)
+        {
+            source->addInstance(
+                "unit",
+                osg::Vec3f(static_cast<float>(i % 100), static_cast<float>(i / 100), 0.0f));
+        }
+        osg::ref_ptr<osg::Group> result = kit->createInstancedNode(source.get());
+        benchmark::DoNotOptimize(result.get());
+    }
+
+    state.SetItemsProcessed(state.iterations() * count);
+    state.counters["draw_submissions"] = 1.0;
+}
+BENCHMARK(BM_KitInstancedSceneBuild)
+    ->Arg(5000)
+    ->Arg(100000)
+    ->Arg(250000)
+    ->Arg(1000000)
+    ->Unit(benchmark::kMicrosecond);
+
+// Measures the scene-layout penalty that Kit-level collection is intended to
+// remove. The total instance count and model are identical; only the number of
+// separately compiled city/tile graphs changes.
+static void BM_KitInstancedSceneLayout(benchmark::State& state)
+{
+    osg::ref_ptr<Kit> kit = new Kit();
+    kit->addModel("unit", createKitBenchmarkModel());
+    constexpr int totalInstances = 1000;
+    const int groups = static_cast<int>(state.range(0));
+    unsigned drawSubmissions = 0u;
+
+    for (auto _ : state)
+    {
+        osg::ref_ptr<osg::Group> root = new osg::Group();
+        root->addChild(kit->getRenderNode());
+        for (int group = 0; group < groups; ++group)
+        {
+            osg::ref_ptr<KitNode> source = new KitNode();
+            const int begin = group * totalInstances / groups;
+            const int end = (group + 1) * totalInstances / groups;
+            source->reserveInstances(end - begin);
+            for (int i = begin; i < end; ++i)
+            {
+                source->addInstance(
+                    "unit",
+                    osg::Vec3f(static_cast<float>(i % 100),
+                        static_cast<float>(i / 100), 0.0f));
+            }
+
+            Kit::BuildStats stats;
+            root->addChild(kit->createInstancedNode(source.get(), &stats));
+        }
+        drawSubmissions = kit->getNumRenderDrawables();
+        benchmark::DoNotOptimize(root.get());
+    }
+
+    state.SetItemsProcessed(state.iterations() * totalInstances);
+    state.counters["compiled_graphs"] = static_cast<double>(groups);
+    state.counters["draw_submissions"] = static_cast<double>(drawSubmissions);
+}
+BENCHMARK(BM_KitInstancedSceneLayout)
+    ->Arg(1)
+    ->Arg(4)
+    ->Unit(benchmark::kMicrosecond);
+
+static void BM_KitInstancedCityDestroy(benchmark::State& state)
+{
+    constexpr int modelCount = 10;
+    const int count = static_cast<int>(state.range(0));
+    osg::ref_ptr<Kit> kit = new Kit();
+    kit->setInstanceChunkSize(128.0f);
+    for (int model = 0; model < modelCount; ++model)
+        kit->addModel("unit" + std::to_string(model), createKitBenchmarkModel());
+
+    osg::ref_ptr<KitNode> source = new KitNode();
+    source->reserveInstances(count);
+    for (int i = 0; i < count; ++i)
+    {
+        source->addInstance(
+            "unit" + std::to_string(i % modelCount),
+            osg::Vec3f(
+                static_cast<float>((i * 37) % 2048),
+                static_cast<float>((i * 101) % 2048),
+                static_cast<float>(i % 20)));
+    }
+
+    Kit::BuildStats sampleStats;
+    osg::ref_ptr<osg::Group> sample =
+        kit->createInstancedNode(source.get(), &sampleStats);
+    InstanceArrayMemoryVisitor sampleMemory;
+    sample->accept(sampleMemory);
+    state.counters["batches"] = static_cast<double>(sampleStats.batches);
+    state.counters["instance_buffers"] =
+        static_cast<double>(sampleMemory.buffers.size());
+    state.counters["old_instance_arrays"] =
+        static_cast<double>(sampleStats.drawables * 3u);
+    sample = nullptr;
+
+    for (auto _ : state)
+    {
+        state.PauseTiming();
+        osg::ref_ptr<osg::Group> result = kit->createInstancedNode(source.get());
+        benchmark::DoNotOptimize(result.get());
+        state.ResumeTiming();
+
+        result = nullptr;
+        benchmark::ClobberMemory();
+    }
+
+    state.SetItemsProcessed(state.iterations() * count);
+}
+BENCHMARK(BM_KitInstancedCityDestroy)
+    ->Arg(100000)
+    ->Arg(250000)
+    ->Unit(benchmark::kMicrosecond);
+
+static void BM_KitBinaryCityRead(benchmark::State& state)
+{
+    const fs::path cityPath = "../data/kit/cities/downtown_dense.kitcityb";
+    if (!fs::is_regular_file(cityPath))
+    {
+        state.SkipWithError("Run this benchmark from the tests directory");
+        return;
+    }
+
+    osg::ref_ptr<osgDB::Options> options = new osgDB::Options();
+    options->setObjectCacheHint(osgDB::Options::CACHE_NONE);
+    for (auto _ : state)
+    {
+        osg::ref_ptr<osg::Node> city = osgDB::readRefNodeFile(cityPath.string(), options.get());
+        benchmark::DoNotOptimize(city.get());
+        auto* kitNode = dynamic_cast<KitNode*>(city.get());
+        if (!kitNode || kitNode->getNumInstances() != 2377247u)
+        {
+            state.SkipWithError("Binary city did not load with the expected instance count");
+            break;
+        }
+    }
+    state.SetItemsProcessed(state.iterations() * 2377247u);
+}
+BENCHMARK(BM_KitBinaryCityRead)
+    ->Iterations(3)
+    ->UseRealTime()
+    ->Unit(benchmark::kMillisecond);
+
+static void BM_KitBinaryCityGather(benchmark::State& state)
+{
+    const fs::path cityPath = "../data/kit/cities/downtown_dense.kitcityb";
+    const fs::path kitPath = "../data/kit/buildings.kit";
+    osg::ref_ptr<osgDB::Options> options = new osgDB::Options();
+    options->setObjectCacheHint(osgDB::Options::CACHE_NONE);
+    osg::ref_ptr<osg::Node> city = osgDB::readRefNodeFile(cityPath.string(), options.get());
+    osg::ref_ptr<Kit> kit = new Kit();
+    if (!city.valid() || !kit->load(kitPath.string(), options.get()))
+    {
+        state.SkipWithError("Failed to load the Kit city benchmark fixtures");
+        return;
+    }
+    kit->setInstanceChunkSize(512.0f);
+
+    for (auto _ : state)
+    {
+        Kit::BuildStats stats;
+        osg::ref_ptr<osg::Group> result = kit->createInstancedNode(city.get(), &stats);
+        benchmark::DoNotOptimize(result.get());
+        if (stats.instances != 2377247u || stats.missingModels != 0u)
+        {
+            state.SkipWithError("Gather changed the city instance count");
+            break;
+        }
+        InstanceArrayMemoryVisitor memory;
+        result->accept(memory);
+        state.counters["instance_buffer_MiB"] =
+            static_cast<double>(memory.bytes) / (1024.0 * 1024.0);
+        state.counters["instance_buffers"] =
+            static_cast<double>(memory.buffers.size());
+    }
+    state.SetItemsProcessed(state.iterations() * 2377247u);
+}
+BENCHMARK(BM_KitBinaryCityGather)
+    ->Iterations(3)
+    ->UseRealTime()
+    ->Unit(benchmark::kMillisecond);
+
+static void BM_InstanceBoundingBoxTraversal(benchmark::State& state)
+{
+    constexpr unsigned count = 250000u;
+    osg::ref_ptr<osg::Geometry> geometry = InstanceBuilder::createGeometry();
+    osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array();
+    vertices->push_back(osg::Vec3f(-0.5f, -0.5f, 0.0f));
+    vertices->push_back(osg::Vec3f(0.5f, -0.5f, 0.0f));
+    vertices->push_back(osg::Vec3f(0.5f, 0.5f, 1.0f));
+    vertices->push_back(osg::Vec3f(-0.5f, 0.5f, 1.0f));
+    geometry->setVertexArray(vertices.get());
+    geometry->addPrimitiveSet(new osg::DrawArrays(GL_QUADS, 0, 4));
+
+    osg::ref_ptr<osg::Vec3Array> positions = new osg::Vec3Array();
+    osg::ref_ptr<osg::Vec4Array> rotations = new osg::Vec4Array();
+    osg::ref_ptr<osg::Vec3Array> scales = new osg::Vec3Array();
+    positions->reserve(count);
+    rotations->reserve(count);
+    scales->reserve(count);
+    for (unsigned i = 0u; i < count; ++i)
+    {
+        positions->push_back(osg::Vec3f(
+            static_cast<float>(i % 500u),
+            static_cast<float>(i / 500u),
+            static_cast<float>(i % 20u)));
+        const float angle = static_cast<float>(i % 32u) * 0.09817477f;
+        rotations->push_back(osg::Vec4f(0.0f, 0.0f, std::sin(angle), std::cos(angle)));
+        scales->push_back(osg::Vec3f(1.0f + static_cast<float>(i % 4u), 2.0f, 3.0f));
+    }
+
+    InstanceBuilder builder;
+    builder.setPositions(positions.get());
+    builder.setRotations(rotations.get());
+    builder.setScales(scales.get());
+    builder.installInstancing(geometry.get());
+
+    for (auto _ : state)
+    {
+        geometry->dirtyBound();
+        const osg::BoundingBox& bounds = geometry->getBoundingBox();
+        benchmark::DoNotOptimize(bounds);
+    }
+    state.SetItemsProcessed(state.iterations() * count);
+}
+BENCHMARK(BM_InstanceBoundingBoxTraversal)
+    ->Iterations(3)
+    ->UseRealTime()
+    ->Unit(benchmark::kMillisecond);
 
 static void BM_GeoPointTransform(benchmark::State& state)
 {

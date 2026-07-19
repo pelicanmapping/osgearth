@@ -266,6 +266,7 @@ SimplePager::createChildNode(const TileKey& key, ProgressCallback* progress)
 
         if (payload.valid())
         {
+#if 0
             // Build kdtrees to increase intersection speed.
             if (osgDB::Registry::instance()->getKdTreeBuilder())
             {
@@ -273,6 +274,7 @@ SimplePager::createChildNode(const TileKey& key, ProgressCallback* progress)
                 payload->accept(*kdTreeBuilder.get());
                 Util::trimKdTrees(payload.get());
             }
+#endif
         }
 
 #if 0

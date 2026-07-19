@@ -2517,6 +2517,7 @@ EarthManipulator::pan( double dx, double dy )
             return;
 
         double scale = -0.3f*_distance;
+        scale = osg::minimum(-5000.0, scale);
 
         osg::Matrixd rotation_matrix;
         rotation_matrix.makeRotate( _rotation * _centerRotation  );

@@ -11,15 +11,75 @@
 #include <osg/Geometry>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 using namespace osgEarth;
 
 #define POSITION_ATTRIB 9
 #define ROTATION_ATTRIB 10
 #define SCALE_ATTRIB 11
-#define RANGE_ATTRIB 12
+
+namespace osgEarth
+{
+    struct PackedInstance
+    {
+        osg::Vec3us position;
+        osg::Vec4s rotation;
+        osg::Vec3us scale;
+    };
+
+    static_assert(sizeof(PackedInstance) == 20u,
+        "Packed Kit instances must remain 20 bytes");
+    static_assert(offsetof(PackedInstance, position) == 0u, "Unexpected position packing");
+    static_assert(offsetof(PackedInstance, rotation) == 6u, "Unexpected rotation packing");
+    static_assert(offsetof(PackedInstance, scale) == 14u, "Unexpected scale packing");
+
+    class PackedInstanceBuffer : public osg::BufferData
+    {
+    public:
+        PackedInstanceBuffer() = default;
+        PackedInstanceBuffer(
+            const PackedInstanceBuffer& rhs,
+            const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY) :
+            osg::BufferData(rhs, copyop),
+            _instances(rhs._instances) { }
+
+        osg::Object* cloneType() const override { return new PackedInstanceBuffer(); }
+        osg::Object* clone(const osg::CopyOp& copyop) const override
+        {
+            return new PackedInstanceBuffer(*this, copyop);
+        }
+        bool isSameKindAs(const osg::Object* object) const override
+        {
+            return dynamic_cast<const PackedInstanceBuffer*>(object) != nullptr;
+        }
+        const char* libraryName() const override { return "osgEarth"; }
+        const char* className() const override { return "PackedInstanceBuffer"; }
+
+        const GLvoid* getDataPointer() const override
+        {
+            return _instances.empty() ? nullptr : _instances.data();
+        }
+        unsigned int getTotalDataSize() const override
+        {
+            return static_cast<unsigned int>(_instances.size() * sizeof(PackedInstance));
+        }
+        void reserve(std::size_t count) { _instances.reserve(count); }
+        std::size_t size() const { return _instances.size(); }
+        void append(const PackedInstance& value) { _instances.push_back(value); }
+        const PackedInstance& operator[](std::size_t index) const { return _instances[index]; }
+
+    protected:
+        ~PackedInstanceBuffer() override = default;
+
+    private:
+        std::vector<PackedInstance> _instances;
+    };
+}
 
 // OSG in GLCORE mode doesn't reliably carry VertexAttribDivisor state into a
 // Geometry's VAO. Use the non-VAO VBO path and bracket each draw with explicit
@@ -34,6 +94,9 @@ public:
     META_Node(osgEarth, InstancedGeometry);
     
     void drawImplementation(osg::RenderInfo& renderInfo) const override;
+    void compileGLObjects(osg::RenderInfo& renderInfo) const override;
+    void resizeGLObjectBuffers(unsigned int maxSize) override;
+    void releaseGLObjects(osg::State* state = nullptr) const override;
     osg::BoundingBox computeBoundingBox() const override
     {
         return _instancedBoundingBox.valid() ?
@@ -64,9 +127,25 @@ public:
             return 0;
         }
     }
+    void setInstanceBuffer(
+        osg::BufferData* buffer,
+        std::size_t offset,
+        std::size_t count)
+    {
+        _instanceBuffer = buffer;
+        _instanceOffset = offset;
+        _instanceCount = count;
+        dirtyGLObjects();
+    }
+    const osg::BufferData* getInstanceBuffer() const { return _instanceBuffer.get(); }
+    std::size_t getInstanceOffset() const { return _instanceOffset; }
+    std::size_t getInstanceCount() const { return _instanceCount; }
 protected:
     std::vector<unsigned int> _divisors;
     osg::BoundingBox _instancedBoundingBox;
+    osg::ref_ptr<osg::BufferData> _instanceBuffer;
+    std::size_t _instanceOffset = 0u;
+    std::size_t _instanceCount = 0u;
 };
 
 namespace
@@ -102,7 +181,10 @@ InstancedGeometry::InstancedGeometry()
 InstancedGeometry::InstancedGeometry(const InstancedGeometry& geometry,const osg::CopyOp& copyop)
     : Geometry(geometry, copyop),
       _divisors(geometry._divisors.begin(), geometry._divisors.end()),
-      _instancedBoundingBox(geometry._instancedBoundingBox)
+      _instancedBoundingBox(geometry._instancedBoundingBox),
+      _instanceBuffer(geometry._instanceBuffer),
+      _instanceOffset(geometry._instanceOffset),
+      _instanceCount(geometry._instanceCount)
 {
     setUseVertexArrayObject(false);
 }
@@ -115,6 +197,72 @@ InstancedGeometry::InstancedGeometry(const osg::Geometry& geometry,const osg::Co
 
 void InstancedGeometry::drawImplementation(osg::RenderInfo& renderInfo) const
 {
+    if (_instanceBuffer.valid() && _instanceCount > 0u)
+    {
+        osg::State& state = *renderInfo.getState();
+        const osg::GLExtensions* extensions = state.get<osg::GLExtensions>();
+        if (!extensions->glVertexAttribPointer ||
+            !extensions->glEnableVertexAttribArray ||
+            !extensions->glDisableVertexAttribArray ||
+            !extensions->glVertexAttribDivisor)
+        {
+            return;
+        }
+
+        osg::GLBufferObject* glBuffer =
+            _instanceBuffer->getOrCreateGLBufferObject(state.getContextID());
+        if (!glBuffer)
+            return;
+
+        const bool usingVertexBufferObjects = state.useVertexBufferObject(
+            _supportsVertexBufferObjects && _useVertexBufferObjects);
+        osg::VertexArrayState* vas = state.getCurrentVertexArrayState();
+        vas->setVertexBufferObjectSupported(usingVertexBufferObjects);
+
+        // Set up only the immutable model arrays through osg::Geometry. Instance
+        // transforms live in one interleaved city buffer and are installed below.
+        drawVertexArraysImplementation(renderInfo);
+        vas->bindVertexBufferObject(glBuffer);
+
+        const std::uintptr_t base =
+            static_cast<std::uintptr_t>(glBuffer->getOffset(_instanceBuffer->getBufferIndex())) +
+            _instanceOffset * sizeof(osgEarth::PackedInstance);
+        const GLsizei stride = static_cast<GLsizei>(sizeof(osgEarth::PackedInstance));
+        auto pointer = [base](std::size_t offset)
+        {
+            return reinterpret_cast<const GLvoid*>(base + offset);
+        };
+
+        extensions->glEnableVertexAttribArray(POSITION_ATTRIB);
+        extensions->glVertexAttribPointer(
+            POSITION_ATTRIB, 3, GL_UNSIGNED_SHORT, GL_FALSE, stride,
+            pointer(offsetof(osgEarth::PackedInstance, position)));
+        extensions->glVertexAttribDivisor(POSITION_ATTRIB, 1u);
+
+        extensions->glEnableVertexAttribArray(ROTATION_ATTRIB);
+        extensions->glVertexAttribPointer(
+            ROTATION_ATTRIB, 4, GL_SHORT, GL_TRUE, stride,
+            pointer(offsetof(osgEarth::PackedInstance, rotation)));
+        extensions->glVertexAttribDivisor(ROTATION_ATTRIB, 1u);
+
+        extensions->glEnableVertexAttribArray(SCALE_ATTRIB);
+        extensions->glVertexAttribPointer(
+            SCALE_ATTRIB, 3, GL_UNSIGNED_SHORT, GL_FALSE, stride,
+            pointer(offsetof(osgEarth::PackedInstance, scale)));
+        extensions->glVertexAttribDivisor(SCALE_ATTRIB, 1u);
+
+        drawPrimitivesImplementation(renderInfo);
+
+        for (unsigned attribute = POSITION_ATTRIB; attribute <= SCALE_ATTRIB; ++attribute)
+        {
+            extensions->glVertexAttribDivisor(attribute, 0u);
+            extensions->glDisableVertexAttribArray(attribute);
+        }
+        vas->unbindVertexBufferObject();
+        vas->unbindElementBufferObject();
+        return;
+    }
+
     osg::State& state = *renderInfo.getState();
     const osg::GLExtensions* extensions = state.get<osg::GLExtensions>();
     if (extensions->glVertexAttribDivisor)
@@ -140,36 +288,56 @@ void InstancedGeometry::drawImplementation(osg::RenderInfo& renderInfo) const
     }
 }
 
+void InstancedGeometry::compileGLObjects(osg::RenderInfo& renderInfo) const
+{
+    Geometry::compileGLObjects(renderInfo);
+    if (!_instanceBuffer.valid())
+        return;
+
+    osg::State& state = *renderInfo.getState();
+    osg::GLBufferObject* glBuffer =
+        _instanceBuffer->getOrCreateGLBufferObject(state.getContextID());
+    if (glBuffer && glBuffer->isDirty())
+        glBuffer->compileBuffer();
+    state.get<osg::GLExtensions>()->glBindBuffer(GL_ARRAY_BUFFER_ARB, 0u);
+}
+
+void InstancedGeometry::resizeGLObjectBuffers(unsigned int maxSize)
+{
+    Geometry::resizeGLObjectBuffers(maxSize);
+    if (_instanceBuffer.valid())
+        _instanceBuffer->resizeGLObjectBuffers(maxSize);
+}
+
+void InstancedGeometry::releaseGLObjects(osg::State* state) const
+{
+    Geometry::releaseGLObjects(state);
+    if (_instanceBuffer.valid())
+        _instanceBuffer->releaseGLObjects(state);
+}
+
 InstanceBuilder::InstanceBuilder() :
-    _instanceVBO(new osg::VertexBufferObject())
+    _instanceVBO(new osg::VertexBufferObject()),
+    _instanceBuffer(new osgEarth::PackedInstanceBuffer())
 {
     osg::Vec3 position(0.0f, 0.0f, 0.0f);
     osg::Vec4 rotation(0.0f, 0.0f, 0.0f, 1.0f);
     osg::Vec3 scale(1.0f, 1.0f, 1.0f);
-    osg::Vec2 range(0.0f, std::numeric_limits<float>::max());
 
     _position = new osg::Vec3Array(1,&position);
     _rotation = new osg::Vec4Array(1, &rotation);
     _scale = new osg::Vec3Array(1, &scale);
-    _range = new osg::Vec2Array(1, &range);
-    _positionOffsetUniform = new osg::Uniform(
-        "oe_DrawInstancedAttribute_positionOffset", _positionOffset);
-    _positionScaleUniform = new osg::Uniform(
-        "oe_DrawInstancedAttribute_positionScale", _positionScale);
-    _scaleOffsetUniform = new osg::Uniform(
-        "oe_DrawInstancedAttribute_scaleOffset", _scaleOffset);
-    _scaleScaleUniform = new osg::Uniform(
-        "oe_DrawInstancedAttribute_scaleScale", _scaleScale);
+    _instanceBuffer->setBufferObject(_instanceVBO.get());
 }
 
 void InstanceBuilder::setPositions(osg::Vec3Array* positions)
 {
     _instancedBoundingBox.init();
-    _packedPositions = nullptr;
+    _instanceOffset = 0u;
+    _instanceCount = 0u;
     _positionOffset.set(0.0f, 0.0f, 0.0f);
     _positionScale.set(1.0f, 1.0f, 1.0f);
-    _positionOffsetUniform->set(_positionOffset);
-    _positionScaleUniform->set(_positionScale);
+    resetBatchUniforms();
     _positions = positions;
     if (positions && !positions->getVertexBufferObject())
         positions->setVertexBufferObject(_instanceVBO.get());
@@ -178,7 +346,9 @@ void InstanceBuilder::setPositions(osg::Vec3Array* positions)
 void InstanceBuilder::setRotations(osg::Vec4Array* rotations)
 {
     _instancedBoundingBox.init();
-    _packedRotations = nullptr;
+    _instanceOffset = 0u;
+    _instanceCount = 0u;
+    resetBatchUniforms();
     _rotations = rotations;
     if (rotations && !rotations->getVertexBufferObject())
         rotations->setVertexBufferObject(_instanceVBO.get());
@@ -187,14 +357,51 @@ void InstanceBuilder::setRotations(osg::Vec4Array* rotations)
 void InstanceBuilder::setScales(osg::Vec3Array* scales)
 {
     _instancedBoundingBox.init();
-    _packedScales = nullptr;
+    _instanceOffset = 0u;
+    _instanceCount = 0u;
     _scaleOffset.set(0.0f, 0.0f, 0.0f);
     _scaleScale.set(1.0f, 1.0f, 1.0f);
-    _scaleOffsetUniform->set(_scaleOffset);
-    _scaleScaleUniform->set(_scaleScale);
+    resetBatchUniforms();
     _scales = scales;
     if (scales && !scales->getVertexBufferObject())
         scales->setVertexBufferObject(_instanceVBO.get());
+}
+
+void InstanceBuilder::setRange(const osg::Vec2f& range)
+{
+    _range = range;
+    resetBatchUniforms();
+}
+
+void InstanceBuilder::reserveInstances(std::size_t count)
+{
+    static_cast<osgEarth::PackedInstanceBuffer*>(_instanceBuffer.get())->reserve(count);
+}
+
+void InstanceBuilder::resetBatchUniforms()
+{
+    _positionOffsetUniform = nullptr;
+    _positionScaleUniform = nullptr;
+    _scaleOffsetUniform = nullptr;
+    _scaleScaleUniform = nullptr;
+    _rangeUniform = nullptr;
+}
+
+void InstanceBuilder::createBatchUniforms() const
+{
+    if (_positionOffsetUniform.valid())
+        return;
+
+    _positionOffsetUniform = new osg::Uniform(
+        "oe_DrawInstancedAttribute_positionOffset", _positionOffset);
+    _positionScaleUniform = new osg::Uniform(
+        "oe_DrawInstancedAttribute_positionScale", _positionScale);
+    _scaleOffsetUniform = new osg::Uniform(
+        "oe_DrawInstancedAttribute_scaleOffset", _scaleOffset);
+    _scaleScaleUniform = new osg::Uniform(
+        "oe_DrawInstancedAttribute_scaleScale", _scaleScale);
+    _rangeUniform = new osg::Uniform(
+        "oe_DrawInstancedAttribute_range", _range);
 }
 
 bool InstanceBuilder::compressInstanceAttributes()
@@ -231,26 +438,20 @@ bool InstanceBuilder::compressInstanceAttributes()
 
     quantization(*_positions, _positionOffset, _positionScale);
     quantization(*_scales, _scaleOffset, _scaleScale);
-    _positionOffsetUniform->set(_positionOffset);
-    _positionScaleUniform->set(_positionScale);
-    _scaleOffsetUniform->set(_scaleOffset);
-    _scaleScaleUniform->set(_scaleScale);
 
     const std::size_t count = _positions->size();
-    _packedPositions = new osg::Vec3usArray();
-    _packedRotations = new osg::Vec4sArray();
-    _packedScales = new osg::Vec3usArray();
-    _packedPositions->reserve(count);
-    _packedRotations->reserve(count);
-    _packedScales->reserve(count);
-    _packedRotations->setNormalize(true);
+    osgEarth::PackedInstanceBuffer* buffer =
+        static_cast<osgEarth::PackedInstanceBuffer*>(_instanceBuffer.get());
+    _instanceOffset = buffer->size();
+    _instanceCount = count;
     for (std::size_t i = 0u; i < count; ++i)
     {
         const osg::Vec3f& position = (*_positions)[i];
-        _packedPositions->push_back(osg::Vec3us(
+        osgEarth::PackedInstance packed;
+        packed.position.set(
             encode(position.x(), _positionOffset.x(), _positionScale.x()),
             encode(position.y(), _positionOffset.y(), _positionScale.y()),
-            encode(position.z(), _positionOffset.z(), _positionScale.z())));
+            encode(position.z(), _positionOffset.z(), _positionScale.z()));
 
         const osg::Vec4f& rotation = (*_rotations)[i];
         auto encodeRotation = [](float value)
@@ -259,20 +460,28 @@ bool InstanceBuilder::compressInstanceAttributes()
                 std::max(-1.0f, std::min(1.0f, value)) * 32767.0f);
             return static_cast<short>(quantized);
         };
-        _packedRotations->push_back(osg::Vec4s(
+        packed.rotation.set(
             encodeRotation(rotation.x()), encodeRotation(rotation.y()),
-            encodeRotation(rotation.z()), encodeRotation(rotation.w())));
+            encodeRotation(rotation.z()), encodeRotation(rotation.w()));
 
         const osg::Vec3f& scale = (*_scales)[i];
-        _packedScales->push_back(osg::Vec3us(
+        packed.scale.set(
             encode(scale.x(), _scaleOffset.x(), _scaleScale.x()),
             encode(scale.y(), _scaleOffset.y(), _scaleScale.y()),
-            encode(scale.z(), _scaleOffset.z(), _scaleScale.z())));
+            encode(scale.z(), _scaleOffset.z(), _scaleScale.z()));
+        buffer->append(packed);
     }
+    buffer->dirty();
 
-    _packedPositions->setVertexBufferObject(_instanceVBO.get());
-    _packedRotations->setVertexBufferObject(_instanceVBO.get());
-    _packedScales->setVertexBufferObject(_instanceVBO.get());
+    // The compact interleaved buffer supersedes these temporary float arrays.
+    // Detach them even if their caller retains a reference so the city VBO
+    // contains only the packed records that resident geometry will draw.
+    if (_positions->getVertexBufferObject() == _instanceVBO.get())
+        _positions->setVertexBufferObject(nullptr);
+    if (_rotations->getVertexBufferObject() == _instanceVBO.get())
+        _rotations->setVertexBufferObject(nullptr);
+    if (_scales->getVertexBufferObject() == _instanceVBO.get())
+        _scales->setVertexBufferObject(nullptr);
     _positions = nullptr;
     _rotations = nullptr;
     _scales = nullptr;
@@ -283,8 +492,8 @@ bool InstanceBuilder::compressInstanceAttributes()
 void InstanceBuilder::setBaseBoundingBox(const osg::BoundingBox& bounds) const
 {
     _instancedBoundingBox.init();
-    const std::size_t count = _packedPositions.valid() ?
-        _packedPositions->size() : (_positions.valid() ? _positions->size() : 0u);
+    const std::size_t count = _instanceCount > 0u ?
+        _instanceCount : (_positions.valid() ? _positions->size() : 0u);
     if (!bounds.valid() || count == 0u)
         return;
 
@@ -299,13 +508,15 @@ void InstanceBuilder::setBaseBoundingBox(const osg::BoundingBox& bounds) const
     for (std::size_t i = 0u; i < count; ++i)
     {
         osg::Vec3f position;
-        if (_packedPositions.valid())
+        const osgEarth::PackedInstance* packed = nullptr;
+        if (_instanceCount > 0u)
         {
-            const osg::Vec3us& packed = (*_packedPositions)[i];
+            packed = &(*static_cast<const osgEarth::PackedInstanceBuffer*>(
+                _instanceBuffer.get()))[_instanceOffset + i];
             position.set(
-                _positionOffset.x() + packed.x() * _positionScale.x(),
-                _positionOffset.y() + packed.y() * _positionScale.y(),
-                _positionOffset.z() + packed.z() * _positionScale.z());
+                _positionOffset.x() + packed->position.x() * _positionScale.x(),
+                _positionOffset.y() + packed->position.y() * _positionScale.y(),
+                _positionOffset.z() + packed->position.z() * _positionScale.z());
         }
         else
         {
@@ -313,14 +524,13 @@ void InstanceBuilder::setBaseBoundingBox(const osg::BoundingBox& bounds) const
         }
 
         osg::Vec4f rotation = defaultRotation;
-        if (_packedRotations.valid())
+        if (packed)
         {
-            const osg::Vec4s& packed = (*_packedRotations)[i];
             rotation.set(
-                packed.x() * (1.0f / 32767.0f),
-                packed.y() * (1.0f / 32767.0f),
-                packed.z() * (1.0f / 32767.0f),
-                packed.w() * (1.0f / 32767.0f));
+                packed->rotation.x() * (1.0f / 32767.0f),
+                packed->rotation.y() * (1.0f / 32767.0f),
+                packed->rotation.z() * (1.0f / 32767.0f),
+                packed->rotation.w() * (1.0f / 32767.0f));
         }
         else if (_rotations.valid() && i < _rotations->size())
         {
@@ -328,13 +538,12 @@ void InstanceBuilder::setBaseBoundingBox(const osg::BoundingBox& bounds) const
         }
 
         osg::Vec3f scale = defaultScale;
-        if (_packedScales.valid())
+        if (packed)
         {
-            const osg::Vec3us& packed = (*_packedScales)[i];
             scale.set(
-                _scaleOffset.x() + packed.x() * _scaleScale.x(),
-                _scaleOffset.y() + packed.y() * _scaleScale.y(),
-                _scaleOffset.z() + packed.z() * _scaleScale.z());
+                _scaleOffset.x() + packed->scale.x() * _scaleScale.x(),
+                _scaleOffset.y() + packed->scale.y() * _scaleScale.y(),
+                _scaleOffset.z() + packed->scale.z() * _scaleScale.z());
         }
         else if (_scales.valid() && i < _scales->size())
         {
@@ -371,25 +580,63 @@ osg::Geometry* InstanceBuilder::createGeometry(
     return new InstancedGeometry(geometry, copyop);
 }
 
+const osg::BufferData* InstanceBuilder::getInstanceBuffer(const osg::Geometry* geometry)
+{
+    const InstancedGeometry* instanced =
+        dynamic_cast<const InstancedGeometry*>(geometry);
+    return instanced ? instanced->getInstanceBuffer() : nullptr;
+}
+
+std::size_t InstanceBuilder::getInstanceOffset(const osg::Geometry* geometry)
+{
+    const InstancedGeometry* instanced =
+        dynamic_cast<const InstancedGeometry*>(geometry);
+    return instanced ? instanced->getInstanceOffset() : 0u;
+}
+
+std::size_t InstanceBuilder::getInstanceCount(const osg::Geometry* geometry)
+{
+    const InstancedGeometry* instanced =
+        dynamic_cast<const InstancedGeometry*>(geometry);
+    return instanced ? instanced->getInstanceCount() : 0u;
+}
+
 void InstanceBuilder::installInstancing(osg::Geometry* geometry) const
 {
-    osg::Array* positionAttribute = _packedPositions.valid() ?
-        static_cast<osg::Array*>(_packedPositions.get()) : _positions.get();
-    osg::Array* rotationAttribute = _packedRotations.valid() ?
-        static_cast<osg::Array*>(_packedRotations.get()) : _rotations.get();
-    osg::Array* scaleAttribute = _packedScales.valid() ?
-        static_cast<osg::Array*>(_packedScales.get()) : _scales.get();
-    if (!geometry || !positionAttribute)
+    installInstancing(geometry, nullptr);
+}
+
+void InstanceBuilder::installInstancing(
+    osg::Geometry* geometry,
+    osg::StateSet* shaderStateSet) const
+{
+    if (!geometry || (_instanceCount == 0u && !_positions.valid()))
         return;
 
-    int numInstances = positionAttribute->getNumElements();
+    InstancedGeometry* instanced = dynamic_cast<InstancedGeometry*>(geometry);
+    if (_instanceCount > 0u && !instanced)
+        return;
+
+    const int numInstances = static_cast<int>(
+        _instanceCount > 0u ? _instanceCount : _positions->size());
     const osg::BoundingBox baseBounds = geometry->getBoundingBox();
-    osg::StateSet* ss = geometry->getOrCreateStateSet();
-    // assign the instance parameters
-    setPerVertexOrOverall(geometry, positionAttribute, _position.get(), POSITION_ATTRIB);
-    setPerVertexOrOverall(geometry, rotationAttribute, _rotation.get(), ROTATION_ATTRIB);
-    setPerVertexOrOverall(geometry, scaleAttribute, _scale.get(), SCALE_ATTRIB);
-    setPerVertexOrOverall(geometry, nullptr, _range.get(), RANGE_ATTRIB);
+    osg::StateSet* geometryStateSet = geometry->getOrCreateStateSet();
+    if (!shaderStateSet)
+        shaderStateSet = geometryStateSet;
+
+    if (_instanceCount > 0u)
+    {
+        instanced->setInstanceBuffer(
+            _instanceBuffer.get(), _instanceOffset, _instanceCount);
+    }
+    else
+    {
+        // Retain the original non-interleaved path for callers that do not ask
+        // InstanceBuilder to compact their data.
+        setPerVertexOrOverall(geometry, _positions.get(), _position.get(), POSITION_ATTRIB);
+        setPerVertexOrOverall(geometry, _rotations.get(), _rotation.get(), ROTATION_ATTRIB);
+        setPerVertexOrOverall(geometry, _scales.get(), _scale.get(), SCALE_ATTRIB);
+    }
     osg::Geometry::PrimitiveSetList& prims = geometry->getPrimitiveSetList();
     for (osg::Geometry::PrimitiveSetList::iterator it = prims.begin(), end = prims.end();
          it != end;
@@ -408,18 +655,19 @@ void InstanceBuilder::installInstancing(osg::Geometry* geometry) const
             result->addBindAttribLocation("oe_DrawInstancedAttribute_position", POSITION_ATTRIB);
             result->addBindAttribLocation("oe_DrawInstancedAttribute_rotation", ROTATION_ATTRIB);
             result->addBindAttribLocation("oe_DrawInstancedAttribute_scale", SCALE_ATTRIB);
-            result->addBindAttribLocation("oe_DrawInstancedAttribute_range", RANGE_ATTRIB);
             return result;
         });
-    ss->setAttribute(vp);
-    ss->addUniform(_positionOffsetUniform.get());
-    ss->addUniform(_positionScaleUniform.get());
-    ss->addUniform(_scaleOffsetUniform.get());
-    ss->addUniform(_scaleScaleUniform.get());
+    shaderStateSet->setAttribute(vp);
+    createBatchUniforms();
+    geometryStateSet->addUniform(_positionOffsetUniform.get());
+    geometryStateSet->addUniform(_positionScaleUniform.get());
+    geometryStateSet->addUniform(_scaleOffsetUniform.get());
+    geometryStateSet->addUniform(_scaleScaleUniform.get());
+    geometryStateSet->addUniform(_rangeUniform.get());
 
     if (!_instancedBoundingBox.valid())
         setBaseBoundingBox(baseBounds);
-    if (auto* instanced = dynamic_cast<InstancedGeometry*>(geometry))
+    if (instanced)
         instanced->setInstancedBoundingBox(_instancedBoundingBox);
     else
         geometry->setInitialBound(_instancedBoundingBox);

@@ -10,10 +10,16 @@
 #include <osg/Group>
 #include <osg/Quat>
 #include <osgDB/Options>
+#include <cstdint>
 #include <map>
 #include <limits>
 #include <string>
 #include <vector>
+
+namespace osg
+{
+    class Camera;
+}
 
 namespace osgEarth
 {
@@ -110,10 +116,11 @@ namespace osgEarth
     /**
      * Registry of named model prototypes and compiler for KitNode graphs.
      *
-     * Models are loaded once. Instanced batches shallow-share their immutable
-     * vertex arrays, textures, and material state with these prototypes. Only
-     * the small primitive descriptors carrying the per-batch instance count
-     * are copied.
+     * Models are loaded once. Each compiled city graph is a single lightweight
+     * cull-submission node holding compact instance batches. Add getRenderNode()
+     * to the application scene once; it collects all visible batches and renders
+     * one instanced draw per source model geometry, independent of how many
+     * city/tile graphs supplied the instances.
      */
     class OSGEARTH_EXPORT Kit : public osg::Referenced
     {
@@ -121,12 +128,31 @@ namespace osgEarth
         struct BuildStats
         {
             unsigned instances = 0u;
+            //! Compact, bounded instance batches held by the compiled node.
             unsigned batches = 0u;
+            //! Persistent Kit renderer drawables referenced by this graph.
             unsigned drawables = 0u;
             unsigned missingModels = 0u;
         };
 
-        Kit() = default;
+        //! Per-model rendering statistics for one camera frame.
+        struct ModelStats
+        {
+            std::string name;
+            std::size_t instances = 0u;
+            //! Number of visible compact source batches submitted this frame.
+            std::size_t batches = 0u;
+            //! Packed transient payload for the visible instances this frame.
+            std::size_t visibleBytes = 0u;
+            //! Persistent source-model geometry drawables owned by the renderer.
+            unsigned drawables = 0u;
+            //! Allocated transient instance-ring storage across GL contexts.
+            std::size_t ringBytes = 0u;
+            //! Cumulative waits for an in-flight ring slot belonging to this model.
+            std::uint64_t ringStalls = 0u;
+        };
+
+        Kit();
 
         //! Load a kit manifest. The manifest may reference any osgDB model type.
         bool load(
@@ -141,6 +167,33 @@ namespace osgEarth
         osg::Node* getModel(const std::string& name);
         const osg::Node* getModel(const std::string& name) const;
         std::size_t getNumModels() const { return _models.size(); }
+        //! Shared renderer that must be attached to the scene once.
+        osg::Group* getRenderNode() { return _renderNode.get(); }
+        const osg::Group* getRenderNode() const { return _renderNode.get(); }
+        //! Number of persistent model drawables owned by getRenderNode().
+        unsigned getNumRenderDrawables() const;
+        //! Instances most recently submitted for one camera; useful for diagnostics.
+        std::size_t getNumCollectedInstances(const osg::Camera* camera) const;
+        //! Instances most recently submitted across all active cameras.
+        std::size_t getNumCollectedInstances() const;
+        /**
+         * Snapshot named-model statistics for an exact camera frame. Models
+         * with no visible instances are included with zero counts.
+         */
+        void getModelStats(
+            const osg::Camera* camera,
+            std::uint64_t frameNumber,
+            std::vector<ModelStats>& output) const;
+        //! Hard cap on visible instances packed into the transient GPU ring.
+        void setMaxVisibleInstances(std::size_t value);
+        std::size_t getMaxVisibleInstances() const;
+        //! Instances discarded in the most recently collected frame at the cap.
+        std::size_t getNumDroppedInstances(const osg::Camera* camera) const;
+        std::size_t getNumDroppedInstances() const;
+        //! Current transient instance-ring allocation across active GL contexts.
+        std::size_t getInstanceRingBytes() const;
+        //! Number of times slot reuse had to wait for an in-flight GPU frame.
+        std::uint64_t getInstanceRingStallCount() const;
         const std::string& getLastError() const { return _lastError; }
         void setInstanceChunkSize(float meters) { _instanceChunkSize = meters; }
         float getInstanceChunkSize() const { return _instanceChunkSize; }
@@ -154,10 +207,11 @@ namespace osgEarth
             BuildStats* outStats = nullptr) const;
 
     protected:
-        virtual ~Kit() = default;
+        virtual ~Kit();
 
         using Models = std::map<std::string, osg::ref_ptr<osg::Node>>;
         Models _models;
+        osg::ref_ptr<osg::Group> _renderNode;
         std::string _lastError;
         float _instanceChunkSize = 0.0f;
     };

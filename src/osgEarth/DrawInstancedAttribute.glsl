@@ -8,12 +8,12 @@
 in vec3 oe_DrawInstancedAttribute_position;
 in vec4 oe_DrawInstancedAttribute_rotation;
 in vec3 oe_DrawInstancedAttribute_scale;
-in vec2 oe_DrawInstancedAttribute_range;
 
 uniform vec3 oe_DrawInstancedAttribute_positionOffset;
 uniform vec3 oe_DrawInstancedAttribute_positionScale;
 uniform vec3 oe_DrawInstancedAttribute_scaleOffset;
 uniform vec3 oe_DrawInstancedAttribute_scaleScale;
+uniform vec2 oe_DrawInstancedAttribute_range;
 
 vec3 vp_Normal;
 

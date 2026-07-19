@@ -1,0 +1,6 @@
+newmtl brick
+Kd 0.6700 0.6700 0.6600
+Ka 0.08 0.08 0.08
+Ks 0.04 0.04 0.04
+Ns 12.0
+map_Kd ../textures/brick_gray.jpg

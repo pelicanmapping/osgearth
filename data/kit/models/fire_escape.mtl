@@ -1,0 +1,5 @@
+newmtl fire_escape_metal
+Kd 0.4600 0.1800 0.0450
+Ka 0.08 0.08 0.08
+Ks 0.04 0.04 0.04
+Ns 12.0

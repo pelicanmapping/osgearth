@@ -1,0 +1,448 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/Common>
+#include <osgEarth/Units>
+#include <osgEarth/Ellipsoid>
+#include <osgEarth/VerticalDatum>
+#include <osgEarth/Threading>
+#include <osgEarth/Containers>
+#include <osgEarth/StringUtils>
+#include <osg/CoordinateSystemNode>
+#include <osg/Vec3>
+#include <unordered_map>
+
+namespace osgEarth
+{
+    //Definitions for the mercator extent
+    const double MERC_MINX = -20037508.34278925;
+    const double MERC_MINY = -20037508.34278925;
+    const double MERC_MAXX =  20037508.34278925;
+    const double MERC_MAXY =  20037508.34278925;
+    const double MERC_WIDTH = MERC_MAXX - MERC_MINX;
+    const double MERC_HEIGHT = MERC_MAXY - MERC_MINY;
+    const double MERC_MIN_LONGITUDE = -180.0;
+    const double MERC_MAX_LONGITUDE =  180.0;
+    const double MERC_MIN_LATITUDE = -85.0511287798066;
+    const double MERC_MAX_LATITUDE =  85.0511287798066;
+
+    /** 
+     * SpatialReference holds information describing the reference ellipsoid/datum
+     * and the projection of geospatial data.
+     */
+    class OSGEARTH_EXPORT SpatialReference : public osg::Referenced
+    {
+    public:
+        /**
+         * Creates an SRS from two intialization strings; the first for the horizontal datum and
+         * the second for the vertical datum. If you omit the vertical datum, it will default to
+         * the geodetic datum for the ellipsoid.
+         */
+        static SpatialReference* create( const std::string& init, const std::string& vinit ="" );
+        static SpatialReference* get   ( const std::string& init, const std::string& vinit ="" ) { return create(init,vinit); }
+
+        /**
+         * Creates an SRS by cloning a pre-existing OGR spatial reference handle.
+         * The new SRS owns the cloned handle, and the caller retains responsibility
+         * for managing the original handle.
+         */
+        static SpatialReference* createFromHandle(void* ogrHandle);
+
+
+    public: // Basic transformations.
+
+        /**
+         * Transform a single point from this SRS to another SRS.
+         * Returns true if the transformation succeeded.
+         */
+        virtual bool transform(
+            const osg::Vec3d&       input,
+            const SpatialReference* outputSRS,
+            osg::Vec3d&             output) const;
+
+        /**
+         * Transform a collection of points from this SRS to another SRS.
+         * Returns true if ALL transforms succeeded, false if at least one failed.
+         */
+        virtual bool transform(
+            std::vector<osg::Vec3d>& input,
+            const SpatialReference*  outputSRS ) const;
+
+        /**
+         * Transform a contiguous in-place array of points from this SRS to another SRS.
+         * Returns true if ALL transforms succeeded, false if at least one failed.
+         */
+        bool transform(
+            osg::Vec3d*              points,
+            unsigned                 count,
+            const SpatialReference*  outputSRS) const;
+        
+        /**
+         * Transform a 2D point directly. (Convenience function)
+         */
+        bool transform2D(
+            double                  x, 
+            double                  y,
+            const SpatialReference* outputSRS,
+            double&                 out_x,
+            double&                 out_y ) const;
+
+
+    public: // Units transformations.
+
+        /**
+         * Transforms a distance from the base units of this SRS to the base units of
+         * another. If one of the SRS's is geographic (i.e. has angular units), the 
+         * conversion will assume that the corresponding distance is measured at the
+         * equator.
+         */
+        double transformUnits(
+            double                  distance,
+            const SpatialReference* outputSRS,
+            double                  latitude =0.0) const;
+
+        static double transformUnits(
+            const Distance&         distance,
+            const SpatialReference* outputSRS,
+            double                  latitude =0.0);
+
+        double transformDistance(
+            const Distance& distance,
+            const UnitsType& output_units,
+            double reference_latitude = 0.0) const;
+
+    public: // World transformations.
+
+        /**
+         * Transforms a point from this SRS into "world" coordinates. This normalizes
+         * the Z coordinate (according to the vertical datum) and converts to geocentric
+         * coordinates if necessary.
+         */
+        bool transformToWorld(
+            const osg::Vec3d& input,
+            osg::Vec3d&       out_world ) const;
+
+        /**
+         * Transforms a point from the "world" coordinate system into this spatial
+         * reference.
+         * @param world
+         *      World point to transform
+         * @param out_local
+         *      Output coords in local (SRS) coords
+         * @param worldIsGeocentric
+         *      Whether the incoming world coordinates are geocentric coords
+         * @param out_geodeticZ
+         *      (optional) Outputs the geodetic (HAE) Z if applicable
+         */
+        bool transformFromWorld(
+            const osg::Vec3d& world,
+            osg::Vec3d&       out_local,
+            double*           out_geodeticZ =0L ) const;
+
+    public: // extent transformations.
+        
+        //! Transforms a minimum bounding rectangle from this SRS to another.
+        //! The operation is not necessarily commutitive.
+        virtual bool transformExtentToMBR(
+            const SpatialReference* to_srs,
+            double& in_out_xmin, 
+            double& in_out_ymin,
+            double& in_out_xmax, 
+            double& in_out_ymax ) const;
+
+        virtual bool clampExtentToLegalBounds(
+            const SpatialReference* to_srs,
+            double& in_out_xmin,
+            double& in_out_ymin,
+            double& in_out_xmax,
+            double& in_out_ymax) const;
+        
+        //! Transforms a 2D grid of points from this SRS to another.
+        virtual bool transformGrid(
+            const SpatialReference* to_srs,
+            double in_xmin, double in_ymin,
+            double in_xmax, double in_ymax,
+            double* x, double* y,
+            unsigned numx, unsigned numy ) const;
+
+
+    public: // properties
+
+        /** uniquely identifies an SRS. */
+        struct Key {
+            Key() = default;
+            Key(const std::string& h, const std::string& v) : 
+                horiz(h), horizLower(toLower(h)), vert(v), vertLower(toLower(v))
+            {
+                hash = Strings::hashString(horizLower+vertLower);
+            }
+            std::string horiz, horizLower;
+            std::string vert,  vertLower;
+            std::uint64_t hash;
+
+            bool operator == (const Key& rhs) const {
+                return horizLower==rhs.horizLower && vertLower==rhs.vertLower;
+            }
+            bool operator < (const Key& rhs) const {
+                int h = horizLower.compare(rhs.horizLower);
+                if ( h < 0 ) return true;
+                if ( h > 0 ) return false;
+                int v = vertLower.compare(rhs.vertLower);
+                if ( v < 0 ) return true;
+                return false;
+            }
+        };
+
+        /** True if this is a geographic SRS (lat/long/msl) */
+        virtual bool isGeographic() const;
+
+        /** True if this is a geodetic SRS (lat/long/hae) */
+        virtual bool isGeodetic() const;
+
+        /** True if this is a projected SRS (i.e. local coordinate system) */
+        virtual bool isProjected() const;
+
+        /** True if this is a planet-centered system (geocentric/meters) */
+        virtual bool isGeocentric() const;
+
+        /** Tests whether this SRS represents a Mercator projection. */
+        bool isMercator() const;
+
+        /** Tests whether this SRS represents a Spherical Mercator pseudo-projection. */
+        bool isSphericalMercator() const;
+
+        /** Tests whether this SRS represents a polar sterographic projection. */
+        bool isNorthPolar() const;
+        bool isSouthPolar() const;
+
+        /** Tests whether this SRS is user-defined; i.e. whether it is other than a
+            well-known SRS. (i.e. whether the SRS is unsupported by GDAL) */
+        virtual bool isUserDefined() const;
+
+        /** Tests whether this SRS is a Unified Cube projection (osgEarth-internal) */
+        virtual bool isCube() const;
+
+        /** Tests whether this SRS is a Local Tangent Plane projection (osgEarth-internal) */
+        virtual bool isLTP() const { return _is_ltp; }
+
+        /** Gets the readable name of this SRS. */
+        const std::string& getName() const;
+
+        /** Gets the underlying reference ellipsoid of this SRS */
+        const Ellipsoid& getEllipsoid() const;
+
+        /** Gets the WKT string */
+        const std::string& getWKT() const;
+
+        /** Gets the initialization key. */
+        const Key& getKey() const;
+
+        /** Gets the initialization string for the horizontal datum */
+        const std::string& getHorizInitString() const;
+
+        /** Gets the initialization string for the vertical datum */
+        const std::string& getVertInitString() const;
+
+        /** Gets the datum identifier of this SRS (or empty string if not available) */
+        const std::string& getDatumName() const;
+
+        /** Gets the base units of data in this SRS */
+        const UnitsType& getUnits() const;
+
+        //! Gets the reported linear unit conversion
+        double getReportedLinearUnits() const;
+
+        /** Whether the two SRS are completely equivalent. */
+        virtual bool isEquivalentTo( const SpatialReference* rhs ) const;
+
+        /** Whether the two SRS are horizonally equivalent (ignoring the vertical datums) */
+        bool isHorizEquivalentTo( const SpatialReference* rhs ) const;
+
+        /** Whether this SRS has the same vertical datum as another. */
+        bool isVertEquivalentTo( const SpatialReference* rhs ) const;
+
+        /** Gets a reference to this SRS's underlying geographic SRS. */
+        const SpatialReference* getGeographicSRS() const;
+
+        /** Gets a reference to this SRS's underlying geodetic SRS. This is the same as the
+            geographic SRS [see getGeographicSRS()] but with a geodetic vertical datum (in
+            which Z is expressed as height above the geodetic ellipsoid). */
+        const SpatialReference* getGeodeticSRS() const;
+
+        /** Gets the geocentric reference system associated with this SRS' ellipsoid. */
+        const SpatialReference* getGeocentricSRS() const;
+
+        /** Gets the vertical datum. If null, this SRS uses a default geodetic vertical datum */
+        const VerticalDatum* getVerticalDatum() const;
+
+        /** Creates a localizer matrix based on a point in this SRS. */
+        bool createLocalToWorld( const osg::Vec3d& point, osg::Matrixd& out_local2world ) const;
+
+        /** Create a de-localizer matrix based on a point in this SRS. */
+        bool createWorldToLocal( const osg::Vec3d& point, osg::Matrix& out_world2local ) const;
+
+        /** Creates and returns a local trangent plane SRS at the given reference location.
+            The reference location is expressed in this object's SRS, but it tangent to
+            the globe at getGeographicSRS(). LTP units are in meters. */
+        const SpatialReference* createTangentPlaneSRS( const osg::Vec3d& refPos ) const;
+
+        /** Creates a transverse mercator projection centered at the specified longitude. */
+        const SpatialReference* createTransMercFromLongitude( const Angle& lon ) const;
+
+        /** Creates a UTM (universal transverse mercator) projection in the UTM zone
+            containing the specified longitude. NOTE: this is slightly faster than using
+            basic tmerc (transverse mercator) above. */
+        const SpatialReference* createUTMFromLonLat( const Angle& lon, const Angle& lat ) const;
+
+        /** Create an equirectangular projected SRS corresponding to the geographic SRS
+            contained in this spatial reference. This is an approximation of a Plate Carre
+            SRS but using equatorial meters. */
+        const SpatialReference* createEquirectangularSRS() const;
+
+        /** Populates the provided CSN with information from this SRS. */
+        bool populateCoordinateSystemNode( osg::CoordinateSystemNode* csn ) const;
+
+		//! The underlying OGRLayerH that this SpatialReference owns.
+		//! Don't use this unless you know what you're doing - this handle
+        //! is thread-specific.
+        void* getHandle() const;
+
+        //! Get (a best guess at) the appropriate bounding box for this SRS
+        bool getBounds(Bounds& output) const;
+
+        //! Whether this SRS was successfully initialized and is valid for use
+        bool valid() const { return _valid; }
+
+    protected:
+        virtual ~SpatialReference();
+
+        // SRS requires per-thread handles to be thread safe
+        struct ThreadLocal
+        {
+            ThreadLocal();
+            ~ThreadLocal();
+            std::thread::id _threadId;
+            void* _handle;
+            double* _workspace;
+            unsigned _workspaceSize;
+        };
+
+        // gets the thread-safe handle, initializing it if necessary
+        ThreadLocal& getLocal() const;
+
+        enum InitType {
+            INIT_USER,
+            INIT_PROJ,
+            INIT_WKT
+        };
+
+        struct Setup {
+            Setup() : 
+                type(INIT_PROJ), 
+                geocentric(false), 
+                cube(false),
+                srcHandle(nullptr) { }
+            InitType    type;
+            std::string horiz;
+            std::string vert;
+            std::string name;
+            optional<osg::Vec3d> originLLA; // for LTP
+            bool geocentric;
+            bool cube;
+            void* srcHandle;
+        };
+
+        enum Domain {
+            GEOGRAPHIC,
+            PROJECTED,
+            GEOCENTRIC
+        };
+
+        SpatialReference(const Key& key);
+
+        SpatialReference(void* handle);
+
+        std::string _name;
+        Key _key;
+        osg::ref_ptr<VerticalDatum> _vdatum;
+        Domain _domain;
+        std::string _wkt;
+
+        // shortcut bools:
+        bool _is_mercator;
+        bool _is_spherical_mercator;
+        bool _is_north_polar, _is_south_polar;
+        bool _is_cube;
+        bool _is_user_defined;
+        bool _is_ltp;
+
+        std::uint64_t _ellipsoidId;
+        std::string _proj4;
+        std::string _datum;
+        UnitsType _units;
+        double _reportedLinearUnits;
+        Ellipsoid _ellipsoid;
+        mutable osg::ref_ptr<SpatialReference> _geo_srs;
+        mutable osg::ref_ptr<SpatialReference> _geodetic_srs;  // _geo_srs with a NULL vdatum.
+        mutable osg::ref_ptr<SpatialReference> _geocentric_srs;
+        mutable std::mutex _mutex;
+        mutable bool _valid;
+        mutable bool _initialized;
+        Setup _setup;
+        Bounds _bounds;
+        mutable PerThread<ThreadLocal> _local;
+
+        // user can override these methods in a subclass to perform custom functionality; must
+        // call the superclass version.
+        virtual bool _isEquivalentTo(
+            const SpatialReference* srs, 
+            bool considerVDatum =true ) const;
+
+        virtual const SpatialReference* preTransform(
+            std::vector<osg::Vec3d>&) const { return this; }
+
+        virtual const SpatialReference* postTransform(
+            std::vector<osg::Vec3d>&) const { return this; }
+
+        bool transformXYPointArrays(
+            ThreadLocal& local,
+            double*  x,
+            double*  y,
+            unsigned numPoints,
+            const SpatialReference* out_srs) const;
+
+        bool transformZ(
+            osg::Vec3d*              points,
+            unsigned                 count,
+            const SpatialReference*  outputSRS,
+            bool                     pointsAreGeodetic) const;
+
+    private:
+
+        bool transformImpl(
+            osg::Vec3d*                  points,
+            unsigned                     count,
+            const SpatialReference*      outputSRS,
+            std::vector<osg::Vec3d>*     vectorPoints) const;
+
+        //! initial setup - override to provide custom setup
+        void init();
+
+        static SpatialReference* createFromKey(const Key& key);
+
+        friend class Registry;
+    };
+}
+
+
+namespace std {
+    // std::hash specialization for SpatialReference::Key
+    template<> struct hash<osgEarth::SpatialReference::Key> {
+        inline size_t operator()(const osgEarth::SpatialReference::Key& value) const {
+            return value.hash;
+        }
+    };
+}

@@ -31,7 +31,8 @@ namespace osgEarth
      * model names and create one instanced batch per model. MatrixTransforms in
      * the source graph are folded into the instance transforms. Each instance
      * may also specify a [minRange, maxRange) eye-distance interval in metres;
-     * omitted ranges are always visible.
+     * omitted ranges are always visible. The RGB tint multiplies the model's
+     * existing vertex/material/texture color and defaults to white.
      */
     class OSGEARTH_EXPORT KitNode : public osg::Group
     {
@@ -45,6 +46,7 @@ namespace osgEarth
             //! Eye-distance visibility interval in metres: [minRange, maxRange).
             float minRange = 0.0f;
             float maxRange = std::numeric_limits<float>::max();
+            osg::Vec3f tint = osg::Vec3f(1.0f, 1.0f, 1.0f);
 
             Instance() = default;
 
@@ -54,13 +56,15 @@ namespace osgEarth
                 const osg::Quat& inRotation = osg::Quat(),
                 const osg::Vec3f& inScale = osg::Vec3f(1.0f, 1.0f, 1.0f),
                 float inMinRange = 0.0f,
-                float inMaxRange = std::numeric_limits<float>::max()) :
+                float inMaxRange = std::numeric_limits<float>::max(),
+                const osg::Vec3f& inTint = osg::Vec3f(1.0f, 1.0f, 1.0f)) :
                 model(inModel),
                 position(inPosition),
                 rotation(inRotation),
                 scale(inScale),
                 minRange(inMinRange),
-                maxRange(inMaxRange) { }
+                maxRange(inMaxRange),
+                tint(inTint) { }
         };
 
         using Instances = std::vector<Instance>;
@@ -77,6 +81,7 @@ namespace osgEarth
             osg::Vec3f scale = osg::Vec3f(1.0f, 1.0f, 1.0f);
             float minRange = 0.0f;
             float maxRange = std::numeric_limits<float>::max();
+            osg::Vec3f tint = osg::Vec3f(1.0f, 1.0f, 1.0f);
             std::vector<osg::Vec3f> positions;
         };
 
@@ -94,7 +99,8 @@ namespace osgEarth
             const osg::Quat& rotation = osg::Quat(),
             const osg::Vec3f& scale = osg::Vec3f(1.0f, 1.0f, 1.0f),
             float minRange = 0.0f,
-            float maxRange = std::numeric_limits<float>::max());
+            float maxRange = std::numeric_limits<float>::max(),
+            const osg::Vec3f& tint = osg::Vec3f(1.0f, 1.0f, 1.0f));
 
         void clearInstances();
         void setInstances(Instances&& values);
@@ -146,10 +152,13 @@ namespace osgEarth
             std::size_t visibleBytes = 0u;
             //! Persistent source-model geometry drawables owned by the renderer.
             unsigned drawables = 0u;
-            //! Allocated transient instance-ring storage across GL contexts.
+            //! Allocated resident-arena and transient-ring storage across GL contexts.
             std::size_t ringBytes = 0u;
             //! Cumulative waits for an in-flight ring slot belonging to this model.
             std::uint64_t ringStalls = 0u;
+            //! Cumulative source uploads and resident/layout cache reuses.
+            std::uint64_t ringUploads = 0u;
+            std::uint64_t ringReuses = 0u;
         };
 
         Kit();
@@ -190,10 +199,13 @@ namespace osgEarth
         //! Instances discarded in the most recently collected frame at the cap.
         std::size_t getNumDroppedInstances(const osg::Camera* camera) const;
         std::size_t getNumDroppedInstances() const;
-        //! Current transient instance-ring allocation across active GL contexts.
+        //! Current resident-arena and transient-ring allocation across GL contexts.
         std::size_t getInstanceRingBytes() const;
         //! Number of times slot reuse had to wait for an in-flight GPU frame.
         std::uint64_t getInstanceRingStallCount() const;
+        //! Compact surviving instances with a compute shader before drawing.
+        void setGPUCullingEnabled(bool value);
+        bool getGPUCullingEnabled() const;
         const std::string& getLastError() const { return _lastError; }
         void setInstanceChunkSize(float meters) { _instanceChunkSize = meters; }
         float getInstanceChunkSize() const { return _instanceChunkSize; }

@@ -19,6 +19,13 @@ Ke 0.0312 0.0306 0.0300
 Ks 0.02 0.02 0.02
 Ns 8.0
 illum 2
+newmtl impostor_residential
+Kd 0.7200 0.6200 0.4800
+Ka 0.3240 0.2790 0.2160
+Ke 0.0432 0.0372 0.0288
+Ks 0.02 0.02 0.02
+Ns 8.0
+illum 2
 newmtl impostor_roof
 Kd 0.4600 0.4800 0.5100
 Ka 0.2070 0.2160 0.2295

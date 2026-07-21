@@ -17,6 +17,7 @@ layout(std430, binding = 28) readonly buffer oe_KitBatchBuffer
 };
 
 vec3 vp_Normal;
+vec4 vp_Color;
 
 vec3 oe_Kit_rotate(vec4 q, vec3 v)
 {
@@ -48,8 +49,18 @@ void oe_kit_collected_model(inout vec4 vertexModel)
 
     vec3 instancePosition =
         positionDecode.xyz + oe_Kit_position * positionStepRange.xyz;
-    vec3 instanceScale =
-        scaleDecode.xyz + oe_Kit_scale * scaleStep.xyz;
+    // RGB565 shares the low bits of the packed scale words. This preserves
+    // the original 20-byte record while still spanning the complete RGB gamut.
+    uvec3 packedScaleTint = uvec3(round(oe_Kit_scale));
+    vec3 instanceScale = scaleDecode.xyz + vec3(
+        packedScaleTint.x >> 5u,
+        packedScaleTint.y >> 6u,
+        packedScaleTint.z >> 5u) * scaleStep.xyz;
+    vec3 instanceTint = vec3(
+        float(packedScaleTint.x & 31u) * (1.0 / 31.0),
+        float(packedScaleTint.y & 63u) * (1.0 / 63.0),
+        float(packedScaleTint.z & 31u) * (1.0 / 31.0));
+    vp_Color.rgb *= instanceTint;
 
     vec3 localVertex = oe_Kit_rotate(
         oe_Kit_rotation, instanceScale * vertexModel.xyz) + instancePosition;

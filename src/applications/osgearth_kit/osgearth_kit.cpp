@@ -62,14 +62,21 @@
 #endif
 #include <osgEarth/TMS>
 
+#include <osg/Geode>
+#include <osg/BlendFunc>
+#include <osg/Geometry>
 #include <osg/LOD>
 #include <osg/MatrixTransform>
+#include <osg/PolygonOffset>
+#include <osg/Texture2D>
 #include <osgDB/Options>
 #include <osgDB/ReadFile>
 #include <osgDB/Registry>
 #include <osgDB/WriteFile>
 #include <osgViewer/Viewer>
 #include <osgViewer/ViewerEventHandlers>
+
+#include <osgParticle/SmokeEffect>
 
 #include <algorithm>
 #include <array>
@@ -92,6 +99,216 @@ namespace fs = std::filesystem;
 
 namespace
 {
+    class SmokeDrawCallback : public osg::Drawable::DrawCallback
+    {
+    public:
+        void drawImplementation(
+            osg::RenderInfo& renderInfo,
+            const osg::Drawable* drawable) const override
+        {
+            drawable->drawImplementation(renderInfo);
+
+            // ParticleSystem's GL3 implementation disables depth writes but,
+            // unlike its compatibility path, cannot use glPopAttrib to restore
+            // them. Its StateSet expects the default write-enabled state.
+            glDepthMask(GL_TRUE);
+        }
+    };
+
+    class RoadPolygonOffsetVisitor : public osg::NodeVisitor
+    {
+    public:
+        RoadPolygonOffsetVisitor() :
+            osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+        {
+        }
+
+        void apply(osg::Geode& geode) override
+        {
+            // The source OBJ names this group explicitly, so arbitrary future
+            // content in the generic companion scene remains unaffected.
+            if (geode.getName().compare(0u, 6u, "roads:") == 0)
+            {
+                geode.getOrCreateStateSet()->setAttributeAndModes(
+                    new osg::PolygonOffset(-1.0f, -1.0f),
+                    osg::StateAttribute::ON);
+            }
+            traverse(geode);
+        }
+    };
+
+    class SmokeStackMarkerVisitor : public osg::NodeVisitor
+    {
+    public:
+        SmokeStackMarkerVisitor() :
+            osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+        {
+        }
+
+        void apply(osg::Geode& geode) override
+        {
+            if (geode.getName().compare(0u, 13u, "smoke_stacks:") == 0)
+            {
+                for (unsigned i = 0u; i < geode.getNumDrawables(); ++i)
+                {
+                    const osg::Geometry* geometry =
+                        dynamic_cast<const osg::Geometry*>(geode.getDrawable(i));
+                    if (!geometry)
+                        continue;
+
+                    if (const auto* vertices =
+                        dynamic_cast<const osg::Vec3Array*>(geometry->getVertexArray()))
+                    {
+                        _positions.insert(
+                            _positions.end(), vertices->begin(), vertices->end());
+                    }
+                    else if (const auto* vertices =
+                        dynamic_cast<const osg::Vec3dArray*>(geometry->getVertexArray()))
+                    {
+                        for (const osg::Vec3d& vertex : *vertices)
+                            _positions.emplace_back(
+                                static_cast<float>(vertex.x()),
+                                static_cast<float>(vertex.y()),
+                                static_cast<float>(vertex.z()));
+                    }
+                }
+
+                // The point geometry is authored metadata. The actual smoke
+                // effects replace it in the loaded generic companion scene.
+                geode.setNodeMask(0u);
+            }
+            traverse(geode);
+        }
+
+        const std::vector<osg::Vec3>& positions() const { return _positions; }
+
+    private:
+        std::vector<osg::Vec3> _positions;
+    };
+
+    osg::StateSet* getSmokeParticleStateSet(const std::string& textureFile)
+    {
+        // Every paged smoke effect starts with this shared immutable render
+        // state. ShaderGenerator converts it to the same GL3 VirtualProgram
+        // pipeline as the rest of the scene, avoiding osgParticle's legacy
+        // helper shaders and their compatibility-only declarations.
+        static osg::ref_ptr<osg::StateSet> stateSet = [&textureFile]()
+        {
+            osg::ref_ptr<osg::StateSet> result = new osg::StateSet();
+            result->setName("Shared Kit smoke particle state");
+            result->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);
+            result->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
+            result->setMode(GL_LIGHTING, osg::StateAttribute::OFF);
+
+            osg::ref_ptr<osg::Texture2D> texture = new osg::Texture2D();
+            texture->setName("Shared Kit smoke sprite");
+            texture->setImage(osgDB::readRefImageFile(textureFile));
+            texture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
+            texture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
+            texture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
+            texture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
+            result->setTextureAttributeAndModes(
+                0, texture.get(), osg::StateAttribute::ON);
+
+            osg::ref_ptr<osg::BlendFunc> blend = new osg::BlendFunc(
+                osg::BlendFunc::SRC_ALPHA,
+                osg::BlendFunc::ONE_MINUS_SRC_ALPHA);
+            result->setAttributeAndModes(blend.get(), osg::StateAttribute::ON);
+            return result;
+        }();
+        return stateSet.get();
+    }
+
+    unsigned installSmokeStacks(osg::Node* scene, const std::string& textureFile)
+    {
+        osg::Group* group = scene ? scene->asGroup() : nullptr;
+        if (!group)
+            return 0u;
+
+        SmokeStackMarkerVisitor markers;
+        scene->accept(markers);
+        unsigned index = 0u;
+        for (const osg::Vec3& position : markers.positions())
+        {
+            osg::ref_ptr<osgParticle::SmokeEffect> smoke =
+                new osgParticle::SmokeEffect(false);
+            smoke->setName("Kit rooftop smoke " + std::to_string(index++));
+            smoke->setTextureFileName(textureFile);
+            smoke->setPosition(position);
+            smoke->setScale(14.0f);
+            smoke->setIntensity(1.3f);
+            smoke->setParticleDuration(36.0);
+            smoke->setWind(osg::Vec3(1.4f, 0.35f, 0.8f));
+            smoke->buildEffect();
+
+            if (osgParticle::ParticleSystem* particles = smoke->getParticleSystem())
+            {
+                // OSG expands each smoke puff into two triangles. Keep that
+                // GL3-safe geometry path and let osgEarth's ShaderGenerator
+                // compose its shared state instead of using OSG's legacy
+                // setDefaultAttributesUsingShaders() compatibility program.
+                particles->setUseVertexArray(false);
+                particles->setUseShaders(false);
+                particles->setDrawCallback(new SmokeDrawCallback());
+                particles->setStateSet(getSmokeParticleStateSet(textureFile));
+                particles->getDefaultParticleTemplate().setAlphaRange(
+                    osgParticle::rangef(0.35f, 1.0f));
+                particles->setEstimatedMaxNumOfParticles(160);
+                particles->setVisibilityDistance(6000.0);
+            }
+            if (osgParticle::Emitter* emitter = smoke->getEmitter())
+            {
+                // SmokeEffect assumes its position is in the world frame.
+                // These effects live below a geocentric tile placement, so
+                // keep emitter and particle-system coordinates in that same
+                // local ENU frame instead.
+                emitter->setReferenceFrame(
+                    osgParticle::ParticleProcessor::RELATIVE_RF);
+                emitter->setEndless(true);
+            }
+
+            group->addChild(smoke.get());
+        }
+        return index;
+    }
+
+    class SmokeParticleStatsVisitor : public osg::NodeVisitor
+    {
+    public:
+        SmokeParticleStatsVisitor() :
+            osg::NodeVisitor(TRAVERSE_ALL_CHILDREN) { }
+
+        void apply(osg::Geode& geode) override
+        {
+            for (unsigned i = 0u; i < geode.getNumDrawables(); ++i)
+            {
+                const auto* particles = dynamic_cast<const osgParticle::ParticleSystem*>(
+                    geode.getDrawable(i));
+                if (particles)
+                {
+                    ++systems;
+                    allocated += particles->numParticles();
+                    alive += particles->numParticles() - particles->numDeadParticles();
+                    for (int particleIndex = 0;
+                         particleIndex < particles->numParticles();
+                         ++particleIndex)
+                    {
+                        const osgParticle::Particle* particle =
+                            particles->getParticle(particleIndex);
+                        if (particle && particle->isAlive())
+                            localBounds.expandBy(particle->getPosition());
+                    }
+                }
+            }
+            traverse(geode);
+        }
+
+        unsigned systems = 0u;
+        unsigned allocated = 0u;
+        unsigned alive = 0u;
+        osg::BoundingBox localBounds;
+    };
+
     class ScreenshotWriter :
         public osgViewer::ScreenCaptureHandler::CaptureOperation
     {
@@ -135,10 +352,14 @@ namespace
             std::size_t totalBatches = 0u;
             unsigned activeModels = 0u;
             unsigned activeDrawables = 0u;
+            std::uint64_t ringUploads = 0u;
+            std::uint64_t ringReuses = 0u;
             for (const Kit::ModelStats& model : models)
             {
                 totalInstances += model.instances;
                 totalBatches += model.batches;
+                ringUploads += model.ringUploads;
+                ringReuses += model.ringReuses;
                 if (model.instances > 0u)
                 {
                     ++activeModels;
@@ -149,19 +370,31 @@ namespace
             ImGui::SetNextWindowSize(ImVec2(760.0f, 430.0f), ImGuiCond_FirstUseEver);
             if (ImGui::Begin(name(), visible()))
             {
-                ImGui::Text("Visible instances: %llu",
+                ImGui::Text("Submitted instances: %llu",
                     static_cast<unsigned long long>(totalInstances));
                 ImGui::SameLine();
                 ImGui::Text("  Active models: %u / %u",
                     activeModels, static_cast<unsigned>(models.size()));
-                ImGui::Text("Visible batches: %llu   Active geometry drawables: %u",
+                ImGui::Text("Submitted batches: %llu   Active geometry drawables: %u",
                     static_cast<unsigned long long>(totalBatches), activeDrawables);
 
-                ImGui::Text("Transient ring: %.1f MiB   GPU slot waits: %llu",
+                bool gpuCulling = _kit->getGPUCullingEnabled();
+                if (ImGui::Checkbox("GPU per-instance culling", &gpuCulling))
+                    _kit->setGPUCullingEnabled(gpuCulling);
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Compute-shader frustum/range culling compacts submitted instances before drawing");
+                }
+
+                ImGui::Text("Instance GPU storage: %.1f MiB   GPU slot waits: %llu",
                     static_cast<double>(_kit->getInstanceRingBytes()) /
                         (1024.0 * 1024.0),
                     static_cast<unsigned long long>(
                         _kit->getInstanceRingStallCount()));
+                ImGui::Text("Source uploads: %llu   Resident/layout reuses: %llu",
+                    static_cast<unsigned long long>(ringUploads),
+                    static_cast<unsigned long long>(ringReuses));
 
                 const std::size_t dropped =
                     _kit->getNumDroppedInstances(ri.getCurrentCamera());
@@ -193,7 +426,7 @@ namespace
                     ImGuiTableFlags_Resizable |
                     ImGuiTableFlags_ScrollY |
                     ImGuiTableFlags_SizingFixedFit;
-                if (ImGui::BeginTable("Kit models", 7, flags, ImVec2(0.0f, 0.0f)))
+                if (ImGui::BeginTable("Kit models", 8, flags, ImVec2(0.0f, 0.0f)))
                 {
                     ImGui::TableSetupScrollFreeze(0, 1);
                     ImGui::TableSetupColumn("Model", ImGuiTableColumnFlags_WidthStretch);
@@ -201,8 +434,9 @@ namespace
                     ImGui::TableSetupColumn("Batches");
                     ImGui::TableSetupColumn("Geometry");
                     ImGui::TableSetupColumn("Visible data");
-                    ImGui::TableSetupColumn("Ring");
+                    ImGui::TableSetupColumn("GPU storage");
                     ImGui::TableSetupColumn("Waits");
+                    ImGui::TableSetupColumn("Upload / reuse");
                     ImGui::TableHeadersRow();
 
                     for (const Kit::ModelStats& model : models)
@@ -232,6 +466,10 @@ namespace
                         ImGui::TableNextColumn();
                         ImGui::Text("%llu",
                             static_cast<unsigned long long>(model.ringStalls));
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%llu / %llu",
+                            static_cast<unsigned long long>(model.ringUploads),
+                            static_cast<unsigned long long>(model.ringReuses));
                     }
                     ImGui::EndTable();
                 }
@@ -320,6 +558,7 @@ namespace
     {
         std::string source;
         std::string impostorSource;
+        std::string sceneSource;
     };
 
     struct LoadedCity
@@ -330,6 +569,7 @@ namespace
         double loadMilliseconds = 0.0;
         double buildMilliseconds = 0.0;
         double impostorLoadMilliseconds = 0.0;
+        double sceneLoadMilliseconds = 0.0;
     };
 
     bool loadCity(
@@ -337,7 +577,8 @@ namespace
         Kit* kit,
         bool impostorsOnly,
         LoadedCity& loaded,
-        bool loadImpostor = true)
+        bool loadImpostor = true,
+        bool loadScene = true)
     {
         loaded = LoadedCity();
 
@@ -399,6 +640,33 @@ namespace
 
             Registry::shaderGenerator().run(loaded.impostor.get());
         }
+
+        if (loadScene && !impostorsOnly)
+        {
+            const auto sceneStart = std::chrono::steady_clock::now();
+            osg::ref_ptr<osg::Node> scene =
+                osgDB::readRefNodeFile(city.sceneSource, options.get());
+            const auto sceneEnd = std::chrono::steady_clock::now();
+            loaded.sceneLoadMilliseconds = std::chrono::duration<double, std::milli>(
+                sceneEnd - sceneStart).count();
+
+            if (!scene.valid())
+            {
+                OE_WARN << LC << "Failed to load " << city.sceneSource << std::endl;
+                return false;
+            }
+
+            // This is intentionally a generic, ordinary scene-graph companion.
+            // It may contain lines, polygons, and arbitrary raw nodes in future data.
+            const fs::path smokeTexture = fs::absolute(
+                fs::path(city.sceneSource).parent_path().parent_path() /
+                "textures" / "smoke_particle.png").lexically_normal();
+            installSmokeStacks(scene.get(), smokeTexture.string());
+            RoadPolygonOffsetVisitor roadOffset;
+            scene->accept(roadOffset);
+            Registry::shaderGenerator().run(scene.get());
+            loaded.batches->addChild(scene.get());
+        }
         return true;
     }
 
@@ -422,7 +690,8 @@ namespace
             setMinLevel(CITY_LEVEL);
             setMaxLevel(CITY_LEVEL);
             setAdditive(false);
-            setRangeFactor(12.0f);
+            setRangeFactor(16);
+
             setUsePayloadBoundsForChildren(false);
             setCreatePagedNodeFunction([](const TileKey&)
             {
@@ -647,8 +916,15 @@ namespace
             << "  --stress-paging    Fly continuously across L14 tiles during a fixed-frame test\n"
             << "  --impostors-only   Load and display only low-poly city impostors\n"
             << "  --lod-range <m>    High-detail instance range (default 3000 metres)\n"
+            << "  --view-pitch <deg> Initial/stress-flight camera pitch (default -48)\n"
+            << "  --view-range <m>   Initial/stress-flight camera range (default 2100)\n"
+            << "  --view-longitude <deg> Initial camera longitude (default -74.0060)\n"
+            << "  --view-latitude <deg>  Initial camera latitude (default 40.7128)\n"
             << "  --chunk-size <m>   Spatial Kit batch chunk size, 0 disables (default 512 metres)\n"
             << "  --max-instances <n> Visible-instance ring budget; 0 is uncapped (default 0)\n"
+            << "  --gpu-culling      Enable experimental compute-shader per-instance compaction\n"
+            << "  --no-gpu-culling   Explicitly disable compute culling (default)\n"
+            << "  --gpu-stats        Print averaged GPU draw time for fixed-frame runs\n"
             << "  --sky              Use the default sky quality preset\n"
             << "  --sky-low          Use the low-quality sky preset\n"
             << "  --sky-medium       Use the medium-quality sky preset\n"
@@ -767,16 +1043,24 @@ namespace
             const fs::path sourcePath(file);
             const fs::path impostorPath = sourcePath.parent_path() /
                 (sourcePath.stem().string() + "_impostor.osgb");
+            const fs::path scenePath = sourcePath.parent_path() /
+                (sourcePath.stem().string() + "_scene.osgb");
             if (!fs::is_regular_file(impostorPath))
             {
                 OE_WARN << LC << "Ignoring " << file << " because "
                     << impostorPath.string() << " is missing" << std::endl;
                 continue;
             }
-
+            if (!fs::is_regular_file(scenePath))
+            {
+                OE_WARN << LC << "Ignoring " << file << " because "
+                    << scenePath.string() << " is missing" << std::endl;
+                continue;
+            }
             CityPrototype city;
             city.source = file;
             city.impostorSource = impostorPath.string();
+            city.sceneSource = scenePath.string();
             result.push_back(std::move(city));
         }
         return result;
@@ -797,6 +1081,10 @@ int main(int argc, char** argv)
     std::string screenshotFile;
     int frameLimit = 0;
     double highDetailRange = 3000.0;
+    double viewPitch = -48.0;
+    double viewRange = 2100.0;
+    double viewLongitude = -74.0060;
+    double viewLatitude = 40.7128;
     double instanceChunkSize = 512.0;
     unsigned maxVisibleInstances = 0u;
     arguments.read("--kit", kitFile);
@@ -805,17 +1093,30 @@ int main(int argc, char** argv)
     arguments.read("--frames", frameLimit);
     arguments.read("--screenshot", screenshotFile);
     arguments.read("--lod-range", highDetailRange);
+    arguments.read("--view-pitch", viewPitch);
+    arguments.read("--view-range", viewRange);
+    arguments.read("--view-longitude", viewLongitude);
+    arguments.read("--view-latitude", viewLatitude);
     arguments.read("--chunk-size", instanceChunkSize);
     arguments.read("--max-instances", maxVisibleInstances);
     if (highDetailRange <= 0.0)
         return usage(argv[0], "--lod-range must be greater than zero");
     if (instanceChunkSize < 0.0)
         return usage(argv[0], "--chunk-size must be zero or greater");
+    if (viewRange <= 0.0)
+        return usage(argv[0], "--view-range must be greater than zero");
+    if (viewLongitude < -180.0 || viewLongitude > 180.0 ||
+        viewLatitude < -90.0 || viewLatitude > 90.0)
+        return usage(argv[0], "Initial view longitude/latitude is invalid");
     if (!screenshotFile.empty() && frameLimit <= 0)
         frameLimit = 120;
     const bool noImagery = arguments.read("--no-imagery");
     const bool validateOnly = arguments.read("--validate-only");
     const bool stressPaging = arguments.read("--stress-paging");
+    bool gpuCulling = arguments.read("--gpu-culling");
+    if (arguments.read("--no-gpu-culling"))
+        gpuCulling = false;
+    const bool gpuStats = arguments.read("--gpu-stats");
     bool impostorsOnly = arguments.read("--impostors-only");
     // Accept the common alternate spelling without leaving an unconsumed
     // command-line argument when both spellings are present.
@@ -838,6 +1139,7 @@ int main(int argc, char** argv)
             return usage(argv[0], kit->getLastError().c_str());
         kit->setInstanceChunkSize(static_cast<float>(instanceChunkSize));
         kit->setMaxVisibleInstances(maxVisibleInstances);
+        kit->setGPUCullingEnabled(gpuCulling);
     }
 
     const std::vector<std::string> cityFiles = findCities(cityDirectory);
@@ -857,7 +1159,9 @@ int main(int argc, char** argv)
         OE_NOTICE << LC << "Loaded " << kit->getNumModels()
             << " named models and found " << cities.size()
             << " tile-owned city prototypes; Kit chunk size "
-            << kit->getInstanceChunkSize() << " m" << std::endl;
+            << kit->getInstanceChunkSize() << " m; GPU instance culling "
+            << (kit->getGPUCullingEnabled() ? "enabled" : "disabled")
+            << std::endl;
     }
 
     if (validateOnly)
@@ -873,7 +1177,7 @@ int main(int argc, char** argv)
         std::cout << "Validated " << loaded.stats.instances << " instances, "
             << loaded.stats.batches << " named-model batches, " << loaded.stats.drawables
             << " instanced drawables, " << loaded.stats.missingModels
-            << " missing models, and a resident city impostor; LOD range "
+            << " missing models, a high-detail companion scene, and a resident city impostor; LOD range "
             << highDetailRange << " m, chunk size "
             << kit->getInstanceChunkSize() << " m\n";
         return loaded.stats.instances > 0u && loaded.stats.missingModels == 0u ? 0 : 2;
@@ -924,7 +1228,9 @@ int main(int argc, char** argv)
     pager->setPageHighDetail(!directTile);
     if (directTile)
     {
-        GeoPoint startup(SpatialReference::get("wgs84"), -74.0060, 40.7128, 0.0, ALTMODE_ABSOLUTE);
+        GeoPoint startup(
+            SpatialReference::get("wgs84"),
+            viewLongitude, viewLatitude, 0.0, ALTMODE_ABSOLUTE);
         GeoPoint mercator = startup.transform(pager->getProfile()->getSRS());
         const TileKey key = pager->getProfile()->createTileKey(mercator.x(), mercator.y(), CITY_LEVEL);
         osg::ref_ptr<osg::Node> node = pager->createNode(key, nullptr);
@@ -969,6 +1275,8 @@ int main(int argc, char** argv)
     sky->attach(&viewer);
 
     viewer.setSceneData(sky.get());
+    if (gpuStats)
+        viewer.getCamera()->getStats()->collectStats("gpu", true);
     viewer.getCamera()->setSmallFeatureCullingPixelSize(-1.0f);
 
     osg::ref_ptr<EarthManipulator> manipulator = new EarthManipulator(arguments);
@@ -991,8 +1299,8 @@ int main(int argc, char** argv)
     viewer.realize();
     manipulator->setViewpoint(Viewpoint(
         "Kit city",
-        -74.0060, 40.7128, 0.0,
-        -28.0, -48.0, 2100.0),
+        viewLongitude, viewLatitude, 0.0,
+        -28.0, viewPitch, viewRange),
         0.0);
     if (frameLimit > 0)
     {
@@ -1045,7 +1353,7 @@ int main(int argc, char** argv)
                 manipulator->setViewpoint(Viewpoint(
                     "Kit paging stress",
                     longitude, latitude, 0.0,
-                    heading, -48.0, 2100.0), 0.0);
+                    heading, viewPitch, viewRange), 0.0);
             }
             if (screenshotCallback.valid() && frame == frameLimit - 1)
                 viewer.getCamera()->setFinalDrawCallback(screenshotCallback.get());
@@ -1093,18 +1401,74 @@ int main(int argc, char** argv)
             const std::size_t collected =
                 kit->getNumCollectedInstances();
             std::cout << "Collected " << collected
-                << " visible Kit instances in the final frame\n";
+                << " submitted Kit instances in the final frame\n";
             std::cout << "Instance ring "
                 << static_cast<double>(kit->getInstanceRingBytes()) /
                     (1024.0 * 1024.0)
                 << " MiB, dropped " << kit->getNumDroppedInstances()
                 << " instances, GPU slot waits "
                 << kit->getInstanceRingStallCount() << "\n";
+            std::vector<Kit::ModelStats> modelStats;
+            const osg::FrameStamp* finalStamp = viewer.getFrameStamp();
+            kit->getModelStats(
+                viewer.getCamera(),
+                finalStamp ? finalStamp->getFrameNumber() : 0u,
+                modelStats);
+            std::uint64_t ringUploads = 0u;
+            std::uint64_t ringReuses = 0u;
+            for (const Kit::ModelStats& model : modelStats)
+            {
+                ringUploads += model.ringUploads;
+                ringReuses += model.ringReuses;
+            }
+            std::cout << "Source uploads " << ringUploads
+                << ", resident/layout reuses " << ringReuses << "\n";
             if (collected == 0u)
             {
                 OE_WARN << LC << "No high-detail Kit instances reached the renderer"
                     << std::endl;
                 return 2;
+            }
+        }
+        SmokeParticleStatsVisitor smokeStats;
+        sky->accept(smokeStats);
+        if (smokeStats.systems > 0u)
+        {
+            std::cout << "Smoke particles " << smokeStats.alive << " alive / "
+                << smokeStats.allocated << " allocated in "
+                << smokeStats.systems << " systems";
+            if (smokeStats.localBounds.valid())
+            {
+                std::cout << "; local bounds ["
+                    << smokeStats.localBounds.xMin() << ", "
+                    << smokeStats.localBounds.yMin() << ", "
+                    << smokeStats.localBounds.zMin() << "]-["
+                    << smokeStats.localBounds.xMax() << ", "
+                    << smokeStats.localBounds.yMax() << ", "
+                    << smokeStats.localBounds.zMax() << ']';
+            }
+            std::cout << '\n';
+        }
+        if (gpuStats)
+        {
+            osg::Stats* stats = viewer.getCamera()->getStats();
+            const unsigned latest = stats->getLatestFrameNumber();
+            const unsigned end = latest > 4u ? latest - 4u : latest;
+            const unsigned sampleCount = static_cast<unsigned>(
+                std::max(1, frameLimit / 2));
+            const unsigned start = end + 1u > sampleCount ?
+                end + 1u - sampleCount : 0u;
+            double seconds = 0.0;
+            if (stats->getAveragedAttribute(
+                    start, end, "GPU draw time taken", seconds))
+            {
+                std::cout << "GPU draw time: " << seconds * 1000.0
+                    << " ms average over frames " << start << '-' << end
+                    << "\n";
+            }
+            else
+            {
+                std::cout << "GPU draw timing was unavailable\n";
             }
         }
         if (screenshotWriter.valid())

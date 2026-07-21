@@ -32,6 +32,9 @@ namespace osgEarth
         void setRotations(osg::Vec4Array* rotations);
         osg::Vec3Array* getScales() { return _scales.get(); }
         void setScales(osg::Vec3Array* scales);
+        //! RGB multipliers packed into the compact scale words at no extra cost.
+        osg::Vec3Array* getTints() { return _tints.get(); }
+        void setTints(osg::Vec3Array* tints);
         //! Reserve compact instance storage shared by all subsequently installed batches.
         void reserveInstances(std::size_t count);
         //! Quantize per-instance attributes after their floating-point bound is known.
@@ -68,6 +71,7 @@ namespace osgEarth
         osg::ref_ptr<osg::Vec3Array> _positions;
         osg::ref_ptr<osg::Vec4Array> _rotations;
         osg::ref_ptr<osg::Vec3Array> _scales;
+        osg::ref_ptr<osg::Vec3Array> _tints;
         osg::ref_ptr<osg::BufferData> _instanceBuffer;
         std::size_t _instanceOffset = 0u;
         std::size_t _instanceCount = 0u;
@@ -80,6 +84,7 @@ namespace osgEarth
         mutable osg::ref_ptr<osg::Uniform> _positionScaleUniform;
         mutable osg::ref_ptr<osg::Uniform> _scaleOffsetUniform;
         mutable osg::ref_ptr<osg::Uniform> _scaleScaleUniform;
+        mutable osg::ref_ptr<osg::Uniform> _packedScaleTintUniform;
         mutable osg::ref_ptr<osg::Uniform> _rangeUniform;
         osg::Vec3f _positionOffset = osg::Vec3f(0.0f, 0.0f, 0.0f);
         osg::Vec3f _positionScale = osg::Vec3f(1.0f, 1.0f, 1.0f);

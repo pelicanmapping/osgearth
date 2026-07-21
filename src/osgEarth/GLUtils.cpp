@@ -81,14 +81,15 @@ namespace
         void (GL_APIENTRY* MakeBufferNonResidentNV)(GLuint name);
         void (GL_APIENTRY* GetBufferParameterui64vNV)(GLenum target, GLenum pname, GLuint64* params);
 
+        void (GL_APIENTRY* CreateBuffers)(GLsizei count, GLuint* buffers);
         void (GL_APIENTRY* NamedBufferData)(GLuint name, GLsizeiptr size, const void* data, GLenum usage);
         void (GL_APIENTRY* NamedBufferSubData)(GLuint name, GLintptr offset, GLsizeiptr size, const void* data);
         void* (GL_APIENTRY* MapNamedBuffer)(GLuint name, GLbitfield access);
         void* (GL_APIENTRY* MapNamedBufferRange)(GLuint name, GLintptr offset, GLsizeiptr length, GLbitfield access);
         void (GL_APIENTRY* UnmapNamedBuffer)(GLuint name);
 
-        void (GL_APIENTRY* CopyBufferSubData)(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizei size);
-        void (GL_APIENTRY* CopyNamedBufferSubData)(GLuint readName, GLuint writeName, GLintptr readOffset, GLintptr writeOffset, GLsizei size);
+        void (GL_APIENTRY* CopyBufferSubData)(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
+        void (GL_APIENTRY* CopyNamedBufferSubData)(GLuint readName, GLuint writeName, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
         void (GL_APIENTRY* GetNamedBufferSubData)(GLuint name, GLintptr offset, GLsizei size, void*);
 
         bool useNamedBuffers;
@@ -119,6 +120,7 @@ namespace
 #if 1
                 if (version >= 4.5f)
                 {
+                    osg::setGLExtensionFuncPtr(CreateBuffers, "glCreateBuffers");
                     osg::setGLExtensionFuncPtr(NamedBufferData, "glNamedBufferData");
                     osg::setGLExtensionFuncPtr(NamedBufferSubData, "glNamedBufferSubData");
                     osg::setGLExtensionFuncPtr(MapNamedBuffer, "glMapNamedBuffer");
@@ -129,6 +131,7 @@ namespace
                 }
 #endif
                 useNamedBuffers =
+                    CreateBuffers &&
                     NamedBufferData &&
                     NamedBufferSubData;
             }
@@ -887,7 +890,12 @@ GLBuffer::GLBuffer(GLenum target, osg::State& state) :
     GLObject(GL_BUFFER, state),
     _target(target)
 {
-    ext()->glGenBuffers(1, &_name);
+    // A name from glGenBuffers does not become a buffer object until it is
+    // bound, so it is not a legal argument to direct-state-access calls.
+    if (gl.useNamedBuffers)
+        gl.CreateBuffers(1, &_name);
+    else
+        ext()->glGenBuffers(1, &_name);
     if (name() == 0)
     {
         GLenum e = glGetError();
@@ -1021,14 +1029,19 @@ GLBuffer::bufferData(GLsizei datasize, const GLvoid* data, GLbitfield flags) con
         if (alloc_size > _alloc_size)
             gl.NamedBufferData(name(), alloc_size, nullptr, flags);
 
-        gl.NamedBufferSubData(name(), 0, datasize, data);
+        // A null data pointer means allocation-only. Passing it to
+        // glNamedBufferSubData is invalid and breaks GPU-produced buffers
+        // (indirect commands, compaction output, and similar storage).
+        if (data != nullptr && datasize > 0)
+            gl.NamedBufferSubData(name(), 0, datasize, data);
     }
     else
     {
         if (alloc_size > _alloc_size)
             ext()->glBufferData(_target, alloc_size, nullptr, flags);
 
-        ext()->glBufferSubData(_target, 0, datasize, data);
+        if (data != nullptr && datasize > 0)
+            ext()->glBufferSubData(_target, 0, datasize, data);
     }
 
     _alloc_size = alloc_size;
@@ -1098,12 +1111,25 @@ GLBuffer::bufferStorage(GLsizei buffersize, GLsizei datasize, const GLvoid* data
 }
 
 void
-GLBuffer::copyBufferSubData(GLBuffer::Ptr dst, GLintptr readOffset, GLintptr writeOffset, GLsizei size) const
+GLBuffer::copyBufferSubData(GLBuffer::Ptr dst, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) const
 {
     if (gl.CopyNamedBufferSubData)
         gl.CopyNamedBufferSubData(name(), dst->name(), readOffset, writeOffset, size);
     else
-        gl.CopyBufferSubData(target(), dst->target(), readOffset, writeOffset, size);
+    {
+        // A copy needs distinct read/write bindings. Binding both objects to
+        // their normal target fails when they share that target (the common
+        // GL_ARRAY_BUFFER case) and can silently copy a buffer onto itself.
+        constexpr GLenum COPY_READ_BUFFER_TARGET = 0x8F36;
+        constexpr GLenum COPY_WRITE_BUFFER_TARGET = 0x8F37;
+        bind(COPY_READ_BUFFER_TARGET);
+        dst->bind(COPY_WRITE_BUFFER_TARGET);
+        gl.CopyBufferSubData(
+            COPY_READ_BUFFER_TARGET, COPY_WRITE_BUFFER_TARGET,
+            readOffset, writeOffset, size);
+        ext()->glBindBuffer(COPY_READ_BUFFER_TARGET, 0u);
+        ext()->glBindBuffer(COPY_WRITE_BUFFER_TARGET, 0u);
+    }
 }
 
 void

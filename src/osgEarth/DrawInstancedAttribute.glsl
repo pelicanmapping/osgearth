@@ -13,9 +13,11 @@ uniform vec3 oe_DrawInstancedAttribute_positionOffset;
 uniform vec3 oe_DrawInstancedAttribute_positionScale;
 uniform vec3 oe_DrawInstancedAttribute_scaleOffset;
 uniform vec3 oe_DrawInstancedAttribute_scaleScale;
+uniform bool oe_DrawInstancedAttribute_packedScaleTint;
 uniform vec2 oe_DrawInstancedAttribute_range;
 
 vec3 vp_Normal;
+vec4 vp_Color;
 
 vec3 rotateQuatPt(vec4 q, vec3 v)
 {
@@ -29,9 +31,24 @@ void oe_draw_instanced_attribute_VS_MODEL(inout vec4 currVertex)
     vec3 instancePosition =
         oe_DrawInstancedAttribute_positionOffset +
         oe_DrawInstancedAttribute_position * oe_DrawInstancedAttribute_positionScale;
+    vec3 encodedScale = oe_DrawInstancedAttribute_scale;
+    vec3 instanceTint = vec3(1.0);
+    if (oe_DrawInstancedAttribute_packedScaleTint)
+    {
+        uvec3 packedScaleTint = uvec3(round(encodedScale));
+        encodedScale = vec3(
+            packedScaleTint.x >> 5u,
+            packedScaleTint.y >> 6u,
+            packedScaleTint.z >> 5u);
+        instanceTint = vec3(
+            float(packedScaleTint.x & 31u) * (1.0 / 31.0),
+            float(packedScaleTint.y & 63u) * (1.0 / 63.0),
+            float(packedScaleTint.z & 31u) * (1.0 / 31.0));
+    }
     vec3 instanceScale =
         oe_DrawInstancedAttribute_scaleOffset +
-        oe_DrawInstancedAttribute_scale * oe_DrawInstancedAttribute_scaleScale;
+        encodedScale * oe_DrawInstancedAttribute_scaleScale;
+    vp_Color.rgb *= instanceTint;
     bool visible = true;
     if (oe_DrawInstancedAttribute_range.x > 0.0 ||
         oe_DrawInstancedAttribute_range.y < 3.0e38)

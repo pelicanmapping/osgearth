@@ -43,6 +43,9 @@ namespace osgEarth { namespace Util
         _sources[DrawInstancedAttribute] = @DrawInstancedAttribute.glsl@;
 
         // Scene-wide Kit instance collection
+        KitCollectedCulling = "KitCollectedCulling.glsl";
+        _sources[KitCollectedCulling] = @KitCollectedCulling.glsl@;
+
         KitCollectedInstancing = "KitCollectedInstancing.glsl";
         _sources[KitCollectedInstancing] = @KitCollectedInstancing.glsl@;
 

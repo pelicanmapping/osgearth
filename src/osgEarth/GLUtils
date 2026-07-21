@@ -404,7 +404,7 @@ namespace osgEarth
         void unmap() const;
 
         //! GPU copy this buffer to another buffer
-        void copyBufferSubData(GLBuffer::Ptr dest, GLintptr readOffset, GLintptr writeOffset, GLsizei size) const;
+        void copyBufferSubData(GLBuffer::Ptr dest, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) const;
 
         //! Read data from the buffer to the CPU
         void getBufferSubData(GLintptr offset, GLsizei size, void* ptr) const;

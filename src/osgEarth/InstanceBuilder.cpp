@@ -367,6 +367,13 @@ void InstanceBuilder::setScales(osg::Vec3Array* scales)
         scales->setVertexBufferObject(_instanceVBO.get());
 }
 
+void InstanceBuilder::setTints(osg::Vec3Array* tints)
+{
+    _instanceOffset = 0u;
+    _instanceCount = 0u;
+    _tints = tints;
+}
+
 void InstanceBuilder::setRange(const osg::Vec2f& range)
 {
     _range = range;
@@ -384,6 +391,7 @@ void InstanceBuilder::resetBatchUniforms()
     _positionScaleUniform = nullptr;
     _scaleOffsetUniform = nullptr;
     _scaleScaleUniform = nullptr;
+    _packedScaleTintUniform = nullptr;
     _rangeUniform = nullptr;
 }
 
@@ -400,6 +408,8 @@ void InstanceBuilder::createBatchUniforms() const
         "oe_DrawInstancedAttribute_scaleOffset", _scaleOffset);
     _scaleScaleUniform = new osg::Uniform(
         "oe_DrawInstancedAttribute_scaleScale", _scaleScale);
+    _packedScaleTintUniform = new osg::Uniform(
+        "oe_DrawInstancedAttribute_packedScaleTint", _instanceCount > 0u);
     _rangeUniform = new osg::Uniform(
         "oe_DrawInstancedAttribute_range", _range);
 }
@@ -409,12 +419,17 @@ bool InstanceBuilder::compressInstanceAttributes()
     if (!_positions.valid() || !_rotations.valid() || !_scales.valid() ||
         _positions->empty() ||
         _rotations->size() != _positions->size() ||
-        _scales->size() != _positions->size())
+        _scales->size() != _positions->size() ||
+        (_tints.valid() && _tints->size() != _positions->size()))
     {
         return false;
     }
 
-    auto quantization = [](const osg::Vec3Array& values, osg::Vec3f& offset, osg::Vec3f& step)
+    auto quantization = [](
+        const osg::Vec3Array& values,
+        osg::Vec3f& offset,
+        osg::Vec3f& step,
+        const osg::Vec3f& levels)
     {
         offset = values.front();
         osg::Vec3f maximum = values.front();
@@ -426,18 +441,34 @@ bool InstanceBuilder::compressInstanceAttributes()
                 maximum[component] = std::max(maximum[component], value[component]);
             }
         }
-        step = (maximum - offset) * (1.0f / 65535.0f);
+        for (unsigned component = 0u; component < 3u; ++component)
+            step[component] = (maximum[component] - offset[component]) / levels[component];
     };
-    auto encode = [](float value, float offset, float step)
+    auto encode = [](float value, float offset, float step, float maximum)
     {
         if (step <= 0.0f)
             return static_cast<unsigned short>(0u);
         const float quantized = std::round((value - offset) / step);
-        return static_cast<unsigned short>(std::max(0.0f, std::min(65535.0f, quantized)));
+        return static_cast<unsigned short>(std::max(0.0f, std::min(maximum, quantized)));
+    };
+    auto encodeTint = [](float value, unsigned maximum)
+    {
+        if (!std::isfinite(value))
+            value = 1.0f;
+        const float quantized = std::round(
+            std::max(0.0f, std::min(1.0f, value)) * static_cast<float>(maximum));
+        return static_cast<unsigned short>(quantized);
     };
 
-    quantization(*_positions, _positionOffset, _positionScale);
-    quantization(*_scales, _scaleOffset, _scaleScale);
+    quantization(
+        *_positions, _positionOffset, _positionScale,
+        osg::Vec3f(65535.0f, 65535.0f, 65535.0f));
+    // The low scale bits carry RGB565 without growing the 20-byte record:
+    // X = 11-bit scale + 5-bit red, Y = 10-bit scale + 6-bit green,
+    // Z = 11-bit scale + 5-bit blue.
+    quantization(
+        *_scales, _scaleOffset, _scaleScale,
+        osg::Vec3f(2047.0f, 1023.0f, 2047.0f));
 
     const std::size_t count = _positions->size();
     osgEarth::PackedInstanceBuffer* buffer =
@@ -449,9 +480,9 @@ bool InstanceBuilder::compressInstanceAttributes()
         const osg::Vec3f& position = (*_positions)[i];
         osgEarth::PackedInstance packed;
         packed.position.set(
-            encode(position.x(), _positionOffset.x(), _positionScale.x()),
-            encode(position.y(), _positionOffset.y(), _positionScale.y()),
-            encode(position.z(), _positionOffset.z(), _positionScale.z()));
+            encode(position.x(), _positionOffset.x(), _positionScale.x(), 65535.0f),
+            encode(position.y(), _positionOffset.y(), _positionScale.y(), 65535.0f),
+            encode(position.z(), _positionOffset.z(), _positionScale.z(), 65535.0f));
 
         const osg::Vec4f& rotation = (*_rotations)[i];
         auto encodeRotation = [](float value)
@@ -465,10 +496,18 @@ bool InstanceBuilder::compressInstanceAttributes()
             encodeRotation(rotation.z()), encodeRotation(rotation.w()));
 
         const osg::Vec3f& scale = (*_scales)[i];
+        const osg::Vec3f tint = _tints.valid() ?
+            (*_tints)[i] : osg::Vec3f(1.0f, 1.0f, 1.0f);
         packed.scale.set(
-            encode(scale.x(), _scaleOffset.x(), _scaleScale.x()),
-            encode(scale.y(), _scaleOffset.y(), _scaleScale.y()),
-            encode(scale.z(), _scaleOffset.z(), _scaleScale.z()));
+            static_cast<unsigned short>(
+                (encode(scale.x(), _scaleOffset.x(), _scaleScale.x(), 2047.0f) << 5u) |
+                encodeTint(tint.x(), 31u)),
+            static_cast<unsigned short>(
+                (encode(scale.y(), _scaleOffset.y(), _scaleScale.y(), 1023.0f) << 6u) |
+                encodeTint(tint.y(), 63u)),
+            static_cast<unsigned short>(
+                (encode(scale.z(), _scaleOffset.z(), _scaleScale.z(), 2047.0f) << 5u) |
+                encodeTint(tint.z(), 31u)));
         buffer->append(packed);
     }
     buffer->dirty();
@@ -482,9 +521,12 @@ bool InstanceBuilder::compressInstanceAttributes()
         _rotations->setVertexBufferObject(nullptr);
     if (_scales->getVertexBufferObject() == _instanceVBO.get())
         _scales->setVertexBufferObject(nullptr);
+    if (_tints.valid() && _tints->getVertexBufferObject() == _instanceVBO.get())
+        _tints->setVertexBufferObject(nullptr);
     _positions = nullptr;
     _rotations = nullptr;
     _scales = nullptr;
+    _tints = nullptr;
     _instancedBoundingBox.init();
     return true;
 }
@@ -541,9 +583,9 @@ void InstanceBuilder::setBaseBoundingBox(const osg::BoundingBox& bounds) const
         if (packed)
         {
             scale.set(
-                _scaleOffset.x() + packed->scale.x() * _scaleScale.x(),
-                _scaleOffset.y() + packed->scale.y() * _scaleScale.y(),
-                _scaleOffset.z() + packed->scale.z() * _scaleScale.z());
+                _scaleOffset.x() + (packed->scale.x() >> 5u) * _scaleScale.x(),
+                _scaleOffset.y() + (packed->scale.y() >> 6u) * _scaleScale.y(),
+                _scaleOffset.z() + (packed->scale.z() >> 5u) * _scaleScale.z());
         }
         else if (_scales.valid() && i < _scales->size())
         {
@@ -663,6 +705,7 @@ void InstanceBuilder::installInstancing(
     geometryStateSet->addUniform(_positionScaleUniform.get());
     geometryStateSet->addUniform(_scaleOffsetUniform.get());
     geometryStateSet->addUniform(_scaleScaleUniform.get());
+    geometryStateSet->addUniform(_packedScaleTintUniform.get());
     geometryStateSet->addUniform(_rangeUniform.get());
 
     if (!_instancedBoundingBox.valid())

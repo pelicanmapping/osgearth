@@ -17,6 +17,14 @@ CITIES = ROOT / "cities"
 MAX_INSTANCE_RANGE = 3.402823466e38
 WINDOW_MAX_RANGE = 1500.0
 
+# Bounds measured from models/building.osgb. The residential generator keeps
+# the model's lowest vertex on the local ground plane and uses its footprint
+# to leave a small but visible yard between neighboring houses.
+RESIDENTIAL_MIN_Z = -1.68484
+RESIDENTIAL_HALF_WIDTH = 10.15
+RESIDENTIAL_HALF_DEPTH = 9.10
+RESIDENTIAL_HEIGHT = 9.78
+
 
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,6 +199,119 @@ class ImpostorBuilder:
         return "\n".join(lines) + "\n"
 
 
+class CitySceneBuilder:
+    """Generic per-city scene companion for non-instanced OSG geometry."""
+
+    def __init__(self, material_file: str, name: str):
+        self.material_file = material_file
+        self.name = name
+        self.vertices: list[tuple[float, float, float]] = []
+        self.road_quads: list[tuple[tuple[float, float, float], ...]] = []
+        self.smoke_positions: list[tuple[float, float, float]] = []
+        self.span_count = 0
+        self.segment_count = 0
+
+    def add_powerline_span(self, start, end, sag: float, segments: int = 24) -> None:
+        def point(t: float):
+            return (
+                start[0] + (end[0] - start[0]) * t,
+                start[1] + (end[1] - start[1]) * t,
+                start[2] + (end[2] - start[2]) * t - 4.0 * sag * t * (1.0 - t),
+            )
+
+        for segment in range(segments):
+            self.vertices.append(point(segment / segments))
+            self.vertices.append(point((segment + 1) / segments))
+        self.span_count += 1
+        self.segment_count += segments
+
+    def add_road_quad(
+        self,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        z: float = 5.0,
+    ) -> None:
+        """Add one upward-facing indexed quad in the local ENU frame."""
+        self.road_quads.append((
+            (x0, y0, z),
+            (x1, y0, z),
+            (x1, y1, z),
+            (x0, y1, z),
+        ))
+
+    def add_smoke_stack(self, position) -> None:
+        self.smoke_positions.append(position)
+
+    def text(self) -> str:
+        lines = [f"mtllib {self.material_file}", f"o {self.name}"]
+        if self.vertices:
+            lines.append("g powerlines")
+            lines.append("usemtl powerline")
+            lines.extend(
+                f"v {x:.3f} {y:.3f} {z:.3f}"
+                for x, y, z in (to_obj_coordinates(vertex) for vertex in self.vertices)
+            )
+            # OSG's OBJ reader imports line elements as GL_LINES. Each adjacent
+            # pair is therefore one segment. Keep source lines short enough for
+            # the plugin's fixed-size parser; osgconv still combines them into
+            # one ordinary scene-graph Geometry in the resulting OSGB.
+            vertices_per_element = 512
+            for first in range(1, len(self.vertices) + 1, vertices_per_element):
+                last = min(first + vertices_per_element, len(self.vertices) + 1)
+                lines.append("l " + " ".join(str(index) for index in range(first, last)))
+
+        if self.road_quads:
+            # Give every quad its own four vertices so the OBJ importer can
+            # collapse the complete road grid into one ordinary indexed
+            # Geometry. World-space UVs keep the asphalt pattern continuous
+            # across independently authored strips and intersections.
+            first_road_vertex = len(self.vertices) + 1
+            texture_repeat_metres = 12.0
+            lines.append("g roads")
+            lines.append("usemtl road_surface")
+            for quad in self.road_quads:
+                lines.extend(
+                    f"v {x:.3f} {y:.3f} {z:.3f}"
+                    for x, y, z in (to_obj_coordinates(vertex) for vertex in quad)
+                )
+            for quad in self.road_quads:
+                lines.extend(
+                    f"vt {vertex[0] / texture_repeat_metres:.6f} "
+                    f"{vertex[1] / texture_repeat_metres:.6f}"
+                    for vertex in quad
+                )
+            road_normal = to_obj_coordinates((0.0, 0.0, 1.0))
+            lines.append(
+                f"vn {road_normal[0]:.1f} {road_normal[1]:.1f} {road_normal[2]:.1f}")
+            for quad_index in range(len(self.road_quads)):
+                vertex = first_road_vertex + quad_index * 4
+                texcoord = 1 + quad_index * 4
+                lines.append(
+                    f"f {vertex}/{texcoord}/1 {vertex+1}/{texcoord+1}/1 "
+                    f"{vertex+2}/{texcoord+2}/1")
+                lines.append(
+                    f"f {vertex}/{texcoord}/1 {vertex+2}/{texcoord+2}/1 "
+                    f"{vertex+3}/{texcoord+3}/1")
+
+        if self.smoke_positions:
+            first_smoke_vertex = (
+                len(self.vertices) + len(self.road_quads) * 4 + 1)
+            lines.append("g smoke_stacks")
+            lines.append("usemtl powerline")
+            lines.extend(
+                f"v {x:.3f} {y:.3f} {z:.3f}"
+                for x, y, z in (
+                    to_obj_coordinates(position)
+                    for position in self.smoke_positions)
+            )
+            lines.append("p " + " ".join(
+                str(first_smoke_vertex + index)
+                for index in range(len(self.smoke_positions))))
+        return "\n".join(lines) + "\n"
+
+
 def subtract(a, b):
     return tuple(a[i] - b[i] for i in range(3))
 
@@ -360,19 +481,21 @@ def instance(
     yaw=0.0,
     min_range=0.0,
     max_range=MAX_INSTANCE_RANGE,
+    tint=(1.0, 1.0, 1.0),
 ) -> str:
     half = 0.5 * yaw
     return (
         f'instance "{model}" {x:.3f} {y:.3f} {z:.3f} '
         f"0 0 {math.sin(half):.7f} {math.cos(half):.7f} {sx:.3f} {sy:.3f} {sz:.3f} "
-        f"{min_range:.3f} {max_range:.7g}"
+        f"{min_range:.3f} {max_range:.7g} "
+        f"{tint[0]:.5f} {tint[1]:.5f} {tint[2]:.5f}"
     )
 
 
 class CityWriter:
     """Stream the debug text city and collect compact binary position batches."""
 
-    MAGIC = b"OEKITB02"
+    MAGIC = b"OEKITB03"
     ENDIAN_MARKER = 0x01020304
 
     def __init__(self, text_path: Path, name: str, write_text_fixture: bool):
@@ -380,6 +503,7 @@ class CityWriter:
         self.text_path = text_path
         self.binary_path = text_path.with_suffix(".kitcityb")
         self.impostor_path = text_path.with_name(text_path.stem + "_impostor.obj")
+        self.scene_path = text_path.with_name(text_path.stem + "_scene.obj")
         self.text = (
             text_path.open("w", encoding="utf-8", newline="\n")
             if write_text_fixture else None
@@ -398,7 +522,8 @@ class CityWriter:
         self.parent_yaw = 0.0
         self.impostor = ImpostorBuilder("city_impostor.mtl", text_path.stem + "_impostor")
         self.impostor_boxes = 0
-        self.write("kitcity 2")
+        self.scene = CitySceneBuilder("city_scene.mtl", text_path.stem + "_scene")
+        self.write("kitcity 3")
         self.write(f"# {name}: deterministic level-14 prototype, coordinates are local ENU metres.")
         self.write("# Models remain named references until osgEarth::Kit batches this graph.")
         self.write("# Brick instances are uniform two-metre voxels forming visible building shells.")
@@ -429,9 +554,10 @@ class CityWriter:
         yaw: float = 0.0,
         min_range: float = 0.0,
         max_range: float = MAX_INSTANCE_RANGE,
+        tint=(1.0, 1.0, 1.0),
     ) -> None:
         self.write(instance(
-            model, x, y, z, sx, sy, sz, yaw, min_range, max_range))
+            model, x, y, z, sx, sy, sz, yaw, min_range, max_range, tint))
 
         # Flatten the generator's single neighborhood transform. The binary
         # file can therefore load as one KitNode, bypassing per-instance matrix
@@ -444,7 +570,7 @@ class CityWriter:
         total_yaw = self.parent_yaw + yaw
         half = 0.5 * total_yaw
         rotation = (0.0, 0.0, math.sin(half), math.cos(half))
-        key = (model, *rotation, sx, sy, sz, min_range, max_range)
+        key = (model, *rotation, sx, sy, sz, min_range, max_range, *tint)
         positions = self.batches.setdefault(key, array("f"))
         positions.extend((px, py, pz))
         self.instance_count += 1
@@ -483,6 +609,7 @@ class CityWriter:
             "brick_red": "impostor_red",
             "brick_weathered": "impostor_weathered",
             "brick_gray": "impostor_gray",
+            "building": "impostor_residential",
         }[wall_model]
         self.impostor.box(
             material_name,
@@ -490,6 +617,16 @@ class CityWriter:
             (bsw, bse, bne, bnw, tsw, tse, tne, tnw),
         )
         self.impostor_boxes += 1
+
+    def add_smoke_stack(self, x: float, y: float, z: float) -> None:
+        """Flatten one rooftop marker into the generic scene companion."""
+        c = math.cos(self.parent_yaw)
+        s = math.sin(self.parent_yaw)
+        self.scene.add_smoke_stack((
+            self.parent_position[0] + c * x - s * y,
+            self.parent_position[1] + s * x + c * y,
+            self.parent_position[2] + z,
+        ))
 
     def end_transform(self) -> None:
         self.write("end")
@@ -510,12 +647,13 @@ class CityWriter:
                 count = len(positions) // 3
                 output.write(struct.pack("<I", len(model)))
                 output.write(model)
-                output.write(struct.pack("<9fQ", *batch_values, count))
+                output.write(struct.pack("<12fQ", *batch_values, count))
                 if struct.pack("=I", 1) != struct.pack("<I", 1):
                     positions = array("f", positions)
                     positions.byteswap()
                 output.write(positions.tobytes())
         write_text(self.impostor_path, self.impostor.text())
+        write_text(self.scene_path, self.scene.text())
 
 
 def append_voxel_building(
@@ -531,7 +669,8 @@ def append_voxel_building(
     tall: bool,
     skyscraper: bool,
     voxel_size: float,
-) -> int:
+    building_tint=(1.0, 1.0, 1.0),
+) -> tuple[int, tuple[float, float, float]]:
     """Append the visible shell of a stepped Minecraft-style building."""
     heights = [[height for _ in range(width)] for _ in range(depth)]
 
@@ -659,7 +798,7 @@ def append_voxel_building(
                 if iy == 0 or heights[iy - 1][ix] <= iz:
                     output.add_instance(
                         wall_model, px, py - 0.5 * voxel_size, pz,
-                        scale, scale, scale, 0.0)
+                        scale, scale, scale, 0.0, tint=building_tint)
                     if iz > 0:
                         output.add_instance(
                             "window", px, py - 0.5 * voxel_size, pz + 0.40,
@@ -669,7 +808,7 @@ def append_voxel_building(
                 if ix == width - 1 or heights[iy][ix + 1] <= iz:
                     output.add_instance(
                         wall_model, px + 0.5 * voxel_size, py, pz,
-                        scale, scale, scale, 0.5 * math.pi)
+                        scale, scale, scale, 0.5 * math.pi, tint=building_tint)
                     if iz > 0:
                         output.add_instance(
                             "window", px + 0.5 * voxel_size, py, pz + 0.40,
@@ -679,7 +818,7 @@ def append_voxel_building(
                 if iy == depth - 1 or heights[iy + 1][ix] <= iz:
                     output.add_instance(
                         wall_model, px, py + 0.5 * voxel_size, pz,
-                        scale, scale, scale, math.pi)
+                        scale, scale, scale, math.pi, tint=building_tint)
                     if iz > 0:
                         output.add_instance(
                             "window", px, py + 0.5 * voxel_size, pz + 0.40,
@@ -689,7 +828,7 @@ def append_voxel_building(
                 if ix == 0 or heights[iy][ix - 1] <= iz:
                     output.add_instance(
                         wall_model, px - 0.5 * voxel_size, py, pz,
-                        scale, scale, scale, -0.5 * math.pi)
+                        scale, scale, scale, -0.5 * math.pi, tint=building_tint)
                     if iz > 0:
                         output.add_instance(
                             "window", px - 0.5 * voxel_size, py, pz + 0.40,
@@ -702,7 +841,24 @@ def append_voxel_building(
                         "roof_gray", px, py, (iz + 1) * voxel_size,
                         scale, scale, scale)
                     count += 1
-    return count
+    maximum_height = max(max(row) for row in heights)
+    roof_columns = [
+        (ix, iy)
+        for iy in range(depth)
+        for ix in range(width)
+        if heights[iy][ix] == maximum_height
+    ]
+    roof_ix, roof_iy = min(
+        roof_columns,
+        key=lambda value: (
+            abs(value[0] - 0.5 * (width - 1)) +
+            abs(value[1] - 0.5 * (depth - 1))),
+    )
+    return count, (
+        x + (roof_ix - 0.5 * (width - 1)) * voxel_size,
+        y + (roof_iy - 0.5 * (depth - 1)) * voxel_size,
+        maximum_height * voxel_size,
+    )
 
 
 def city(output: CityWriter, name: str, blocks: int, per_side: int, stride: float, seed: int, tall: bool) -> None:
@@ -713,6 +869,14 @@ def city(output: CityWriter, name: str, blocks: int, per_side: int, stride: floa
     lot_stride = lot_span / per_side
     voxel_size = 2.0
     brick_names = ("brick_red", "brick_weathered", "brick_gray")
+    building_tints = (
+        (1.00, 1.00, 1.00),
+        (0.94, 0.78, 0.68),
+        (0.72, 0.85, 1.00),
+        (0.78, 0.96, 0.73),
+        (1.00, 0.73, 0.78),
+        (0.82, 0.76, 1.00),
+    )
 
     for row in range(blocks):
         for col in range(blocks):
@@ -738,9 +902,16 @@ def city(output: CityWriter, name: str, blocks: int, per_side: int, stride: floa
                     else:
                         height = rng.randint(3, 8)
                     model = brick_names[(row * 5 + col * 3 + lot_x + lot_y + seed) % len(brick_names)]
-                    append_voxel_building(
+                    building_tint = building_tints[
+                        (row * 11 + col * 7 + lot_x * 3 + lot_y + seed) %
+                        len(building_tints)
+                    ]
+                    _, roof_position = append_voxel_building(
                         output, rng, detail_rng, x, y, width, depth, height,
-                        model, tall, skyscraper, voxel_size)
+                        model, tall, skyscraper, voxel_size, building_tint)
+                    if skyscraper and len(output.scene.smoke_positions) < 4:
+                        output.add_smoke_stack(
+                            roof_position[0], roof_position[1], roof_position[2] + 1.0)
                     output.building_count += 1
                     if skyscraper:
                         output.skyscraper_count += 1
@@ -801,6 +972,240 @@ def write_city(
     output = CityWriter(CITIES / f"{name}_dense.kitcity", name, write_text_fixture)
     try:
         city(output, name, blocks=blocks, per_side=10, stride=stride, seed=seed, tall=tall)
+        append_road_grid(output, blocks, stride, stride * 0.13)
+        append_transmission_corridors(output)
+    finally:
+        output.close()
+    return output
+
+
+def append_road_grid(
+    output: CityWriter,
+    blocks: int,
+    stride: float,
+    road_width: float,
+) -> None:
+    """Fill every inter-block corridor with a non-overlapping road mesh."""
+    origin = -0.5 * stride * (blocks - 1)
+    extent_min = origin - 0.5 * stride
+    extent_max = origin + (blocks - 0.5) * stride
+    boundaries = [
+        origin + (index + 0.5) * stride
+        for index in range(blocks - 1)
+    ]
+    half_width = 0.5 * road_width
+
+    # Horizontal strips own the intersections. Vertical strips stop at their
+    # edges, avoiding coplanar overlap and the z-fighting it would cause.
+    for y in boundaries:
+        output.scene.add_road_quad(
+            extent_min, y - half_width,
+            extent_max, y + half_width)
+
+    segment_starts = [extent_min] + [y + half_width for y in boundaries]
+    segment_ends = [y - half_width for y in boundaries] + [extent_max]
+    for x in boundaries:
+        for y0, y1 in zip(segment_starts, segment_ends):
+            output.scene.add_road_quad(
+                x - half_width, y0,
+                x + half_width, y1)
+
+
+def append_transmission_corridors(output: CityWriter) -> None:
+    """Add four correctly oriented utility corridors around one L14 tile."""
+    # power_tower's crossarm spans local X, so yaw zero correctly aligns its
+    # conductors with this north-south (local Y) corridor. Nine towers at 280 m
+    # spacing span nearly the full 2.45 km tile while staying just inside its
+    # east and west edges and clear of the generated building footprints.
+    primary_corridors = [
+        [(edge_x, -1120.0 + index * 280.0, 0.0) for index in range(9)]
+        for edge_x in (-1160.0, 1160.0)
+    ]
+    for towers in primary_corridors:
+        for x, y, z in towers:
+            output.add_instance(
+                "power_tower",
+                x,
+                y,
+                z,
+                1.0,
+                1.0,
+                1.0,
+                0.0,
+            )
+
+    # Rotate local Y onto world X for the smaller north/south corridors. Their
+    # 220 m spacing is appropriate for the 23 m tower and keeps the perimeter
+    # circuits visually distinct instead of alternating unlike tower models.
+    secondary_corridors = [
+        [(-1100.0 + index * 220.0, edge_y, 0.0) for index in range(11)]
+        for edge_y in (-1160.0, 1160.0)
+    ]
+    secondary_yaw = -0.5 * math.pi
+    for towers in secondary_corridors:
+        for x, y, z in towers:
+            output.add_instance(
+                "power_tower2",
+                x,
+                y,
+                z,
+                1.0,
+                1.0,
+                1.0,
+                secondary_yaw,
+            )
+
+    def add_conductors(towers, attachments, yaw: float, sag: float) -> None:
+        c = math.cos(yaw)
+        s = math.sin(yaw)
+        for first, second in zip(towers, towers[1:]):
+            for crossarm_offset, height in attachments:
+                offset_x = c * crossarm_offset
+                offset_y = s * crossarm_offset
+                output.scene.add_powerline_span(
+                    (first[0] + offset_x, first[1] + offset_y, first[2] + height),
+                    (second[0] + offset_x, second[1] + offset_y, second[2] + height),
+                    sag,
+                )
+
+    # Three crossarm levels on each tower carry a balanced pair of conductors.
+    # The attachment coordinates match the visible tips of the two supplied
+    # tower models; the parabolic midpoint drop is intentionally modest.
+    for towers in primary_corridors:
+        add_conductors(
+            towers,
+            ((-6.2, 22.85), (6.2, 22.85),
+             (-6.2, 27.85), (6.2, 27.85),
+             (-3.8, 31.65), (3.8, 31.65)),
+            0.0,
+            8.0,
+        )
+    for towers in secondary_corridors:
+        add_conductors(
+            towers,
+            ((-4.15, 15.10), (4.15, 15.10),
+             (-4.15, 18.40), (4.15, 18.40),
+             (-4.15, 21.70), (4.15, 21.70)),
+            secondary_yaw,
+            5.5,
+        )
+
+
+def write_residential_city(write_text_fixture: bool) -> CityWriter:
+    """Write one densely packed L14 tile of complete residential models."""
+    output = CityWriter(
+        CITIES / "residential_dense.kitcity",
+        "residential",
+        write_text_fixture,
+    )
+    rng = random.Random(71)
+
+    # A spherical-Mercator L14 tile is about 2446 metres wide at the equator.
+    # One hundred 230 m blocks leave a 38 m street corridor between 192 m
+    # residential interiors. Eight houses per side produces 6,400 residences,
+    # or approximately 1,070 buildings/km^2 over the complete tile footprint.
+    blocks = 10
+    block_stride = 230.0
+    interior_span = 192.0
+    houses_per_side = 8
+    lot_stride = interior_span / houses_per_side
+    origin = -0.5 * block_stride * (blocks - 1)
+    scales = (0.82, 0.90, 0.98)
+    house_tints = (
+        (1.00, 1.00, 1.00),
+        (0.96, 0.80, 0.68),
+        (0.72, 0.86, 1.00),
+        (0.79, 0.96, 0.73),
+        (1.00, 0.73, 0.79),
+        (0.83, 0.77, 1.00),
+        (1.00, 0.92, 0.61),
+    )
+
+    try:
+        for row in range(blocks):
+            for col in range(blocks):
+                block_x = origin + col * block_stride
+                block_y = origin + row * block_stride
+                output.begin_transform(
+                    f"residential_block_{row}_{col}",
+                    block_x,
+                    block_y,
+                    0.0,
+                    0.0,
+                )
+
+                for lot_y in range(houses_per_side):
+                    for lot_x in range(houses_per_side):
+                        x = (
+                            -0.5 * interior_span +
+                            (lot_x + 0.5) * lot_stride +
+                            rng.uniform(-0.8, 0.8)
+                        )
+                        y = (
+                            -0.5 * interior_span +
+                            (lot_y + 0.5) * lot_stride +
+                            rng.uniform(-0.8, 0.8)
+                        )
+                        scale = scales[(row * 7 + col * 5 + lot_x + lot_y) % len(scales)]
+                        # Houses on opposite halves of a block face their
+                        # nearest parallel street. Keeping these two rotations
+                        # discrete preserves efficient binary/instanced batches.
+                        yaw = 0.0 if lot_y < houses_per_side // 2 else math.pi
+                        tint = house_tints[
+                            (row * 13 + col * 7 + lot_x * 3 + lot_y) %
+                            len(house_tints)
+                        ]
+                        output.add_instance(
+                            "building",
+                            x,
+                            y,
+                            -RESIDENTIAL_MIN_Z * scale,
+                            scale,
+                            scale,
+                            scale,
+                            yaw,
+                            tint=tint,
+                        )
+                        output.add_impostor_box(
+                            "building",
+                            x - RESIDENTIAL_HALF_WIDTH * scale,
+                            y - RESIDENTIAL_HALF_DEPTH * scale,
+                            0.0,
+                            x + RESIDENTIAL_HALF_WIDTH * scale,
+                            y + RESIDENTIAL_HALF_DEPTH * scale,
+                            RESIDENTIAL_HEIGHT * scale,
+                        )
+                        output.building_count += 1
+
+                        if (
+                            lot_x == 3 and lot_y == 3 and
+                            row in (4, 5) and col in (4, 5)
+                        ):
+                            output.add_smoke_stack(
+                                x,
+                                y,
+                                RESIDENTIAL_HEIGHT * scale + 1.0,
+                            )
+
+                # Three trees on each edge give every block a readable street
+                # boundary without overwhelming the complete house models.
+                sidewalk = 0.455 * block_stride
+                for tree_index in range(3):
+                    along = -0.62 * sidewalk + tree_index * 0.62 * sidewalk
+                    for tree_x, tree_y in (
+                        (along, -sidewalk),
+                        (sidewalk, along),
+                        (-along, sidewalk),
+                        (-sidewalk, -along),
+                    ):
+                        output.add_instance(
+                            "tree", tree_x, tree_y, 0.0,
+                            4.4, 4.4, 8.0,
+                        )
+
+                output.end_transform()
+        append_road_grid(output, blocks, block_stride, 28.0)
+        append_transmission_corridors(output)
     finally:
         output.close()
     return output
@@ -812,12 +1217,19 @@ def make_cities(write_text_fixture: bool) -> list[CityWriter]:
         impostor_material("impostor_red", (0.58, 0.38, 0.30)) +
         impostor_material("impostor_weathered", (0.64, 0.48, 0.37)) +
         impostor_material("impostor_gray", (0.52, 0.51, 0.50)) +
+        impostor_material("impostor_residential", (0.72, 0.62, 0.48)) +
         impostor_material("impostor_roof", (0.46, 0.48, 0.51)),
+    )
+    write_text(
+        CITIES / "city_scene.mtl",
+        impostor_material("powerline", (0.18, 0.20, 0.22)) +
+        material("road_surface", (1.0, 1.0, 1.0), "asphalt_road.jpg"),
     )
     return [
         write_city("grid", blocks=7, stride=315.0, seed=17, tall=False, write_text_fixture=write_text_fixture),
         write_city("downtown", blocks=7, stride=315.0, seed=29, tall=True, write_text_fixture=write_text_fixture),
         write_city("old_town", blocks=8, stride=275.0, seed=43, tall=False, write_text_fixture=write_text_fixture),
+        write_residential_city(write_text_fixture),
     ]
 
 
@@ -843,9 +1255,11 @@ def main() -> None:
             for model in ("brick_red", "brick_weathered", "brick_gray", "roof_gray")
         )
         impostor_mb = output.impostor_path.stat().st_size / (1024.0 * 1024.0)
+        scene_kb = output.scene_path.stat().st_size / 1024.0
         print(
             f"{output.binary_path.name}: {output.building_count} buildings/"
             f"{output.skyscraper_count} skyscrapers/{output.model_counts.get('tree', 0)} trees, "
+            f"{output.model_counts.get('power_tower', 0) + output.model_counts.get('power_tower2', 0)} power towers, "
             f"details {output.model_counts.get('window', 0)} windows/"
             f"{output.model_counts.get('door', 0)} doors/"
             f"{output.model_counts.get('fire_escape', 0)} fire escapes/"
@@ -855,7 +1269,12 @@ def main() -> None:
             f"cube->quad shell triangles, neighborhood instances "
             f"{min(output.neighborhood_counts)}-{max(output.neighborhood_counts)}, "
             f"impostor {output.impostor_boxes} boxes/{output.impostor.triangle_count} triangles/"
-            f"{impostor_mb:.1f} MiB"
+            f"{impostor_mb:.1f} MiB, companion scene roads "
+            f"{len(output.scene.road_quads)} quads/"
+            f"{len(output.scene.road_quads) * 2} triangles, smoke stacks "
+            f"{len(output.scene.smoke_positions)}, powerlines "
+            f"{output.scene.span_count} spans/{output.scene.segment_count} segments/"
+            f"{scene_kb:.1f} KiB"
         )
 
 

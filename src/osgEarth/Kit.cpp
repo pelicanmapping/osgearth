@@ -8,6 +8,7 @@
 #include <osgEarth/InstanceBuilder>
 #include <osgEarth/Notify>
 #include <osgEarth/Registry>
+#include <osgEarth/ShaderLoader>
 #include <osgEarth/Shaders>
 #include <osgEarth/URI>
 #include <osgEarth/VirtualProgram>
@@ -19,8 +20,10 @@
 #include <osg/GLExtensions>
 #include <osg/MatrixTransform>
 #include <osg/PrimitiveSet>
+#include <osg/Program>
 #include <osg/RenderInfo>
 #include <osg/VertexArrayState>
+#include <osg/observer_ptr>
 #include <osgDB/FileNameUtils>
 #include <osgDB/FileUtils>
 #include <osgDB/ReaderWriter>
@@ -30,6 +33,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -50,6 +54,8 @@ using namespace osgEarth;
 
 namespace
 {
+    std::atomic<std::uint64_t> s_nextInstanceBufferID{ 1u };
+
     struct BatchKey
     {
         std::string model;
@@ -70,12 +76,14 @@ namespace
         InstanceArrays() :
             positions(new osg::Vec3Array()),
             rotations(new osg::Vec4Array()),
-            scales(new osg::Vec3Array()) { }
+            scales(new osg::Vec3Array()),
+            tints(new osg::Vec3Array()) { }
 
         void append(
             const osg::Vec3f& position,
             const osg::Quat& rotation,
-            const osg::Vec3f& scale)
+            const osg::Vec3f& scale,
+            const osg::Vec3f& tint)
         {
             positions->push_back(position);
             rotations->push_back(osg::Vec4f(
@@ -84,17 +92,20 @@ namespace
                 static_cast<float>(rotation.z()),
                 static_cast<float>(rotation.w())));
             scales->push_back(scale);
+            tints->push_back(tint);
         }
 
         void append(
             const std::vector<osg::Vec3f>& sourcePositions,
             const osg::Quat& rotation,
-            const osg::Vec3f& scale)
+            const osg::Vec3f& scale,
+            const osg::Vec3f& tint)
         {
             const std::size_t count = sourcePositions.size();
             positions->reserve(positions->size() + count);
             rotations->reserve(rotations->size() + count);
             scales->reserve(scales->size() + count);
+            tints->reserve(tints->size() + count);
             positions->insert(positions->end(), sourcePositions.begin(), sourcePositions.end());
             rotations->insert(rotations->end(), count, osg::Vec4f(
                 static_cast<float>(rotation.x()),
@@ -102,11 +113,13 @@ namespace
                 static_cast<float>(rotation.z()),
                 static_cast<float>(rotation.w())));
             scales->insert(scales->end(), count, scale);
+            tints->insert(tints->end(), count, tint);
         }
 
         osg::ref_ptr<osg::Vec3Array> positions;
         osg::ref_ptr<osg::Vec4Array> rotations;
         osg::ref_ptr<osg::Vec3Array> scales;
+        osg::ref_ptr<osg::Vec3Array> tints;
     };
 
     using InstanceMap = std::map<BatchKey, InstanceArrays>;
@@ -115,6 +128,17 @@ namespace
     {
         return std::isfinite(minRange) && std::isfinite(maxRange) &&
             minRange >= 0.0f && maxRange > minRange;
+    }
+
+    bool validTint(const osg::Vec3f& tint)
+    {
+        for (unsigned component = 0u; component < 3u; ++component)
+        {
+            if (!std::isfinite(tint[component]) ||
+                tint[component] < 0.0f || tint[component] > 1.0f)
+                return false;
+        }
+        return true;
     }
 
     bool isAlwaysVisible(float minRange, float maxRange)
@@ -131,6 +155,13 @@ namespace
                 << "'; using always-visible range" << std::endl;
             value.minRange = 0.0f;
             value.maxRange = std::numeric_limits<float>::max();
+        }
+        for (unsigned component = 0u; component < 3u; ++component)
+        {
+            if (!std::isfinite(value.tint[component]))
+                value.tint[component] = 1.0f;
+            else
+                value.tint[component] = std::max(0.0f, std::min(1.0f, value.tint[component]));
         }
         return value;
     }
@@ -190,7 +221,8 @@ namespace
                 instance.minRange,
                 instance.maxRange,
                 instance.position).append(
-                    instance.position, instance.rotation, instance.scale);
+                    instance.position, instance.rotation, instance.scale,
+                    instance.tint);
         }
 
         static std::uint64_t chunkCode(int x, int y)
@@ -210,7 +242,7 @@ namespace
                 {
                     KitNode::Instance flattened(
                         batch.model, position, batch.rotation, batch.scale,
-                        batch.minRange, batch.maxRange);
+                        batch.minRange, batch.maxRange, batch.tint);
                     const osg::Matrixd matrix = compose(flattened) * parent;
 
                     osg::Vec3d translation;
@@ -240,7 +272,8 @@ namespace
                 destination(
                     batch.model, batch.minRange, batch.maxRange,
                     batch.positions.front()).append(
-                        batch.positions, batch.rotation, batch.scale);
+                        batch.positions, batch.rotation, batch.scale,
+                        batch.tint);
                 return;
             }
 
@@ -267,7 +300,7 @@ namespace
                 {
                     arrays = found->second;
                 }
-                arrays->append(position, batch.rotation, batch.scale);
+                arrays->append(position, batch.rotation, batch.scale, batch.tint);
             }
         }
 
@@ -328,6 +361,13 @@ namespace
     constexpr unsigned KIT_ROTATION_ATTRIB = 10u;
     constexpr unsigned KIT_SCALE_ATTRIB = 11u;
     constexpr unsigned KIT_BATCH_SSBO_BINDING = 28u;
+    constexpr unsigned KIT_CULL_INPUT_BINDING = 20u;
+    constexpr unsigned KIT_CULL_OUTPUT_BINDING = 21u;
+    constexpr unsigned KIT_CULL_WORK_BINDING = 22u;
+    constexpr unsigned KIT_CULL_SPAN_BINDING = 23u;
+    constexpr unsigned KIT_CULL_COUNT_BINDING = 24u;
+    constexpr unsigned KIT_CULL_COMMAND_BINDING = 25u;
+    constexpr unsigned KIT_CULL_WORKGROUP_SIZE = 128u;
     constexpr std::size_t PACKED_INSTANCE_SIZE = 20u;
     constexpr std::size_t INITIAL_VISIBLE_BATCH_CAPACITY = 128u;
     constexpr std::size_t INSTANCE_RING_SLOTS = 3u;
@@ -373,6 +413,25 @@ namespace
 
     static_assert(sizeof(BatchDescriptor) == sizeof(float) * 4u * 12u,
         "Kit batch descriptors must match the std430 vec4 array");
+
+    struct GPUCullWorkItem
+    {
+        std::uint32_t firstInstance = 0u;
+        std::uint32_t instanceCount = 0u;
+        std::uint32_t batchIndex = 0u;
+        std::uint32_t unused = 0u;
+    };
+
+    struct GPUCullSpan
+    {
+        std::uint32_t firstInstance = 0u;
+        std::uint32_t instanceCount = 0u;
+    };
+
+    static_assert(sizeof(GPUCullWorkItem) == sizeof(std::uint32_t) * 4u,
+        "Unexpected GPU cull work-item layout");
+    static_assert(sizeof(GPUCullSpan) == sizeof(std::uint32_t) * 2u,
+        "Unexpected GPU cull span layout");
 
     template<typename Value>
     class VectorBufferData : public osg::BufferData
@@ -452,6 +511,7 @@ namespace
     struct CompactBatch
     {
         osg::ref_ptr<osg::BufferData> buffer;
+        std::uint64_t bufferID = 0u;
         std::size_t offset = 0u;
         std::size_t count = 0u;
         osg::Vec3f positionOffset;
@@ -513,6 +573,12 @@ namespace
         }
 
     private:
+        struct GPUCommandBuffer
+        {
+            GLBuffer::Ptr buffer;
+            std::size_t capacity = 0u;
+        };
+
         void initializeCommandBuffers()
         {
             _arrayCommands = new DrawArraysCommandBuffer();
@@ -533,6 +599,8 @@ namespace
         osg::ref_ptr<ModelCollector> _collector;
         mutable osg::ref_ptr<DrawArraysCommandBuffer> _arrayCommands;
         mutable osg::ref_ptr<DrawElementsCommandBuffer> _elementCommands;
+        mutable std::unordered_map<unsigned, GPUCommandBuffer> _gpuArrayCommands;
+        mutable std::unordered_map<unsigned, GPUCommandBuffer> _gpuElementCommands;
     };
 
     class InstanceBudget : public osg::Referenced
@@ -561,7 +629,7 @@ namespace
             {
                 OE_WARN << LC << "Visible instance budget " << _maximum
                     << " reached; dropping instances. Increase the Kit budget or use 0 "
-                    << "for an uncapped transient ring." << std::endl;
+                    << "for uncapped collection." << std::endl;
                 _warned = true;
             }
             return accepted;
@@ -611,12 +679,22 @@ namespace
         std::unordered_map<const osg::Camera*, Frame> _frames;
     };
 
+    class GPUCullSettings : public osg::Referenced
+    {
+    public:
+        // Fine CPU chunk rejection is normally cheaper than scanning and
+        // compacting every submitted instance. Retain compute compaction as
+        // an opt-in experiment for unusually coarse source batches.
+        std::atomic_bool enabled{ false };
+    };
+
     class ModelCollector : public osg::Referenced
     {
     public:
         struct SourceSpan
         {
             osg::ref_ptr<osg::BufferData> buffer;
+            std::uint64_t bufferID = 0u;
             std::size_t offset = 0u;
             std::uint32_t count = 0u;
         };
@@ -687,9 +765,13 @@ namespace
 
         explicit ModelCollector(
             const osg::BoundingBox& bounds,
-            InstanceBudget* budget) :
+            InstanceBudget* budget,
+            GPUCullSettings* gpuCullSettings,
+            osg::Program* gpuCullProgram) :
             _modelBounds(bounds),
-            _budget(budget)
+            _budget(budget),
+            _gpuCullSettings(gpuCullSettings),
+            _gpuCullProgram(gpuCullProgram)
         {
         }
 
@@ -803,7 +885,7 @@ namespace
                 static_cast<std::uint32_t>(frame.instanceCount),
                 static_cast<std::uint32_t>(accepted) });
             frame.sources.push_back({
-                batch.buffer, batch.offset,
+                batch.buffer, batch.bufferID, batch.offset,
                 static_cast<std::uint32_t>(accepted) });
             frame.instanceCount += accepted;
             frame.dirty = true;
@@ -854,8 +936,14 @@ namespace
             {
                 output.ringBytes += entry.second->capacity *
                     INSTANCE_RING_SLOTS * PACKED_INSTANCE_SIZE;
+                output.ringBytes += entry.second->culledCapacity *
+                    PACKED_INSTANCE_SIZE;
+                output.ringBytes += entry.second->residentCapacity *
+                    PACKED_INSTANCE_SIZE;
             }
             output.ringStalls = _ringStalls;
+            output.ringUploads = _ringUploads;
+            output.ringReuses = _ringReuses;
         }
 
         std::size_t getRingBytes() const
@@ -863,7 +951,12 @@ namespace
             std::lock_guard<std::mutex> lock(_mutex);
             std::size_t result = 0u;
             for (const auto& entry : _contextRings)
-                result += entry.second->capacity * INSTANCE_RING_SLOTS * PACKED_INSTANCE_SIZE;
+            {
+                result += entry.second->capacity *
+                    INSTANCE_RING_SLOTS * PACKED_INSTANCE_SIZE;
+                result += entry.second->culledCapacity * PACKED_INSTANCE_SIZE;
+                result += entry.second->residentCapacity * PACKED_INSTANCE_SIZE;
+            }
             return result;
         }
 
@@ -888,6 +981,65 @@ namespace
     private:
         struct ContextRing
         {
+            struct ResidentKey
+            {
+                std::uint64_t bufferID = 0u;
+                std::size_t offset = 0u;
+                std::uint32_t count = 0u;
+
+                bool operator==(const ResidentKey& rhs) const
+                {
+                    return bufferID == rhs.bufferID &&
+                        offset == rhs.offset && count == rhs.count;
+                }
+            };
+
+            struct ResidentKeyHash
+            {
+                std::size_t operator()(const ResidentKey& value) const
+                {
+                    std::size_t result = std::hash<std::uint64_t>()(value.bufferID);
+                    result ^= std::hash<std::size_t>()(value.offset) +
+                        0x9e3779b9u + (result << 6u) + (result >> 2u);
+                    result ^= std::hash<std::uint32_t>()(value.count) +
+                        0x9e3779b9u + (result << 6u) + (result >> 2u);
+                    return result;
+                }
+            };
+
+            struct ResidentSpan
+            {
+                osg::observer_ptr<osg::BufferData> owner;
+                std::uint32_t first = 0u;
+                std::uint32_t count = 0u;
+            };
+
+            struct FreeRange
+            {
+                std::uint32_t first = 0u;
+                std::uint32_t count = 0u;
+            };
+
+            struct SourceLayout
+            {
+                std::uint64_t bufferID = 0u;
+                std::size_t offset = 0u;
+                std::uint32_t count = 0u;
+            };
+
+            struct CullUniforms
+            {
+                const osg::Program::PerContextProgram* program = nullptr;
+                GLint pass = -1;
+                GLint batchCount = -1;
+                GLint inputBase = -1;
+                GLint primitiveCount = -1;
+                GLint primitiveFirst = -1;
+                GLint baseVertex = -1;
+                GLint modelSphere = -1;
+                GLint projection = -1;
+            };
+
             GLBuffer::Ptr buffer;
             StagedInstance* mapped = nullptr;
             std::vector<StagedInstance> scratch;
@@ -896,8 +1048,66 @@ namespace
             std::size_t currentSlot = 0u;
             const osg::Camera* uploadedCamera = nullptr;
             std::uint64_t uploadedFrame = std::numeric_limits<std::uint64_t>::max();
+            std::vector<SourceLayout> layout;
+            GLBuffer::Ptr culledBuffer;
+            GLBuffer::Ptr workBuffer;
+            GLBuffer::Ptr spanBuffer;
+            GLBuffer::Ptr countBuffer;
+            std::vector<GPUCullWorkItem> workScratch;
+            std::vector<GPUCullSpan> spanScratch;
+            std::size_t culledCapacity = 0u;
+            std::size_t batchCapacity = 0u;
+            std::size_t workCount = 0u;
+            std::uint64_t layoutRevision = 0u;
+            std::uint64_t gpuMetadataRevision =
+                std::numeric_limits<std::uint64_t>::max();
+            const osg::Camera* gpuCulledCamera = nullptr;
+            std::uint64_t gpuCulledFrame =
+                std::numeric_limits<std::uint64_t>::max();
+            CullUniforms cullUniforms;
+            bool gpuCullAvailable = true;
             bool persistent = false;
+
+            // Immutable source spans live in this GPU arena for the lifetime
+            // of their tile-owned CPU buffer. Normal rendering can therefore
+            // point indirect commands at stable baseInstance values instead
+            // of gathering and re-uploading every visible instance whenever
+            // camera movement changes the submitted source list.
+            GLBuffer::Ptr residentBuffer;
+            std::size_t residentCapacity = 0u;
+            std::size_t residentHighWater = 0u;
+            std::unordered_map<ResidentKey, ResidentSpan, ResidentKeyHash>
+                residentSpans;
+            std::vector<FreeRange> residentFreeRanges;
+            std::vector<std::uint32_t> residentBases;
+            std::array<GLSyncHandle, INSTANCE_RING_SLOTS> residentFences = {};
+            std::size_t residentCurrentSlot = INSTANCE_RING_SLOTS - 1u;
+            const osg::Camera* residentCamera = nullptr;
+            std::uint64_t residentFrame =
+                std::numeric_limits<std::uint64_t>::max();
+            std::uint64_t residentEpoch = 0u;
+            std::uint64_t residentLastSweepEpoch = 0u;
         };
+
+        bool layoutMatches(
+            const ContextRing& ring,
+            const FrameData& frame) const
+        {
+            if (!ring.buffer || ring.layout.size() != frame.sources.size())
+                return false;
+            for (std::size_t i = 0u; i < frame.sources.size(); ++i)
+            {
+                const SourceSpan& source = frame.sources[i];
+                const ContextRing::SourceLayout& cached = ring.layout[i];
+                if (cached.bufferID != source.bufferID ||
+                    cached.offset != source.offset ||
+                    cached.count != source.count)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
 
         bool waitAndDeleteFence(
             GLSyncHandle& fence,
@@ -920,7 +1130,7 @@ namespace
             return status != GL_WAIT_FAILED;
         }
 
-        void releaseRing(
+        void releaseTransientRing(
             ContextRing& ring,
             const osg::GLExtensions* extensions,
             bool wait) const
@@ -949,7 +1159,53 @@ namespace
             ring.capacity = 0u;
             ring.uploadedCamera = nullptr;
             ring.uploadedFrame = std::numeric_limits<std::uint64_t>::max();
+            ring.layout.clear();
+            ring.culledBuffer.reset();
+            ring.workBuffer.reset();
+            ring.spanBuffer.reset();
+            ring.countBuffer.reset();
+            ring.workScratch.clear();
+            ring.spanScratch.clear();
+            ring.culledCapacity = 0u;
+            ring.batchCapacity = 0u;
+            ring.workCount = 0u;
+            ring.gpuMetadataRevision = std::numeric_limits<std::uint64_t>::max();
+            ring.gpuCulledCamera = nullptr;
+            ring.gpuCulledFrame = std::numeric_limits<std::uint64_t>::max();
+            ring.cullUniforms = ContextRing::CullUniforms();
+            ring.gpuCullAvailable = true;
             ring.persistent = false;
+        }
+
+        void releaseRing(
+            ContextRing& ring,
+            const osg::GLExtensions* extensions,
+            bool wait) const
+        {
+            releaseTransientRing(ring, extensions, wait);
+            for (GLSyncHandle& fence : ring.residentFences)
+            {
+                if (!fence)
+                    continue;
+                if (wait)
+                    waitAndDeleteFence(fence, extensions, false);
+                else
+                {
+                    extensions->glDeleteSync(fence);
+                    fence = nullptr;
+                }
+            }
+            ring.residentBuffer.reset();
+            ring.residentCapacity = 0u;
+            ring.residentHighWater = 0u;
+            ring.residentSpans.clear();
+            ring.residentFreeRanges.clear();
+            ring.residentBases.clear();
+            ring.residentCurrentSlot = INSTANCE_RING_SLOTS - 1u;
+            ring.residentCamera = nullptr;
+            ring.residentFrame = std::numeric_limits<std::uint64_t>::max();
+            ring.residentEpoch = 0u;
+            ring.residentLastSweepEpoch = 0u;
         }
 
         bool ensureRingCapacity(
@@ -971,7 +1227,9 @@ namespace
                 ring.capacity + ring.capacity / 2u;
             capacity = std::max(capacity, required);
             capacity = std::min(capacity, maximumCapacity);
-            releaseRing(ring, extensions, true);
+            // Growing the optional compute-culling input ring must not evict
+            // the normal renderer's immutable resident source arena.
+            releaseTransientRing(ring, extensions, true);
 
             const GLsizei bytes = static_cast<GLsizei>(
                 capacity * INSTANCE_RING_SLOTS * PACKED_INSTANCE_SIZE);
@@ -1003,6 +1261,569 @@ namespace
             return ring.buffer != nullptr;
         }
 
+        void mergeResidentFreeRanges(ContextRing& ring) const
+        {
+            if (ring.residentFreeRanges.empty())
+                return;
+
+            std::sort(
+                ring.residentFreeRanges.begin(),
+                ring.residentFreeRanges.end(),
+                [](const ContextRing::FreeRange& lhs,
+                   const ContextRing::FreeRange& rhs)
+                {
+                    return lhs.first < rhs.first;
+                });
+
+            std::size_t output = 0u;
+            for (const ContextRing::FreeRange& range : ring.residentFreeRanges)
+            {
+                if (range.count == 0u)
+                    continue;
+                if (output > 0u)
+                {
+                    ContextRing::FreeRange& previous =
+                        ring.residentFreeRanges[output - 1u];
+                    const std::uint64_t previousEnd =
+                        static_cast<std::uint64_t>(previous.first) + previous.count;
+                    if (previousEnd >= range.first)
+                    {
+                        const std::uint64_t rangeEnd =
+                            static_cast<std::uint64_t>(range.first) + range.count;
+                        previous.count = static_cast<std::uint32_t>(
+                            std::max(previousEnd, rangeEnd) - previous.first);
+                        continue;
+                    }
+                }
+                ring.residentFreeRanges[output++] = range;
+            }
+            ring.residentFreeRanges.resize(output);
+
+            // Returning free space at the tail lets subsequent flight-path
+            // paging reuse it without growing the arena's high-water mark.
+            while (!ring.residentFreeRanges.empty())
+            {
+                const ContextRing::FreeRange& tail =
+                    ring.residentFreeRanges.back();
+                if (static_cast<std::size_t>(tail.first) + tail.count !=
+                    ring.residentHighWater)
+                {
+                    break;
+                }
+                ring.residentHighWater = tail.first;
+                ring.residentFreeRanges.pop_back();
+            }
+        }
+
+        bool reclaimExpiredResidentSpans(
+            ContextRing& ring,
+            const osg::GLExtensions* extensions) const
+        {
+            bool hasExpired = false;
+            for (const auto& entry : ring.residentSpans)
+            {
+                if (!entry.second.owner.valid())
+                {
+                    hasExpired = true;
+                    break;
+                }
+            }
+            if (!hasExpired)
+            {
+                ring.residentLastSweepEpoch = ring.residentEpoch;
+                return true;
+            }
+
+            // Never overwrite an expired tile's arena range until every draw
+            // that could reference it has completed. Keep this nonblocking:
+            // if the GPU is behind, growing the arena is preferable to a
+            // movement hitch on the draw thread.
+            bool ready = true;
+            for (GLSyncHandle& fence : ring.residentFences)
+            {
+                if (!fence)
+                    continue;
+                const GLenum status = extensions->glClientWaitSync(fence, 0u, 0u);
+                if (status == GL_TIMEOUT_EXPIRED)
+                {
+                    ready = false;
+                }
+                else
+                {
+                    extensions->glDeleteSync(fence);
+                    fence = nullptr;
+                    if (status == GL_WAIT_FAILED)
+                        ready = false;
+                }
+            }
+            if (!ready)
+                return false;
+
+            for (auto i = ring.residentSpans.begin();
+                 i != ring.residentSpans.end(); )
+            {
+                if (!i->second.owner.valid())
+                {
+                    ring.residentFreeRanges.push_back({
+                        i->second.first, i->second.count });
+                    i = ring.residentSpans.erase(i);
+                }
+                else
+                {
+                    ++i;
+                }
+            }
+            mergeResidentFreeRanges(ring);
+            ring.residentLastSweepEpoch = ring.residentEpoch;
+            return true;
+        }
+
+        bool ensureResidentCapacity(
+            ContextRing& ring,
+            std::size_t required,
+            osg::State& state) const
+        {
+            if (ring.residentBuffer && required <= ring.residentCapacity)
+                return true;
+
+            const std::size_t maximumCapacity =
+                static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()) /
+                PACKED_INSTANCE_SIZE;
+            if (required == 0u || required > maximumCapacity)
+                return false;
+
+            std::size_t capacity = ring.residentCapacity == 0u ? 65536u :
+                ring.residentCapacity + ring.residentCapacity / 2u;
+            capacity = std::min(maximumCapacity, std::max(capacity, required));
+
+            GLBuffer::Ptr replacement = GLBuffer::create(GL_ARRAY_BUFFER_ARB, state);
+            if (!replacement)
+                return false;
+            replacement->bind();
+            replacement->bufferData(static_cast<GLsizei>(
+                capacity * PACKED_INSTANCE_SIZE), nullptr, GL_STATIC_DRAW);
+            replacement->unbind();
+
+            // Preserve every stable baseInstance allocation with a GPU-side
+            // copy. This happens only when the arena grows and avoids another
+            // pass over all tile-owned CPU records.
+            if (ring.residentBuffer && ring.residentHighWater > 0u)
+            {
+                ring.residentBuffer->copyBufferSubData(
+                    replacement, 0, 0, static_cast<GLsizeiptr>(
+                        ring.residentHighWater * PACKED_INSTANCE_SIZE));
+            }
+
+            ring.residentBuffer = replacement;
+            ring.residentCapacity = capacity;
+            return true;
+        }
+
+        bool allocateResidentRange(
+            ContextRing& ring,
+            std::uint32_t count,
+            osg::State& state,
+            const osg::GLExtensions* extensions,
+            std::uint32_t& first) const
+        {
+            auto findFreeRange = [&]()
+            {
+                auto best = ring.residentFreeRanges.end();
+                for (auto i = ring.residentFreeRanges.begin();
+                     i != ring.residentFreeRanges.end(); ++i)
+                {
+                    if (i->count >= count &&
+                        (best == ring.residentFreeRanges.end() ||
+                         i->count < best->count))
+                    {
+                        best = i;
+                    }
+                }
+                return best;
+            };
+
+            auto freeRange = findFreeRange();
+            if (freeRange == ring.residentFreeRanges.end() &&
+                ring.residentLastSweepEpoch != ring.residentEpoch)
+            {
+                reclaimExpiredResidentSpans(ring, extensions);
+                freeRange = findFreeRange();
+            }
+            if (freeRange != ring.residentFreeRanges.end())
+            {
+                first = freeRange->first;
+                freeRange->first += count;
+                freeRange->count -= count;
+                if (freeRange->count == 0u)
+                    ring.residentFreeRanges.erase(freeRange);
+                return true;
+            }
+
+            const std::size_t required = ring.residentHighWater + count;
+            if (!ensureResidentCapacity(ring, required, state))
+                return false;
+            first = static_cast<std::uint32_t>(ring.residentHighWater);
+            ring.residentHighWater = required;
+            return true;
+        }
+
+        bool uploadResidentInstances(
+            ContextRing& ring,
+            const FrameData& frame,
+            const osg::Camera* camera,
+            std::uint64_t frameNumber,
+            osg::State& state,
+            const osg::GLExtensions* extensions) const
+        {
+            if (ring.residentCamera == camera &&
+                ring.residentFrame == frameNumber &&
+                ring.residentBuffer &&
+                ring.residentBases.size() == frame.sources.size())
+            {
+                return true;
+            }
+
+            const std::size_t slot =
+                (ring.residentCurrentSlot + 1u) % INSTANCE_RING_SLOTS;
+            if (!waitAndDeleteFence(
+                    ring.residentFences[slot], extensions, true))
+            {
+                return false;
+            }
+            ring.residentCurrentSlot = slot;
+            ++ring.residentEpoch;
+
+            // Expired tile buffers are intentionally discovered in batches;
+            // a full hash-table sweep every draw would merely replace the old
+            // memcpy spike with allocator/bookkeeping traversal.
+            if (ring.residentEpoch - ring.residentLastSweepEpoch >= 60u)
+                reclaimExpiredResidentSpans(ring, extensions);
+
+            ring.residentBases.resize(frame.sources.size());
+            for (std::size_t index = 0u; index < frame.sources.size(); ++index)
+            {
+                const SourceSpan& source = frame.sources[index];
+                const ContextRing::ResidentKey key = {
+                    source.bufferID, source.offset, source.count };
+                const auto found = ring.residentSpans.find(key);
+                if (found != ring.residentSpans.end() &&
+                    found->second.owner.valid())
+                {
+                    ring.residentBases[index] = found->second.first;
+                    ++_ringReuses;
+                    continue;
+                }
+
+                std::uint32_t first = 0u;
+                if (!allocateResidentRange(
+                        ring, source.count, state, extensions, first) ||
+                    !ring.residentBuffer)
+                {
+                    return false;
+                }
+
+                const unsigned char* sourceBytes =
+                    static_cast<const unsigned char*>(
+                        source.buffer->getDataPointer()) +
+                    source.offset * PACKED_INSTANCE_SIZE;
+                ring.residentBuffer->bind();
+                ring.residentBuffer->bufferSubData(
+                    static_cast<GLintptr>(
+                        static_cast<std::size_t>(first) * PACKED_INSTANCE_SIZE),
+                    static_cast<GLsizei>(
+                        static_cast<std::size_t>(source.count) *
+                        PACKED_INSTANCE_SIZE),
+                    sourceBytes);
+                ring.residentBuffer->unbind();
+
+                ContextRing::ResidentSpan resident;
+                resident.owner = source.buffer.get();
+                resident.first = first;
+                resident.count = source.count;
+                ring.residentSpans[key] = resident;
+                ring.residentBases[index] = first;
+                ++_ringUploads;
+            }
+
+            ring.residentCamera = camera;
+            ring.residentFrame = frameNumber;
+            return ring.residentBuffer != nullptr;
+        }
+
+        void fenceResidentFrame(
+            ContextRing& ring,
+            const osg::GLExtensions* extensions) const
+        {
+            GLSyncHandle& fence =
+                ring.residentFences[ring.residentCurrentSlot];
+            if (fence)
+                extensions->glDeleteSync(fence);
+            fence = extensions->glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0u);
+        }
+
+        bool ensureGPUCullBuffers(
+            ContextRing& ring,
+            const FrameData& frame,
+            osg::State& state) const
+        {
+            const std::size_t maximumRecords =
+                static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()) /
+                PACKED_INSTANCE_SIZE;
+            if (frame.instanceCount == 0u || frame.instanceCount > maximumRecords ||
+                frame.spans.empty() ||
+                frame.spans.size() > std::numeric_limits<std::uint32_t>::max())
+            {
+                return false;
+            }
+
+            if (!ring.culledBuffer || frame.instanceCount > ring.culledCapacity)
+            {
+                std::size_t capacity = ring.culledCapacity == 0u ? 65536u :
+                    ring.culledCapacity + ring.culledCapacity / 2u;
+                capacity = std::min(
+                    maximumRecords, std::max(capacity, frame.instanceCount));
+                ring.culledBuffer = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+                ring.culledBuffer->uploadData(static_cast<GLsizei>(
+                    capacity * PACKED_INSTANCE_SIZE), nullptr, GL_DYNAMIC_DRAW);
+                ring.culledCapacity = capacity;
+            }
+
+            if (!ring.spanBuffer || !ring.countBuffer ||
+                frame.spans.size() > ring.batchCapacity)
+            {
+                std::size_t capacity = ring.batchCapacity == 0u ? 128u :
+                    ring.batchCapacity + ring.batchCapacity / 2u;
+                capacity = std::max(capacity, frame.spans.size());
+                if (capacity > static_cast<std::size_t>(
+                    std::numeric_limits<GLsizei>::max()) / sizeof(GPUCullSpan))
+                {
+                    return false;
+                }
+                ring.spanBuffer = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+                ring.countBuffer = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+                ring.spanBuffer->uploadData(static_cast<GLsizei>(
+                    capacity * sizeof(GPUCullSpan)), nullptr, GL_DYNAMIC_DRAW);
+                ring.countBuffer->uploadData(static_cast<GLsizei>(
+                    capacity * sizeof(std::uint32_t)), nullptr, GL_DYNAMIC_DRAW);
+                ring.batchCapacity = capacity;
+                ring.gpuMetadataRevision =
+                    std::numeric_limits<std::uint64_t>::max();
+            }
+
+            if (ring.gpuMetadataRevision != ring.layoutRevision)
+            {
+                ring.spanScratch.resize(frame.spans.size());
+                ring.workScratch.clear();
+                ring.workScratch.reserve(
+                    (frame.instanceCount + KIT_CULL_WORKGROUP_SIZE - 1u) /
+                    KIT_CULL_WORKGROUP_SIZE + frame.spans.size());
+                for (std::size_t i = 0u; i < frame.spans.size(); ++i)
+                {
+                    const DrawSpan& span = frame.spans[i];
+                    ring.spanScratch[i].firstInstance = span.firstInstance;
+                    ring.spanScratch[i].instanceCount = span.instanceCount;
+                    for (std::uint32_t offset = 0u;
+                         offset < span.instanceCount;
+                         offset += KIT_CULL_WORKGROUP_SIZE)
+                    {
+                        GPUCullWorkItem item;
+                        item.firstInstance = span.firstInstance + offset;
+                        item.instanceCount = std::min<std::uint32_t>(
+                            KIT_CULL_WORKGROUP_SIZE,
+                            span.instanceCount - offset);
+                        item.batchIndex = static_cast<std::uint32_t>(i);
+                        ring.workScratch.push_back(item);
+                    }
+                }
+                if (ring.workScratch.empty() ||
+                    ring.workScratch.size() > static_cast<std::size_t>(
+                        std::numeric_limits<GLuint>::max()) ||
+                    ring.workScratch.size() > static_cast<std::size_t>(
+                        std::numeric_limits<GLsizei>::max()) /
+                        sizeof(GPUCullWorkItem))
+                {
+                    return false;
+                }
+                if (!ring.workBuffer)
+                    ring.workBuffer = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+                ring.workBuffer->uploadData(ring.workScratch, GL_DYNAMIC_DRAW);
+                ring.spanBuffer->uploadData(ring.spanScratch, GL_DYNAMIC_DRAW);
+                ring.workCount = ring.workScratch.size();
+                ring.gpuMetadataRevision = ring.layoutRevision;
+            }
+
+            return ring.culledBuffer && ring.workBuffer && ring.spanBuffer &&
+                ring.countBuffer && ring.workCount > 0u;
+        }
+
+        void restoreDrawProgram(
+            osg::State& state,
+            const osg::Program::PerContextProgram* drawProgram) const
+        {
+            if (drawProgram)
+            {
+                drawProgram->useProgram();
+                state.setLastAppliedProgramObject(drawProgram);
+            }
+        }
+
+        bool activateGPUCullProgram(
+            ContextRing& ring,
+            osg::State& state,
+            const osg::Program::PerContextProgram* drawProgram) const
+        {
+            if (!_gpuCullProgram.valid() || !ring.gpuCullAvailable)
+                return false;
+
+            _gpuCullProgram->apply(state);
+            const osg::Program::PerContextProgram* program =
+                state.getLastAppliedProgramObject();
+            if (!program || program == drawProgram)
+            {
+                ring.gpuCullAvailable = false;
+                restoreDrawProgram(state, drawProgram);
+                return false;
+            }
+
+            ContextRing::CullUniforms& uniforms = ring.cullUniforms;
+            if (uniforms.program != program)
+            {
+                uniforms.program = program;
+                uniforms.pass = program->getUniformLocation("oe_kit_pass");
+                uniforms.batchCount = program->getUniformLocation("oe_kit_batchCount");
+                uniforms.inputBase = program->getUniformLocation("oe_kit_inputBase");
+                uniforms.primitiveCount = program->getUniformLocation("oe_kit_primitiveCount");
+                uniforms.primitiveFirst = program->getUniformLocation("oe_kit_primitiveFirst");
+                uniforms.baseVertex = program->getUniformLocation("oe_kit_baseVertex");
+                uniforms.modelSphere = program->getUniformLocation("oe_kit_modelSphere");
+                uniforms.projection = program->getUniformLocation("oe_kit_projection");
+            }
+            if (uniforms.pass < 0 || uniforms.batchCount < 0 ||
+                uniforms.inputBase < 0 || uniforms.primitiveCount < 0 ||
+                uniforms.primitiveFirst < 0 || uniforms.baseVertex < 0 ||
+                uniforms.modelSphere < 0 || uniforms.projection < 0)
+            {
+                ring.gpuCullAvailable = false;
+                restoreDrawProgram(state, drawProgram);
+                return false;
+            }
+            return true;
+        }
+
+        bool runGPUCull(
+            ContextRing& ring,
+            const FrameData& frame,
+            const osg::Camera* camera,
+            std::uint64_t frameNumber,
+            std::uint32_t inputBaseInstance,
+            osg::GLBufferObject* descriptorGL,
+            osg::State& state,
+            const osg::GLExtensions* extensions) const
+        {
+            if (!_gpuCullSettings.valid() || !_gpuCullSettings->enabled.load() ||
+                !ring.gpuCullAvailable || !extensions->glDispatchCompute ||
+                !extensions->glMemoryBarrier || !extensions->glUniform1i ||
+                !extensions->glUniform1ui || !extensions->glUniform4f ||
+                !extensions->glUniformMatrix4fv || !descriptorGL)
+            {
+                return false;
+            }
+            if (ring.gpuCulledCamera == camera &&
+                ring.gpuCulledFrame == frameNumber)
+            {
+                return true;
+            }
+            if (!ensureGPUCullBuffers(ring, frame, state))
+                return false;
+
+            const osg::Program::PerContextProgram* drawProgram =
+                state.getLastAppliedProgramObject();
+            if (!drawProgram || !activateGPUCullProgram(ring, state, drawProgram))
+                return false;
+
+            extensions->glBindBufferBase(
+                GL_SHADER_STORAGE_BUFFER, KIT_CULL_INPUT_BINDING,
+                ring.buffer->name());
+            ring.culledBuffer->bindBufferBase(KIT_CULL_OUTPUT_BINDING);
+            ring.workBuffer->bindBufferBase(KIT_CULL_WORK_BINDING);
+            ring.spanBuffer->bindBufferBase(KIT_CULL_SPAN_BINDING);
+            ring.countBuffer->bindBufferBase(KIT_CULL_COUNT_BINDING);
+            extensions->glBindBufferBase(
+                GL_SHADER_STORAGE_BUFFER, KIT_BATCH_SSBO_BINDING,
+                descriptorGL->getGLObjectID());
+
+            const ContextRing::CullUniforms& uniforms = ring.cullUniforms;
+            const GLuint batchCount = static_cast<GLuint>(frame.spans.size());
+            extensions->glUniform1ui(uniforms.batchCount, batchCount);
+            extensions->glUniform1i(uniforms.pass, 0);
+            extensions->glDispatchCompute(
+                (batchCount + KIT_CULL_WORKGROUP_SIZE - 1u) /
+                    KIT_CULL_WORKGROUP_SIZE,
+                1u, 1u);
+            extensions->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+            const osg::Vec3f center = _modelBounds.center();
+            const float radius = _modelBounds.radius();
+            const osg::Matrixf projection(state.getProjectionMatrix());
+            extensions->glUniform1i(uniforms.pass, 1);
+            extensions->glUniform1ui(uniforms.inputBase, inputBaseInstance);
+            extensions->glUniform4f(
+                uniforms.modelSphere, center.x(), center.y(), center.z(), radius);
+            extensions->glUniformMatrix4fv(
+                uniforms.projection, 1, GL_FALSE, projection.ptr());
+            extensions->glDispatchCompute(
+                static_cast<GLuint>(ring.workCount), 1u, 1u);
+            extensions->glMemoryBarrier(
+                GL_SHADER_STORAGE_BARRIER_BIT |
+                GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
+
+            restoreDrawProgram(state, drawProgram);
+            ring.gpuCulledCamera = camera;
+            ring.gpuCulledFrame = frameNumber;
+            ++_gpuCullDispatches;
+            return true;
+        }
+
+        bool buildGPUCommands(
+            ContextRing& ring,
+            const FrameData& frame,
+            GLBuffer::Ptr commandBuffer,
+            bool elements,
+            std::uint32_t primitiveCount,
+            std::uint32_t primitiveFirst,
+            std::uint32_t baseVertex,
+            osg::State& state,
+            const osg::GLExtensions* extensions) const
+        {
+            if (!commandBuffer || !ring.countBuffer || !ring.spanBuffer)
+                return false;
+            const osg::Program::PerContextProgram* drawProgram =
+                state.getLastAppliedProgramObject();
+            if (!drawProgram || !activateGPUCullProgram(ring, state, drawProgram))
+                return false;
+
+            ring.spanBuffer->bindBufferBase(KIT_CULL_SPAN_BINDING);
+            ring.countBuffer->bindBufferBase(KIT_CULL_COUNT_BINDING);
+            commandBuffer->bindBufferBase(KIT_CULL_COMMAND_BINDING);
+            const ContextRing::CullUniforms& uniforms = ring.cullUniforms;
+            const GLuint batchCount = static_cast<GLuint>(frame.spans.size());
+            extensions->glUniform1i(uniforms.pass, elements ? 3 : 2);
+            extensions->glUniform1ui(uniforms.batchCount, batchCount);
+            extensions->glUniform1ui(uniforms.primitiveCount, primitiveCount);
+            extensions->glUniform1ui(uniforms.primitiveFirst, primitiveFirst);
+            extensions->glUniform1ui(uniforms.baseVertex, baseVertex);
+            extensions->glDispatchCompute(
+                (batchCount + KIT_CULL_WORKGROUP_SIZE - 1u) /
+                    KIT_CULL_WORKGROUP_SIZE,
+                1u, 1u);
+            extensions->glMemoryBarrier(
+                GL_COMMAND_BARRIER_BIT |
+                GL_SHADER_STORAGE_BARRIER_BIT |
+                GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
+            restoreDrawProgram(state, drawProgram);
+            return true;
+        }
+
         bool uploadVisibleInstances(
             ContextRing& ring,
             const FrameData& frame,
@@ -1017,6 +1838,20 @@ namespace
             {
                 baseInstance = static_cast<std::uint32_t>(
                     ring.currentSlot * ring.capacity);
+                return true;
+            }
+
+            // Instance records are immutable after a city tile is compiled.
+            // Camera movement changes the descriptor transforms, but usually
+            // leaves the ordered set of visible source spans unchanged. Keep
+            // drawing the resident slot until paging or LOD changes that set.
+            if (layoutMatches(ring, frame))
+            {
+                ring.uploadedCamera = camera;
+                ring.uploadedFrame = frameNumber;
+                baseInstance = static_cast<std::uint32_t>(
+                    ring.currentSlot * ring.capacity);
+                ++_ringReuses;
                 return true;
             }
             if (!ensureRingCapacity(ring, frame.instanceCount, state, extensions))
@@ -1066,6 +1901,17 @@ namespace
             ring.currentSlot = slot;
             ring.uploadedCamera = camera;
             ring.uploadedFrame = frameNumber;
+            ring.layout.resize(frame.sources.size());
+            for (std::size_t i = 0u; i < frame.sources.size(); ++i)
+            {
+                ring.layout[i].bufferID = frame.sources[i].bufferID;
+                ring.layout[i].offset = frame.sources[i].offset;
+                ring.layout[i].count = frame.sources[i].count;
+            }
+            ++ring.layoutRevision;
+            ring.gpuCulledCamera = nullptr;
+            ring.gpuCulledFrame = std::numeric_limits<std::uint64_t>::max();
+            ++_ringUploads;
             baseInstance = static_cast<std::uint32_t>(slotFirst);
             return true;
         }
@@ -1084,10 +1930,15 @@ namespace
         osg::BoundingBox _modelBounds;
         unsigned _drawables = 0u;
         osg::ref_ptr<InstanceBudget> _budget;
+        osg::ref_ptr<GPUCullSettings> _gpuCullSettings;
+        osg::ref_ptr<osg::Program> _gpuCullProgram;
         mutable std::mutex _mutex;
         mutable std::unordered_map<const osg::Camera*, CameraFrames> _frames;
         mutable std::unordered_map<unsigned, std::unique_ptr<ContextRing>> _contextRings;
         mutable std::uint64_t _ringStalls = 0u;
+        mutable std::uint64_t _ringUploads = 0u;
+        mutable std::uint64_t _ringReuses = 0u;
+        mutable std::uint64_t _gpuCullDispatches = 0u;
     };
 
     void CollectedGeometry::drawImplementation(osg::RenderInfo& renderInfo) const
@@ -1140,19 +1991,36 @@ namespace
             ringPtr = std::make_unique<ModelCollector::ContextRing>();
         ModelCollector::ContextRing& ring = *ringPtr;
         std::uint32_t ringBaseInstance = 0u;
-        if (!_collector->uploadVisibleInstances(
+        const bool gpuCullingRequested =
+            _collector->_gpuCullSettings.valid() &&
+            _collector->_gpuCullSettings->enabled.load();
+        const bool usingResidentArena = !gpuCullingRequested;
+        const bool instancesReady = usingResidentArena ?
+            _collector->uploadResidentInstances(
+                ring, frame, camera, frameNumber, state, extensions) :
+            _collector->uploadVisibleInstances(
                 ring, frame, camera, frameNumber, state, extensions,
-                ringBaseInstance))
+                ringBaseInstance);
+        if (!instancesReady)
         {
             return;
         }
 
         osg::GLBufferObject* descriptorGL =
             frame.descriptors->getOrCreateGLBufferObject(state.getContextID());
-        if (!ring.buffer || !descriptorGL)
+        if ((!usingResidentArena && !ring.buffer) ||
+            (usingResidentArena && !ring.residentBuffer) || !descriptorGL)
             return;
         if (descriptorGL->isDirty())
             descriptorGL->compileBuffer();
+
+        // Compact surviving instances and generate the indirect counts on the
+        // GPU. If compute shaders are unavailable (or disabled), retain the
+        // original CPU-built indirect path below.
+        const bool gpuCulled = gpuCullingRequested &&
+            _collector->runGPUCull(
+                ring, frame, camera, frameNumber, ringBaseInstance,
+                descriptorGL, state, extensions);
 
         extensions->glBindBufferBase(
             GL_SHADER_STORAGE_BUFFER, KIT_BATCH_SSBO_BINDING,
@@ -1163,7 +2031,11 @@ namespace
         osg::VertexArrayState* vas = state.getCurrentVertexArrayState();
         vas->setVertexBufferObjectSupported(usingVertexBufferObjects);
         drawVertexArraysImplementation(renderInfo);
-        extensions->glBindBuffer(GL_ARRAY_BUFFER_ARB, ring.buffer->name());
+        extensions->glBindBuffer(
+            GL_ARRAY_BUFFER_ARB,
+            gpuCulled ? ring.culledBuffer->name() :
+            (usingResidentArena ?
+                ring.residentBuffer->name() : ring.buffer->name()));
 
         const std::uintptr_t base = 0u;
         const GLsizei stride = static_cast<GLsizei>(sizeof(StagedInstance));
@@ -1196,6 +2068,45 @@ namespace
             if (const osg::DrawArrays* arrays =
                 dynamic_cast<const osg::DrawArrays*>(primitive.get()))
             {
+                if (gpuCulled)
+                {
+                    GPUCommandBuffer& commands =
+                        _gpuArrayCommands[state.getContextID()];
+                    if (!commands.buffer ||
+                        frame.spans.size() > commands.capacity)
+                    {
+                        const std::size_t capacity = std::max<std::size_t>(
+                            128u, frame.spans.size() + frame.spans.size() / 2u);
+                        if (capacity > static_cast<std::size_t>(
+                            std::numeric_limits<GLsizei>::max()) /
+                            sizeof(DrawArraysCommand))
+                        {
+                            continue;
+                        }
+                        commands.buffer = GLBuffer::create(
+                            GL_SHADER_STORAGE_BUFFER, state);
+                        commands.buffer->uploadData(static_cast<GLsizei>(
+                            capacity * sizeof(DrawArraysCommand)), nullptr,
+                            GL_DYNAMIC_DRAW);
+                        commands.capacity = capacity;
+                    }
+                    if (!_collector->buildGPUCommands(
+                            ring, frame, commands.buffer, false,
+                            static_cast<std::uint32_t>(arrays->getCount()),
+                            static_cast<std::uint32_t>(arrays->getFirst()),
+                            0u, state, extensions))
+                    {
+                        continue;
+                    }
+                    state.unbindDrawIndirectBufferObject();
+                    commands.buffer->bind(GL_DRAW_INDIRECT_BUFFER);
+                    extensions->glMultiDrawArraysIndirect(
+                        arrays->getMode(), nullptr, drawCount,
+                        static_cast<GLsizei>(sizeof(DrawArraysCommand)));
+                    extensions->glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0u);
+                    continue;
+                }
+
                 _arrayCommands->values.resize(frame.spans.size());
                 for (std::size_t i = 0u; i < frame.spans.size(); ++i)
                 {
@@ -1203,7 +2114,8 @@ namespace
                     command.count = static_cast<std::uint32_t>(arrays->getCount());
                     command.instanceCount = frame.spans[i].instanceCount;
                     command.first = static_cast<std::uint32_t>(arrays->getFirst());
-                    command.baseInstance =
+                    command.baseInstance = usingResidentArena ?
+                        ring.residentBases[i] :
                         ringBaseInstance + frame.spans[i].firstInstance;
                 }
                 _arrayCommands->dirty();
@@ -1245,6 +2157,44 @@ namespace
             const std::uint32_t firstIndex = static_cast<std::uint32_t>(
                 elementGL->getOffset(primitive->getBufferIndex()) / indexSize);
 
+            if (gpuCulled)
+            {
+                GPUCommandBuffer& commands =
+                    _gpuElementCommands[state.getContextID()];
+                if (!commands.buffer || frame.spans.size() > commands.capacity)
+                {
+                    const std::size_t capacity = std::max<std::size_t>(
+                        128u, frame.spans.size() + frame.spans.size() / 2u);
+                    if (capacity > static_cast<std::size_t>(
+                        std::numeric_limits<GLsizei>::max()) /
+                        sizeof(DrawElementsCommand))
+                    {
+                        continue;
+                    }
+                    commands.buffer = GLBuffer::create(
+                        GL_SHADER_STORAGE_BUFFER, state);
+                    commands.buffer->uploadData(static_cast<GLsizei>(
+                        capacity * sizeof(DrawElementsCommand)), nullptr,
+                        GL_DYNAMIC_DRAW);
+                    commands.capacity = capacity;
+                }
+                if (!_collector->buildGPUCommands(
+                        ring, frame, commands.buffer, true,
+                        elements->getNumIndices(), firstIndex, 0u,
+                        state, extensions))
+                {
+                    continue;
+                }
+                state.unbindDrawIndirectBufferObject();
+                commands.buffer->bind(GL_DRAW_INDIRECT_BUFFER);
+                extensions->glMultiDrawElementsIndirect(
+                    elements->getMode(), elements->getDataType(), nullptr,
+                    drawCount,
+                    static_cast<GLsizei>(sizeof(DrawElementsCommand)));
+                extensions->glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0u);
+                continue;
+            }
+
             _elementCommands->values.resize(frame.spans.size());
             for (std::size_t i = 0u; i < frame.spans.size(); ++i)
             {
@@ -1253,7 +2203,8 @@ namespace
                 command.instanceCount = frame.spans[i].instanceCount;
                 command.firstIndex = firstIndex;
                 command.baseVertex = 0u;
-                command.baseInstance =
+                command.baseInstance = usingResidentArena ?
+                    ring.residentBases[i] :
                     ringBaseInstance + frame.spans[i].firstInstance;
             }
             _elementCommands->dirty();
@@ -1281,14 +2232,36 @@ namespace
         }
         extensions->glBindBufferBase(
             GL_SHADER_STORAGE_BUFFER, KIT_BATCH_SSBO_BINDING, 0u);
+        if (gpuCulled)
+        {
+            for (GLuint binding = KIT_CULL_INPUT_BINDING;
+                 binding <= KIT_CULL_COMMAND_BINDING; ++binding)
+            {
+                extensions->glBindBufferBase(
+                    GL_SHADER_STORAGE_BUFFER, binding, 0u);
+            }
+        }
         vas->unbindVertexBufferObject();
         vas->unbindElementBufferObject();
-        _collector->fenceCurrentSlot(ring, extensions);
+        if (usingResidentArena)
+            _collector->fenceResidentFrame(ring, extensions);
+        else
+            _collector->fenceCurrentSlot(ring, extensions);
     }
 
     void CollectedGeometry::releaseGLObjects(osg::State* state) const
     {
         osg::Geometry::releaseGLObjects(state);
+        if (state)
+        {
+            _gpuArrayCommands.erase(state->getContextID());
+            _gpuElementCommands.erase(state->getContextID());
+        }
+        else
+        {
+            _gpuArrayCommands.clear();
+            _gpuElementCommands.clear();
+        }
         if (_collector.valid())
             _collector->releaseGLObjects(state);
     }
@@ -1346,6 +2319,13 @@ namespace
         KitRenderer()
         {
             _budget = new InstanceBudget();
+            _gpuCullSettings = new GPUCullSettings();
+            Shaders shaders;
+            _gpuCullProgram = new osg::Program();
+            _gpuCullProgram->setName("KitCollectedCulling");
+            _gpuCullProgram->addShader(new osg::Shader(
+                osg::Shader::COMPUTE,
+                ShaderLoader::load(shaders.KitCollectedCulling, shaders)));
             setName("Kit scene-wide renderer");
             setCullingActive(false);
             auto vp = Registry::instance()->getOrCreate<VirtualProgram>(
@@ -1377,7 +2357,8 @@ namespace
             prepared->accept(boundsVisitor);
             ModelRecord record;
             record.collector = new ModelCollector(
-                boundsVisitor.getBoundingBox(), _budget.get());
+                boundsVisitor.getBoundingBox(), _budget.get(),
+                _gpuCullSettings.get(), _gpuCullProgram.get());
             record.branch = osg::clone(
                 prepared,
                 osg::CopyOp::DEEP_COPY_NODES |
@@ -1474,6 +2455,16 @@ namespace
             return result;
         }
 
+        void setGPUCullingEnabled(bool value)
+        {
+            _gpuCullSettings->enabled.store(value);
+        }
+
+        bool getGPUCullingEnabled() const
+        {
+            return _gpuCullSettings->enabled.load();
+        }
+
     private:
         struct ModelRecord
         {
@@ -1481,6 +2472,8 @@ namespace
             osg::ref_ptr<ModelCollector> collector;
         };
         osg::ref_ptr<InstanceBudget> _budget;
+        osg::ref_ptr<GPUCullSettings> _gpuCullSettings;
+        osg::ref_ptr<osg::Program> _gpuCullProgram;
         std::map<std::string, ModelRecord> _models;
     };
 
@@ -1505,8 +2498,8 @@ namespace
             submission.collector = collector;
             submission.batch = batch;
             // The tile owns its one compact aggregate buffer. Cull traversal
-            // submits spans into it; the renderer copies only visible spans
-            // into its bounded transient ring for the current frame.
+            // submits spans into it; the renderer uploads each immutable span
+            // once and reuses its stable GPU-arena range across frames.
             _submissions.emplace_back(std::move(submission));
             if (batch.bounds.valid())
                 _bounds.expandBy(batch.bounds);
@@ -1530,6 +2523,15 @@ namespace
                 for (const Submission& submission : _submissions)
                 {
                     const CompactBatch& batch = submission.batch;
+                    // InstanceNode has one city-wide bound, but each compact
+                    // batch represents a much smaller spatial chunk. Reject
+                    // chunks against the active frustum before submitting
+                    // their records to the scene-wide renderer. This restores
+                    // the fine-grained culling that was lost when thousands of
+                    // per-batch scene-graph nodes were collapsed into one.
+                    if (cull && batch.bounds.valid() && cull->isCulled(batch.bounds))
+                        continue;
+
                     if (!isAlwaysVisible(batch.range.x(), batch.range.y()) &&
                         batch.bounds.valid())
                     {
@@ -1614,8 +2616,10 @@ namespace
 
         const std::array<char, 8> version1Magic = { 'O', 'E', 'K', 'I', 'T', 'B', '0', '1' };
         const std::array<char, 8> version2Magic = { 'O', 'E', 'K', 'I', 'T', 'B', '0', '2' };
-        const bool hasInstanceRanges = magic == version2Magic;
-        if (magic != version1Magic && !hasInstanceRanges)
+        const std::array<char, 8> version3Magic = { 'O', 'E', 'K', 'I', 'T', 'B', '0', '3' };
+        const bool hasInstanceRanges = magic == version2Magic || magic == version3Magic;
+        const bool hasInstanceTints = magic == version3Magic;
+        if (magic != version1Magic && magic != version2Magic && magic != version3Magic)
             return osgDB::ReaderWriter::ReadResult("Invalid binary kit city signature");
         if (endianMarker != 0x01020304u)
             return osgDB::ReaderWriter::ReadResult("Unsupported binary kit city byte order");
@@ -1641,12 +2645,13 @@ namespace
             if (!input.read(&model[0], static_cast<std::streamsize>(modelLength)))
                 return osgDB::ReaderWriter::ReadResult("Truncated binary kit city model name");
 
-            std::array<float, 9> batchValues = {};
+            std::array<float, 12> batchValues = {};
             std::uint64_t count = 0u;
+            const std::size_t batchValueCount = hasInstanceTints ?
+                batchValues.size() : (hasInstanceRanges ? 9u : 7u);
             if (!input.read(
                     reinterpret_cast<char*>(batchValues.data()),
-                    static_cast<std::streamsize>(sizeof(float) *
-                        (hasInstanceRanges ? batchValues.size() : 7u))) ||
+                    static_cast<std::streamsize>(sizeof(float) * batchValueCount)) ||
                 !readBinaryValue(input, count) ||
                 count > totalInstanceCount - instancesRead)
             {
@@ -1663,8 +2668,13 @@ namespace
             instanceBatch.minRange = hasInstanceRanges ? batchValues[7] : 0.0f;
             instanceBatch.maxRange = hasInstanceRanges ? batchValues[8] :
                 std::numeric_limits<float>::max();
+            instanceBatch.tint = hasInstanceTints ?
+                osg::Vec3f(batchValues[9], batchValues[10], batchValues[11]) :
+                osg::Vec3f(1.0f, 1.0f, 1.0f);
             if (!validRange(instanceBatch.minRange, instanceBatch.maxRange))
                 return osgDB::ReaderWriter::ReadResult("Invalid binary kit city instance range");
+            if (!validTint(instanceBatch.tint))
+                return osgDB::ReaderWriter::ReadResult("Invalid binary kit city instance tint");
             instanceBatch.positions.resize(static_cast<std::size_t>(count));
             const std::streamsize positionBytes = static_cast<std::streamsize>(
                 count * sizeof(osg::Vec3f));
@@ -1748,7 +2758,7 @@ namespace
                 if (command == "kitcity")
                 {
                     tokens >> cityVersion;
-                    if (cityVersion != 1u && cityVersion != 2u)
+                    if (cityVersion < 1u || cityVersion > 3u)
                         return ReadResult("Unsupported kitcity version");
                     sawHeader = true;
                 }
@@ -1786,18 +2796,32 @@ namespace
                     if (!tokens || value.model.empty())
                         return ReadResult("Malformed instance on line " + std::to_string(lineNumber));
 
-                    tokens >> std::ws;
+                    std::vector<float> extras;
+                    float extra = 0.0f;
+                    while (tokens >> extra)
+                        extras.push_back(extra);
                     if (!tokens.eof())
+                        return ReadResult("Malformed instance data on line " + std::to_string(lineNumber));
+
+                    if (extras.size() == 2u || extras.size() == 5u)
                     {
-                        tokens >> value.minRange >> value.maxRange;
-                        if (!tokens)
-                            return ReadResult("Malformed instance range on line " + std::to_string(lineNumber));
-                        tokens >> std::ws;
-                        if (!tokens.eof())
-                            return ReadResult("Unexpected instance data on line " + std::to_string(lineNumber));
+                        value.minRange = extras[0];
+                        value.maxRange = extras[1];
                     }
+                    if (cityVersion >= 3u && (extras.size() == 3u || extras.size() == 5u))
+                    {
+                        const std::size_t offset = extras.size() == 5u ? 2u : 0u;
+                        value.tint.set(extras[offset], extras[offset + 1u], extras[offset + 2u]);
+                    }
+                    const bool validExtraCount =
+                        extras.empty() || extras.size() == 2u ||
+                        (cityVersion >= 3u && (extras.size() == 3u || extras.size() == 5u));
+                    if (!validExtraCount)
+                        return ReadResult("Unexpected instance data on line " + std::to_string(lineNumber));
                     if (!validRange(value.minRange, value.maxRange))
                         return ReadResult("Invalid instance range on line " + std::to_string(lineNumber));
+                    if (!validTint(value.tint))
+                        return ReadResult("Invalid instance tint on line " + std::to_string(lineNumber));
                     current->addInstance(value);
                 }
                 else
@@ -1843,9 +2867,10 @@ void KitNode::addInstance(
     const osg::Quat& rotation,
     const osg::Vec3f& scale,
     float minRange,
-    float maxRange)
+    float maxRange,
+    const osg::Vec3f& tint)
 {
-    addInstance(Instance(model, position, rotation, scale, minRange, maxRange));
+    addInstance(Instance(model, position, rotation, scale, minRange, maxRange, tint));
 }
 
 void KitNode::clearInstances()
@@ -1868,6 +2893,16 @@ void KitNode::setInstanceBatches(InstanceBatches&& values)
 {
     _instances.clear();
     _instanceBatches = std::move(values);
+    for (auto& batch : _instanceBatches)
+    {
+        KitNode::Instance normalized(
+            batch.model, osg::Vec3f(), batch.rotation, batch.scale,
+            batch.minRange, batch.maxRange, batch.tint);
+        normalized = normalizeInstanceRange(normalized);
+        batch.minRange = normalized.minRange;
+        batch.maxRange = normalized.maxRange;
+        batch.tint = normalized.tint;
+    }
     dirtyBound();
 }
 
@@ -1883,7 +2918,7 @@ void KitNode::materializeInstances() const
         {
             _instances.emplace_back(
                 batch.model, position, batch.rotation, batch.scale,
-                batch.minRange, batch.maxRange);
+                batch.minRange, batch.maxRange, batch.tint);
         }
     }
     _instanceBatches.clear();
@@ -1998,6 +3033,19 @@ std::uint64_t Kit::getInstanceRingStallCount() const
 {
     const KitRenderer* renderer = dynamic_cast<const KitRenderer*>(_renderNode.get());
     return renderer ? renderer->getRingStalls() : 0u;
+}
+
+void Kit::setGPUCullingEnabled(bool value)
+{
+    KitRenderer* renderer = dynamic_cast<KitRenderer*>(_renderNode.get());
+    if (renderer)
+        renderer->setGPUCullingEnabled(value);
+}
+
+bool Kit::getGPUCullingEnabled() const
+{
+    const KitRenderer* renderer = dynamic_cast<const KitRenderer*>(_renderNode.get());
+    return renderer ? renderer->getGPUCullingEnabled() : false;
 }
 
 bool Kit::load(
@@ -2120,6 +3168,8 @@ osg::Group* Kit::createInstancedNode(osg::Node* source, BuildStats* outStats) co
         totalInstances += entry.second.positions->size();
     InstanceBuilder instanceBuilder;
     instanceBuilder.reserveInstances(totalInstances);
+    const std::uint64_t instanceBufferID =
+        s_nextInstanceBufferID.fetch_add(1u, std::memory_order_relaxed);
     KitRenderer* renderer = static_cast<KitRenderer*>(_renderNode.get());
     std::set<ModelCollector*> referencedCollectors;
 
@@ -2143,6 +3193,7 @@ osg::Group* Kit::createInstancedNode(osg::Node* source, BuildStats* outStats) co
         instanceBuilder.setPositions(entry.second.positions.get());
         instanceBuilder.setRotations(entry.second.rotations.get());
         instanceBuilder.setScales(entry.second.scales.get());
+        instanceBuilder.setTints(entry.second.tints.get());
         instanceBuilder.setRange(osg::Vec2f(
             entry.first.minRange, entry.first.maxRange));
         instanceBuilder.compressInstanceAttributes();
@@ -2156,6 +3207,7 @@ osg::Group* Kit::createInstancedNode(osg::Node* source, BuildStats* outStats) co
         entry.second.positions = nullptr;
         entry.second.rotations = nullptr;
         entry.second.scales = nullptr;
+        entry.second.tints = nullptr;
 
         instanceBuilder.setBaseBoundingBox(collector->getModelBounds());
         if (collector->getDrawableCount() == 0u)
@@ -2166,6 +3218,7 @@ osg::Group* Kit::createInstancedNode(osg::Node* source, BuildStats* outStats) co
 
         CompactBatch compact;
         compact.buffer = instanceBuilder.getInstanceBuffer();
+        compact.bufferID = instanceBufferID;
         compact.offset = instanceBuilder.getInstanceOffset();
         compact.count = instanceBuilder.getInstanceCount();
         compact.positionOffset = instanceBuilder.getPositionOffset();

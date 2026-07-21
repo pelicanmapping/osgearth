@@ -1,0 +1,13 @@
+newmtl powerline
+Kd 0.1800 0.2000 0.2200
+Ka 0.0810 0.0900 0.0990
+Ke 0.0108 0.0120 0.0132
+Ks 0.02 0.02 0.02
+Ns 8.0
+illum 2
+newmtl road_surface
+Kd 1.0000 1.0000 1.0000
+Ka 0.08 0.08 0.08
+Ks 0.04 0.04 0.04
+Ns 12.0
+map_Kd ../textures/asphalt_road.jpg

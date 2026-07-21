@@ -68,6 +68,7 @@ set(TARGET_GLSL
     DepthOffset.glsl
     Draping.glsl
     DrawInstancedAttribute.glsl
+    KitCollectedCulling.glsl
     KitCollectedInstancing.glsl
     FrustumGrid.h.glsl
     FrustumGridComputer.glsl

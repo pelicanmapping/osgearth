@@ -1,7 +1,7 @@
 add_osgearth_app(
     TARGET osgearth_kit
     SOURCES osgearth_kit.cpp
-    LIBRARIES osgEarthImGui
+    LIBRARIES osgEarthImGui ${OSGPARTICLE_LIBRARY}
     FOLDER Examples)
 
 if(OSGEARTH_BUILD_PROCEDURAL_NODEKIT)

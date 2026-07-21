@@ -169,6 +169,7 @@ TEST_CASE("Kit reads compact binary city batches")
     CHECK(city->getInstances()[1].scale == osg::Vec3f(2.0f, 2.0f, 2.0f));
     CHECK(city->getInstances()[0].minRange == 0.0f);
     CHECK(city->getInstances()[0].maxRange == std::numeric_limits<float>::max());
+    CHECK(city->getInstances()[0].tint == osg::Vec3f(1.0f, 1.0f, 1.0f));
 }
 
 TEST_CASE("Kit reads version two binary instance ranges")
@@ -210,6 +211,47 @@ TEST_CASE("Kit reads version two binary instance ranges")
     CHECK(city->getInstances()[0].model == "window");
     CHECK(city->getInstances()[0].minRange == 25.0f);
     CHECK(city->getInstances()[0].maxRange == 750.0f);
+    CHECK(city->getInstances()[0].tint == osg::Vec3f(1.0f, 1.0f, 1.0f));
+}
+
+TEST_CASE("Kit reads version three binary instance tints")
+{
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "osgearth_kit_tint_test.kitcityb";
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        const std::array<char, 8> magic = { 'O', 'E', 'K', 'I', 'T', 'B', '0', '3' };
+        output.write(magic.data(), magic.size());
+        writeBinaryValue(output, std::uint32_t(0x01020304u));
+        writeBinaryValue(output, std::uint32_t(1u));
+        writeBinaryValue(output, std::uint64_t(1u));
+        const std::string model = "building";
+        writeBinaryValue(output, static_cast<std::uint32_t>(model.size()));
+        output.write(model.data(), model.size());
+        const std::array<float, 12> batchValues = {
+            0.0f, 0.0f, 0.0f, 1.0f,
+            1.0f, 1.0f, 1.0f,
+            25.0f, 750.0f,
+            0.125f, 0.5f, 0.875f
+        };
+        output.write(
+            reinterpret_cast<const char*>(batchValues.data()),
+            sizeof(float) * batchValues.size());
+        writeBinaryValue(output, std::uint64_t(1u));
+        const std::array<float, 3> position = { 1.0f, 2.0f, 3.0f };
+        output.write(
+            reinterpret_cast<const char*>(position.data()),
+            sizeof(float) * position.size());
+    }
+
+    osg::ref_ptr<osg::Node> node = osgDB::readRefNodeFile(path.string());
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    KitNode* city = dynamic_cast<KitNode*>(node.get());
+    REQUIRE(city != nullptr);
+    REQUIRE(city->getNumInstances() == 1u);
+    CHECK(city->getInstances()[0].tint == osg::Vec3f(0.125f, 0.5f, 0.875f));
 }
 
 TEST_CASE("Kit reads text instance ranges")
@@ -235,6 +277,30 @@ TEST_CASE("Kit reads text instance ranges")
     CHECK(value.model == "window");
     CHECK(value.minRange == 25.0f);
     CHECK(value.maxRange == 750.0f);
+}
+
+TEST_CASE("Kit reads text RGB instance tints")
+{
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "osgearth_kit_tint_test.kitcity";
+    {
+        std::ofstream output(path, std::ios::trunc);
+        REQUIRE(output.good());
+        output << "kitcity 3\n";
+        output << "instance \"building\" 1 2 3 0 0 0 1 1 1 1 25 750 0.125 0.5 0.875\n";
+    }
+
+    osg::ref_ptr<osg::Node> node = osgDB::readRefNodeFile(path.string());
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    REQUIRE(node.valid());
+    KitNodeFinder finder;
+    node->accept(finder);
+    REQUIRE(finder.nodes.size() == 1u);
+    const auto& value = finder.nodes.front()->getInstances().front();
+    CHECK(value.minRange == 25.0f);
+    CHECK(value.maxRange == 750.0f);
+    CHECK(value.tint == osg::Vec3f(0.125f, 0.5f, 0.875f));
 }
 
 TEST_CASE("Kit batches one model across lightweight nodes and parent transforms")

@@ -10,6 +10,7 @@
 #include <osg/MatrixTransform>
 #include <osg/Texture2D>
 #include <osg/CullFace>
+#include <osg/FrontFace>
 #include <osgDB/FileNameUtils>
 #include <osgDB/FileUtils>
 #include <osgDB/ReaderWriter>
@@ -266,7 +267,7 @@ public:
             const tinygltf::Scene &scene = model.scenes[i];
 
             for (size_t j = 0; j < scene.nodes.size(); j++) {
-                osg::Node* node = builder.createNode(model.nodes[scene.nodes[j]]);
+                osg::Node* node = builder.createNode(model.nodes[scene.nodes[j]], false);
                 if (node)
                 {
                     transform->addChild(node);
@@ -318,7 +319,7 @@ public:
             extractArrays(arrays);
         }
 
-        osg::Node* createNode(const tinygltf::Node& node) const
+        osg::Node* createNode(const tinygltf::Node& node, bool parentReversesWinding) const
         {
             osg::MatrixTransform* mt = new osg::MatrixTransform;
             if (node.matrix.size() == 16)
@@ -348,6 +349,25 @@ public:
                 mt->setMatrix(scale * rotation * translation);
             }
 
+            const osg::Matrixd& matrix = mt->getMatrix();
+            const double determinant =
+                matrix(0, 0) * (matrix(1, 1) * matrix(2, 2) - matrix(1, 2) * matrix(2, 1)) -
+                matrix(0, 1) * (matrix(1, 0) * matrix(2, 2) - matrix(1, 2) * matrix(2, 0)) +
+                matrix(0, 2) * (matrix(1, 0) * matrix(2, 1) - matrix(1, 1) * matrix(2, 0));
+            const bool localReversesWinding = determinant < 0.0;
+            const bool reversesWinding = parentReversesWinding != localReversesWinding;
+
+            // glTF permits transforms with a negative determinant. They mirror
+            // the geometry, so compensate for the resulting winding reversal.
+            // Set the counter-clockwise state as well when a second mirrored
+            // transform restores the original winding.
+            if (localReversesWinding)
+            {
+                mt->getOrCreateStateSet()->setAttribute(
+                    new osg::FrontFace(reversesWinding ?
+                        osg::FrontFace::CLOCKWISE : osg::FrontFace::COUNTER_CLOCKWISE));
+            }
+
 
             // todo transformation
             if (node.mesh >= 0)
@@ -368,7 +388,7 @@ public:
             // Load any children.
             for (unsigned int i = 0; i < node.children.size(); i++)
             {
-                osg::Node* child = createNode(model.nodes[node.children[i]]);
+                osg::Node* child = createNode(model.nodes[node.children[i]], reversesWinding);
                 if (child)
                 {
                     mt->addChild(child);
@@ -512,6 +532,12 @@ public:
                 if (primitive.material >= 0 && primitive.material < model.materials.size())
                 {
                     const tinygltf::Material& material = model.materials[primitive.material];
+
+                    if (material.doubleSided)
+                    {
+                        geom->getOrCreateStateSet()->setMode(
+                            GL_CULL_FACE, osg::StateAttribute::OFF);
+                    }
 
                     /*
                       OSG_NOTICE << "extCommonValues=" << material.extCommonValues.size() << std::endl;
@@ -1019,6 +1045,7 @@ public:
             auto itr = node.extensions.find("EXT_mesh_gpu_instancing");
             if (itr == node.extensions.end() || !itr->second.IsObject())
                 return;
+            OE_NOTICE << "Found instance " << std::endl;
             auto& extObj = itr->second;
             auto& attributes = extObj.Get("attributes");
             if (null(attributes))

@@ -3,12 +3,8 @@ Maritime data for the USA rendered rendered and styled from
 -->
 <map name="ReadyMap Maritime">
 
-	<TMSImage name="ReadyMap 15m Imagery">
-		<url>https://readymap.org/readymap/tiles/1.0.0/7/</url>
-	</TMSImage>
-
-	<XYZImage name="Maritime-Plain-Paper-Day">
-		<url>https://openmaptiles.readymap.org/styles/Maritime-Plain-Paper-Day/512/{z}/{x}/{y}.webp</url>
+	<XYZImage name="Maritime-Plain-Paper-Day" morph_imagery="false">
+		<url>https://openmaptiles.vr-theworld.com/styles/Maritime-Plain-Paper-Day-MBTiles-Debug/512/{z}/{x}/{y}.webp?foo=10</url>
 		<profile>spherical-mercator</profile>
 		<tile_size>512</tile_size>
 	</XYZImage>

@@ -18,7 +18,6 @@ the feature data.
         <styles>
             <style type="text/css">
                 base {
-                   altitude-clamping: terrain-drape;
                 }                
                 p1 : base {
                    fill: #ffff80;

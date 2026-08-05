@@ -147,4 +147,14 @@
         <height>166.1599231623113</height>
         <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
     </viewpoint>
+    
+        <viewpoint name="Paris">
+  <heading>-17.9096</heading>
+  <pitch>-23.2215</pitch>
+  <range>1457.76m</range>
+  <long>2.345947287354539</long>
+  <lat>48.85411812864137</lat>
+  <height>85.57200393825769</height>
+  <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+</viewpoint>
 </viewpoints>

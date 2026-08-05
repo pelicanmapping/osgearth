@@ -23,7 +23,12 @@
     "libwebp",
     "libzip",
     "opengl",
-    "osg",
+    {
+      "name": "osg",
+      "features": [
+        "tools"
+      ]
+    },
     "protobuf",
     "sqlite3",
     "spdlog",

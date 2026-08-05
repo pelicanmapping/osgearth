@@ -5,6 +5,7 @@ set(TARGET_SRC
     EndianTests.cpp
     ExpressionTests.cpp
     GeoExtentTests.cpp
+    GLTFReaderTests.cpp
     FeatureTests.cpp
     ImageUtilsTests.cpp
     KitTests.cpp
@@ -17,3 +18,7 @@ add_osgearth_app(
     TARGET osgearth_tests
     SOURCES ${TARGET_SRC}
     FOLDER Tests)
+
+target_include_directories(osgearth_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/osgEarthDrivers/gltf
+    ${OSGEARTH_EMBEDDED_THIRD_PARTY_DIR}/tinygltf)

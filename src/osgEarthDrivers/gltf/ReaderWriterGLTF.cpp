@@ -61,6 +61,7 @@ public:
 
         if (ext == "gltf")
         {
+            OE_NOTICE << "I be reading it" << std::endl;
             GLTFReader reader;
             reader.setTextureCache(&_cache);
             tinygltf::Model model;
@@ -68,6 +69,8 @@ public:
         }
         else if (ext == "glb")
         {
+            OE_NOTICE << "I be reading it" << std::endl;
+
             GLTFReader reader;
             reader.setTextureCache(&_cache);
             tinygltf::Model model;

@@ -436,15 +436,14 @@ FeatureImageLayer::createTexture(const TileKey& key, ProgressCallback* progress)
         renderer,
         progress);
 
-    // Keep every atlas at Slughorn's native row width. The osgEarth adapter
-    // omits curves from overfull band lists instead of allowing them to wrap
-    // into unrelated data or growing the texture to a driver-limit width.
-    constexpr unsigned ATLAS_TEXTURE_WIDTH = 512u;
+    // Match the atlas row width to the output tile. The osgEarth adapter omits
+    // curves from overfull band lists instead of allowing them to wrap into
+    // unrelated data or growing the texture to a driver-limit width.
     Util::FeatureImageLayerSlug slugBuilder(
         getTileSize(),
         key.getExtent(),
         options().backgroundColor().get(),
-        ATLAS_TEXTURE_WIDTH);
+        getTileSize());
     for (const auto& batch : batches)
         slugBuilder.render(batch.second, batch.first, context);
 

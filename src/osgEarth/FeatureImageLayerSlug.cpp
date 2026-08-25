@@ -3,7 +3,6 @@
  * MIT License
  */
 #include "FeatureImageLayerSlug.h"
-#include "FeatureImageLayerSlugPacking.h"
 
 #include <osgEarth/Notify>
 #include <osgEarth/PointSymbol>
@@ -477,12 +476,7 @@ struct FeatureImageLayerSlug::Impl
         const auto& curveData = atlas.getCurveTextureData();
         const auto& bandData = atlas.getBandTextureData();
         const unsigned curveRows = composite.empty() ? 0u : curveData.height;
-        const std::size_t logicalBandTexels = composite.empty() ? 0u :
-            static_cast<std::size_t>(bandData.width) * bandData.height;
-        const std::size_t packedBandTexels =
-            detail::slugPackedBandTexelCount(logicalBandTexels);
-        const unsigned bandRows = static_cast<unsigned>(
-            (packedBandTexels + atlasWidth - 1u) / atlasWidth);
+        const unsigned bandRows = composite.empty() ? 0u : bandData.height;
         const unsigned curveRowOffset = metadataRows;
         const unsigned bandRowOffset = curveRowOffset + curveRows;
         const unsigned textureHeight = bandRowOffset + bandRows;
@@ -490,7 +484,8 @@ struct FeatureImageLayerSlug::Impl
         const std::size_t expectedCurveBytes =
             static_cast<std::size_t>(curveData.width) * curveData.height *
             4u * sizeof(float);
-        const std::size_t expectedBandBytes = logicalBandTexels *
+        const std::size_t expectedBandBytes =
+            static_cast<std::size_t>(bandData.width) * bandData.height *
             4u * sizeof(std::uint16_t);
         if (!composite.empty() &&
             (curveData.width != atlasWidth || bandData.width != atlasWidth ||
@@ -543,8 +538,15 @@ struct FeatureImageLayerSlug::Impl
 
             float* targetBand = pixels +
                 static_cast<size_t>(bandRowOffset) * atlasWidth * 4u;
-            detail::slugPackBandRG(
-                bandData.bytes.data(), logicalBandTexels, targetBand);
+            const size_t bandValues =
+                bandData.bytes.size() / sizeof(std::uint16_t);
+            for (size_t i = 0; i < bandValues; ++i)
+            {
+                std::uint16_t value;
+                std::memcpy(&value, bandData.bytes.data() +
+                    i * sizeof(std::uint16_t), sizeof(value));
+                targetBand[i] = static_cast<float>(value);
+            }
 
             unsigned record = METADATA_HEADER_TEXELS;
             for (const auto& layer : composite.layers)

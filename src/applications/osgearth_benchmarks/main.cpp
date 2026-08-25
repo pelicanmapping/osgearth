@@ -15,7 +15,6 @@
 #include <osgEarth/ImageUtils>
 #include <osgEarth/MBTiles>
 #include <osgDB/ReadFile>
-#include "../../osgEarth/FeatureImageLayerSlugPacking.h"
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -483,61 +482,6 @@ static void BM_MipmapImage_RGBA8(benchmark::State& state)
     }
 }
 BENCHMARK(BM_MipmapImage_RGBA8)->Args({1024, 1024})->Args({2048, 2048})->Unit(benchmark::kMillisecond);
-
-static std::vector<std::uint16_t> createSlugBandBenchmarkData(std::size_t texelCount)
-{
-    std::vector<std::uint16_t> result(texelCount * 4u);
-    for (std::size_t i = 0u; i < result.size(); ++i)
-        result[i] = static_cast<std::uint16_t>((i * 7919u) & 0xffffu);
-    return result;
-}
-
-// Reference implementation used before the packed RG optimization.
-static void BM_SlugBandAtlasExpandRGBA32F(benchmark::State& state)
-{
-    const std::size_t texelCount = static_cast<std::size_t>(state.range(0));
-    const auto source = createSlugBandBenchmarkData(texelCount);
-    std::vector<float> destination(texelCount * 4u);
-
-    for (auto _ : state)
-    {
-        for (std::size_t i = 0u; i < source.size(); ++i)
-            destination[i] = static_cast<float>(source[i]);
-        benchmark::DoNotOptimize(destination.data());
-        benchmark::ClobberMemory();
-    }
-
-    state.SetBytesProcessed(
-        state.iterations() * static_cast<std::int64_t>(
-            source.size() * sizeof(source[0]) +
-            destination.size() * sizeof(destination[0])));
-}
-BENCHMARK(BM_SlugBandAtlasExpandRGBA32F)
-    ->Arg(262144)
-    ->Unit(benchmark::kMicrosecond);
-
-static void BM_SlugBandAtlasPackRG32F(benchmark::State& state)
-{
-    using namespace osgEarth::Util::detail;
-    const std::size_t texelCount = static_cast<std::size_t>(state.range(0));
-    const auto source = createSlugBandBenchmarkData(texelCount);
-    std::vector<float> destination(slugPackedBandTexelCount(texelCount) * 4u);
-
-    for (auto _ : state)
-    {
-        slugPackBandRG(source.data(), texelCount, destination.data());
-        benchmark::DoNotOptimize(destination.data());
-        benchmark::ClobberMemory();
-    }
-
-    state.SetBytesProcessed(
-        state.iterations() * static_cast<std::int64_t>(
-            texelCount * 2u * sizeof(source[0]) +
-            destination.size() * sizeof(destination[0])));
-}
-BENCHMARK(BM_SlugBandAtlasPackRG32F)
-    ->Arg(262144)
-    ->Unit(benchmark::kMicrosecond);
 
 struct SlugSolverVec2
 {

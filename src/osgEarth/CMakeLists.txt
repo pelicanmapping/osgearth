@@ -832,7 +832,6 @@ if(OSGEARTH_HAVE_SLUGHORN)
     # the osgEarth target and its public ABI remain C++17.
     add_library(osgEarthSlughornAdapter OBJECT
         FeatureImageLayerSlug.cpp
-        FeatureImageLayerSlugPacking.h
         ${slughorn_SOURCE_DIR}/slughorn/slughorn.cpp)
     target_include_directories(osgEarthSlughornAdapter PRIVATE ${slughorn_SOURCE_DIR})
     target_compile_features(osgEarthSlughornAdapter PRIVATE cxx_std_20)

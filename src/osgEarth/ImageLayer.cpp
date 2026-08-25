@@ -312,7 +312,13 @@ ImageLayer::getAcceptDraping() const
 void
 ImageLayer::setUseCreateTexture()
 {
-    _useCreateTexture = true;
+    setUseCreateTexture(true);
+}
+
+void
+ImageLayer::setUseCreateTexture(bool value)
+{
+    _useCreateTexture = value;
 }
 
 void

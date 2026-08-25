@@ -16,6 +16,20 @@ find_package(geos QUIET)
 find_package(blend2d QUIET)
 find_package(spdlog QUIET)
 find_package(meshoptimizer QUIET)
+
+if(OSGEARTH_ENABLE_SLUGHORN)
+    include(FetchContent)
+    FetchContent_Declare(
+        slughorn
+        URL https://github.com/AlphaPixel/SlugHorn/archive/eeb1b96ec88caef234db836a3213cf308b7e0c9d.tar.gz
+        URL_HASH SHA256=68671b5a4b728f85272c6c2ae7d0f31207b94c3d501f7814dfb077e598b20dd1
+        # Populate the SDK without adding its standalone CMake target. Its core
+        # source is folded into osgEarth's private C++20 adapter below.
+        SOURCE_SUBDIR _osgearth_fetch_only
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(slughorn)
+    set(OSGEARTH_HAVE_SLUGHORN ON)
+endif()
 if (OSGEARTH_ENABLE_S3)
     find_package(AWSSDK CONFIG COMPONENTS core s3 QUIET)
 endif()
@@ -68,6 +82,7 @@ set(TARGET_GLSL
     DepthOffset.glsl
     Draping.glsl
     DrawInstancedAttribute.glsl
+    FeatureImageLayer.Slug.glsl
     FrustumGrid.h.glsl
     FrustumGridComputer.glsl
     GPUClamping.glsl
@@ -812,6 +827,20 @@ set(TARGET_SRC
     ${SHADERS_CPP}
 )
 
+if(OSGEARTH_HAVE_SLUGHORN)
+    # Keep Slughorn's C++20 requirement behind a private object-library boundary;
+    # the osgEarth target and its public ABI remain C++17.
+    add_library(osgEarthSlughornAdapter OBJECT
+        FeatureImageLayerSlug.cpp
+        ${slughorn_SOURCE_DIR}/slughorn/slughorn.cpp)
+    target_include_directories(osgEarthSlughornAdapter PRIVATE ${slughorn_SOURCE_DIR})
+    target_compile_features(osgEarthSlughornAdapter PRIVATE cxx_std_20)
+    set_target_properties(osgEarthSlughornAdapter PROPERTIES
+        FOLDER "osgEarth"
+        POSITION_INDEPENDENT_CODE ON)
+    list(APPEND TARGET_SRC $<TARGET_OBJECTS:osgEarthSlughornAdapter>)
+endif()
+
 # include the old legacy API controls?
 if(OSGEARTH_BUILD_LEGACY_CONTROLS_API)
     list(APPEND TARGET_H   ActivityMonitorTool     MouseCoordsTool     Controls)
@@ -847,7 +876,6 @@ add_osgearth_library(
     SOURCES ${TARGET_SRC}
     SHADERS ${TARGET_GLSL}
     TEMPLATES ${TARGET_IN} )
-
 
 # google protocol buffers
 if(Protobuf_FOUND AND Protobuf_PROTOC_EXECUTABLE)

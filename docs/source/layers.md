@@ -23,7 +23,7 @@ These are the public layer types native to osgEarth.
 
 | Earth File        | Description                                                  |
 | ----------------- | ------------------------------------------------------------ |
-| [FeatureImage](featureimage.html) | Rasterizes vector data into an image layer                   |
+| [FeatureImage](featureimage.html) | Draws styled vector data with CPU rasterization or Slug       |
 | [FeatureModel](featuremodel.html) | Renders vector data as *OpenSceneGraph* geometry             |
 | [TiledFeatureModel](tiledfeaturemodel.html) | Like a `FeatureModel` layer, but optimized for pre-tiled vector datasets |
 

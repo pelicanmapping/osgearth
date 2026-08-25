@@ -1,0 +1,38 @@
+<!--
+FeatureImage Slug prototype - creates per-tile Slughorn curve/band atlases and
+renders the feature styles analytically in the terrain fragment shader.
+-->
+
+<Map name="Demo: FeatureImage Slug Renderer">
+
+    <GDALImage name="World imagery" url="../data/world.tif"/>
+
+    <OGRFeatures name="world-data">
+        <url>../data/world.shp</url>
+    </OGRFeatures>
+
+    <FeatureImage name="Slug polygons and lines" rendering="slug">
+        <features>world-data</features>
+        <styles>
+            <style type="text/css">
+                default {
+                    fill:          #ff770080;
+                    stroke:        #ffff00;
+                    stroke-width:  5km;
+                }
+            </style>
+        </styles>
+    </FeatureImage>
+
+    <FeatureImage name="Slug points" rendering="slug" min_level="5">
+        <ogrfeatures url="../data/cities_mercator.shp"/>
+        <styles>
+            <style type="text/css">
+                default {
+                    point-fill: #7f7fff;
+                    point-size: 12;
+                }
+            </style>
+        </styles>
+    </FeatureImage>
+</Map>

@@ -9,6 +9,14 @@
 #include <osgEarth/Progress>
 #include <osgEarth/LandCover>
 #include <osgEarth/FeatureStyleSorter>
+#include <osgEarth/BuildConfig>
+#include <osgEarth/Shaders>
+#include <osgEarth/VirtualProgram>
+#include <osgEarth/StringUtils>
+
+#ifdef OSGEARTH_HAVE_SLUGHORN
+#include "FeatureImageLayerSlug.h"
+#endif
 
 using namespace osgEarth;
 
@@ -28,6 +36,7 @@ FeatureImageLayer::Options::getConfig() const
     styleSheet().set(conf, "styles");
     conf.set("buffer_width", bufferWidth());
     conf.set("background_color", backgroundColor());
+    conf.set("rendering", renderingTechnique());
 
     if (filters().empty() == false)
     {
@@ -47,6 +56,7 @@ FeatureImageLayer::Options::fromConfig(const Config& conf)
     styleSheet().get(conf, "styles");
     conf.get("buffer_width", bufferWidth());
     conf.get("background_color", backgroundColor());
+    conf.get("rendering", renderingTechnique());
 
     const Config& filtersConf = conf.child("filters");
     for (ConfigSet::const_iterator i = filtersConf.children().begin(); i != filtersConf.children().end(); ++i)
@@ -66,6 +76,15 @@ FeatureImageLayer::init()
 {
     ImageLayer::init();
 
+    setUseCreateTexture(usesSlugRendering());
+
+    if (usesSlugRendering())
+    {
+        // Slug payloads are tile-local atlases rather than sampled colors. Parent
+        // imagery morphing would require blending two independently packed atlases.
+        setMorphImagery(false);
+    }
+
     // Do not set the profile here. We will try to deduce the profile
     // once we can open the underlying feature source.
 }
@@ -76,6 +95,21 @@ FeatureImageLayer::openImplementation()
     Status parent = ImageLayer::openImplementation();
     if (parent.isError())
         return parent;
+
+    if (!ciEquals(options().renderingTechnique().get(), "raster") &&
+        !ciEquals(options().renderingTechnique().get(), "slug"))
+    {
+        return Status(Status::ConfigurationError,
+            "rendering must be either 'raster' or 'slug'");
+    }
+
+#ifndef OSGEARTH_HAVE_SLUGHORN
+    if (usesSlugRendering())
+    {
+        return Status(Status::ConfigurationError,
+            "Slug rendering is not available in this build");
+    }
+#endif
 
     // assert a feature source:
     Status fsStatus = options().featureSource().open(getReadOptions());
@@ -183,6 +217,45 @@ FeatureImageLayer::setStyleSheet(StyleSheet* value)
             _global._session->setStyles(getStyleSheet());
         }
     }
+}
+
+void
+FeatureImageLayer::setRenderingTechnique(const std::string& value)
+{
+    options().renderingTechnique() = value;
+    setUseCreateTexture(usesSlugRendering());
+    if (usesSlugRendering())
+    {
+        setMorphImagery(false);
+    }
+}
+
+const std::string&
+FeatureImageLayer::getRenderingTechnique() const
+{
+    return options().renderingTechnique().get();
+}
+
+bool
+FeatureImageLayer::usesSlugRendering() const
+{
+    return ciEquals(options().renderingTechnique().get(), "slug");
+}
+
+void
+FeatureImageLayer::prepareForRendering(TerrainEngine* engine)
+{
+    ImageLayer::prepareForRendering(engine);
+
+#ifdef OSGEARTH_HAVE_SLUGHORN
+    if (usesSlugRendering())
+    {
+        VirtualProgram* vp = VirtualProgram::getOrCreate(getOrCreateStateSet());
+        vp->setName(className());
+        Shaders shaders;
+        shaders.load(vp, shaders.FeatureImageLayerSlug, getReadOptions());
+    }
+#endif
 }
 
 void
@@ -322,4 +395,89 @@ FeatureImageLayer::createImageImplementation(const TileKey& key, ProgressCallbac
     delete rasterizer;
 
     return result;
+}
+
+TextureWindow
+FeatureImageLayer::createTexture(const TileKey& key, ProgressCallback* progress) const
+{
+#ifndef OSGEARTH_HAVE_SLUGHORN
+    return {};
+#else
+    if (!usesSlugRendering() || getStatus().isError())
+        return {};
+
+    Isolate local(_global);
+    if (!local._session.valid() || !local._session->getFeatureSource())
+        return {};
+
+    const FeatureProfile* featureProfile =
+        local._session->getFeatureSource()->getFeatureProfile();
+    if (!featureProfile || !featureProfile->getSRS())
+        return {};
+
+    FilterContext context(local._session.get(), key.getExtent());
+
+    using SlugBatch = std::pair<Style, FeatureList>;
+    std::vector<SlugBatch> batches;
+
+    auto renderer = [&](const Style& style, FeatureList& features,
+                        ProgressCallback*) -> void
+    {
+        batches.emplace_back(style, features);
+    };
+
+    FeatureStyleSorter sorter;
+    sorter.sort(
+        key,
+        options().bufferWidth().value(),
+        local._session.get(),
+        local._filterChain,
+        nullptr,
+        renderer,
+        progress);
+
+    // Slughorn's glyph-oriented 512-wide default is too narrow for complex
+    // geographic rings, especially after stroke expansion. Pick a per-tile
+    // power-of-two width from the largest sorted style batch instead. Eight
+    // curve slots per source vertex is a conservative allowance for walls,
+    // joins, caps, and point-circle expansion.
+    constexpr unsigned MIN_ATLAS_WIDTH = 512u;
+    constexpr unsigned MAX_ATLAS_WIDTH = 16384u;
+    size_t largestBatchVertexCount = 0u;
+    for (const auto& batch : batches)
+    {
+        size_t vertexCount = 0u;
+        for (const auto& feature : batch.second)
+        {
+            const Geometry* geometry = feature->getGeometry();
+            if (!geometry)
+                continue;
+
+            geometry->forEachPart(true, [&](const Geometry* part)
+            {
+                if (part)
+                    vertexCount += part->size();
+            });
+        }
+        largestBatchVertexCount = std::max(largestBatchVertexCount, vertexCount);
+    }
+
+    const size_t estimatedCurveCount = largestBatchVertexCount * 8u;
+    unsigned atlasTextureWidth = MIN_ATLAS_WIDTH;
+    while (atlasTextureWidth < estimatedCurveCount &&
+           atlasTextureWidth < MAX_ATLAS_WIDTH)
+    {
+        atlasTextureWidth <<= 1u;
+    }
+
+    Util::FeatureImageLayerSlug slugBuilder(
+        getTileSize(),
+        key.getExtent(),
+        options().backgroundColor().get(),
+        atlasTextureWidth);
+    for (const auto& batch : batches)
+        slugBuilder.render(batch.second, batch.first, context);
+
+    return slugBuilder.finalize();
+#endif
 }

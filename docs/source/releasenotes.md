@@ -9,6 +9,7 @@ Release Highlights:
 * New: Decals (to project arbitrary textures on the terrain)
 * New: Superluminal Performance API integration
 * New: ImGuiPreview widget for viewing a 3D model in ImGui
+* New: Experimental Slughorn rendering mode for FeatureImageLayer
 
 ## Version 3.7.2 (April 2025)
 

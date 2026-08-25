@@ -23,6 +23,7 @@ namespace osgEarth { namespace Util
         std::string DepthOffset;
         std::string Draping;
         std::string DrawInstancedAttribute;
+        std::string FeatureImageLayerSlug;
         std::string FrustumGrid_Headers;
         std::string FrustumGridComputer;
         std::string GPUClamping, GPUClampingLib;

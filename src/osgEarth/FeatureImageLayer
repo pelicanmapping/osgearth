@@ -13,7 +13,8 @@
 namespace osgEarth
 {
     /**
-     * Rasterizes feature data into an image layer.
+     * Draws styled feature data into an image layer using CPU rasterization
+     * or the optional Slug rendering path.
      * Styles will render in their order of appearance in the stylesheet;
      * e.g. features matching the last style will render on top.
      */
@@ -28,6 +29,7 @@ namespace osgEarth
             OE_OPTION_LAYER(StyleSheet, styleSheet);
             OE_OPTION(Distance, bufferWidth, {});
             OE_OPTION(Color, backgroundColor, Color::Transparent);
+            OE_OPTION(std::string, renderingTechnique, "raster");
             virtual Config getConfig() const;
         private:
             void fromConfig( const Config& conf );
@@ -45,6 +47,10 @@ namespace osgEarth
         void setStyleSheet(StyleSheet* styles);
         inline StyleSheet* getStyleSheet() const;
 
+        //! Selects "raster" (default) or "slug" rendering. Set before opening.
+        void setRenderingTechnique(const std::string& value);
+        const std::string& getRenderingTechnique() const;
+
     public: // ImageLayer
 
         // Opens the layer and returns a status
@@ -52,6 +58,10 @@ namespace osgEarth
 
         virtual GeoImage createImageImplementation(
             const TileKey& key, 
+            ProgressCallback* progress) const override;
+
+        virtual TextureWindow createTexture(
+            const TileKey& key,
             ProgressCallback* progress) const override;
 
     protected: // Layer
@@ -62,6 +72,8 @@ namespace osgEarth
         // Called by Map when it removes this layer
         virtual void removedFromMap(const class Map*) override;
 
+        virtual void prepareForRendering(class TerrainEngine*) override;
+
         // post-ctor initialization
         virtual void init() override;
 
@@ -71,6 +83,8 @@ namespace osgEarth
         void updateSession();
 
         void establishProfile();
+
+        bool usesSlugRendering() const;
 
         struct Isolate {
             Isolate() { }

@@ -1,0 +1,584 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#include "FeatureImageLayerSlug.h"
+
+#include <osgEarth/Notify>
+#include <osgEarth/PointSymbol>
+#include <osgEarth/LineSymbol>
+#include <osgEarth/PolygonSymbol>
+
+#include <osg/Image>
+#include <osg/Texture2D>
+
+#include <slughorn/canvas.hpp>
+
+#include <algorithm>
+#include <cstdint>
+#include <cmath>
+#include <cstring>
+#include <mutex>
+#include <stdexcept>
+#include <vector>
+
+#ifndef GL_RGBA32F
+#define GL_RGBA32F 0x8814
+#endif
+
+using namespace osgEarth;
+using namespace osgEarth::Util;
+
+namespace
+{
+    constexpr unsigned MAX_SLUG_LAYERS = 64u;
+    constexpr size_t MAX_SOURCE_VERTICES_PER_SHAPE = 1024u;
+    constexpr unsigned METADATA_HEADER_TEXELS = 3u;
+    constexpr unsigned METADATA_TEXELS_PER_LAYER = 4u;
+    std::once_flag s_unsupportedSymbolWarning;
+
+    slughorn::Color toSlugColor(const Color& value)
+    {
+        return {
+            static_cast<float>(value.r()),
+            static_cast<float>(value.g()),
+            static_cast<float>(value.b()),
+            static_cast<float>(value.a())
+        };
+    }
+
+    bool sameColor(const Color& lhs, const Color& rhs)
+    {
+        return lhs == rhs;
+    }
+
+    slughorn::canvas::LineJoin toSlugJoin(Stroke::LineJoinStyle value)
+    {
+        return value == Stroke::LINEJOIN_MITRE ?
+            slughorn::canvas::LineJoin::Miter :
+            slughorn::canvas::LineJoin::Round;
+    }
+
+    slughorn::canvas::LineCap toSlugCap(Stroke::LineCapStyle value)
+    {
+        return
+            value == Stroke::LINECAP_SQUARE ? slughorn::canvas::LineCap::Square :
+            value == Stroke::LINECAP_ROUND ? slughorn::canvas::LineCap::Round :
+            slughorn::canvas::LineCap::Butt;
+    }
+}
+
+struct FeatureImageLayerSlug::Impl
+{
+    struct StrokeGroup
+    {
+        slughorn::canvas::Path path;
+        Color color = Color::White;
+        double widthPixels = 1.0;
+        Stroke::LineJoinStyle join = Stroke::LINEJOIN_ROUND;
+        Stroke::LineCapStyle cap = Stroke::LINECAP_FLAT;
+        size_t sourceVertexCount = 0u;
+    };
+
+    struct FillGroup
+    {
+        slughorn::canvas::Path path;
+        Color color = Color::White;
+        size_t sourceVertexCount = 0u;
+    };
+
+    Impl(
+        unsigned tileSize_,
+        const GeoExtent& extent_,
+        const Color& backgroundColor_,
+        unsigned atlasTextureWidth) :
+        tileSize(tileSize_),
+        extent(extent_),
+        backgroundColor(backgroundColor_),
+        atlas(atlasTextureWidth),
+        canvas(atlas, slughorn::KeyIterator("osgearth"))
+    {
+    }
+
+    unsigned tileSize;
+    GeoExtent extent;
+    Color backgroundColor;
+    slughorn::Atlas atlas;
+    slughorn::canvas::Canvas canvas;
+    bool finalized = false;
+    bool warnedLayerLimit = false;
+
+    float normalizeX(double x) const
+    {
+        if (extent.crossesAntimeridian() && x < extent.xMin())
+            x += 360.0;
+        return static_cast<float>((x - extent.xMin()) / extent.width());
+    }
+
+    float normalizeY(double y) const
+    {
+        return static_cast<float>((y - extent.yMin()) / extent.height());
+    }
+
+    bool appendGeometry(
+        slughorn::canvas::Path& path,
+        const Geometry* geometry,
+        bool closeRings) const
+    {
+        if (!geometry)
+            return false;
+
+        bool added = false;
+        geometry->forEachPart(true, [&](const Geometry* part)
+        {
+            if (!part || part->empty() || part->isPointSet())
+                return;
+
+            auto i = part->begin();
+            path.moveTo(normalizeX(i->x()), normalizeY(i->y()));
+            ++i;
+
+            for (; i != part->end(); ++i)
+                path.lineTo(normalizeX(i->x()), normalizeY(i->y()));
+
+            if (closeRings || part->getType() == Geometry::TYPE_RING ||
+                part->getType() == Geometry::TYPE_POLYGON)
+            {
+                path.closePath();
+            }
+
+            added = true;
+        });
+        return added;
+    }
+
+    size_t countVertices(const Geometry* geometry) const
+    {
+        size_t result = 0u;
+        if (geometry)
+        {
+            geometry->forEachPart(true, [&](const Geometry* part)
+            {
+                if (part)
+                    result += part->size();
+            });
+        }
+        return result;
+    }
+
+    double toPixels(
+        const optional<Expression<Distance>>& expression,
+        Feature* feature,
+        FilterContext& context,
+        double fallback,
+        double minPixels) const
+    {
+        if (!expression.isSet())
+            return fallback;
+
+        Distance width = expression->eval(feature, context);
+        if (width.getUnits() == Units::PIXELS)
+            return width.getValue();
+
+        const double south = extent.getSRS()->transformDistance(
+            width, extent.getSRS()->getUnits(), extent.yMin());
+        const double north = extent.getSRS()->transformDistance(
+            width, extent.getSRS()->getUnits(), extent.yMax());
+        const double mapWidth = std::min(south, north);
+        const double pixelSize = extent.height() / static_cast<double>(tileSize);
+        return std::max(mapWidth / pixelSize, minPixels);
+    }
+
+    bool canAddLayer()
+    {
+        if (canvas.layerCount() < MAX_SLUG_LAYERS)
+            return true;
+
+        if (!warnedLayerLimit)
+        {
+            OE_WARN << "[FeatureImageLayer/Slug] Tile exceeded " << MAX_SLUG_LAYERS
+                << " style layers; remaining style passes will be omitted" << std::endl;
+            warnedLayerLimit = true;
+        }
+        return false;
+    }
+
+    void commitFill(slughorn::canvas::Path& path, const Color& color)
+    {
+        if (canAddLayer() && path.hasPendingPath())
+            canvas.fill(path, toSlugColor(color));
+    }
+
+    void commitStroke(const StrokeGroup& group)
+    {
+        if (!canAddLayer() || !group.path.hasPendingPath() || group.widthPixels <= 0.0)
+            return;
+
+        const float normalizedWidth = static_cast<float>(
+            group.widthPixels / static_cast<double>(tileSize));
+
+        canvas.stroke(
+            group.path,
+            normalizedWidth,
+            toSlugColor(group.color),
+            1.0f,
+            {},
+            toSlugJoin(group.join),
+            toSlugCap(group.cap));
+    }
+
+    StrokeGroup& getStrokeGroup(
+        std::vector<StrokeGroup>& groups,
+        const Color& color,
+        double widthPixels,
+        Stroke::LineJoinStyle join,
+        Stroke::LineCapStyle cap,
+        size_t sourceVertexCount)
+    {
+        if (!groups.empty())
+        {
+            auto& group = groups.back();
+            if (sameColor(group.color, color) &&
+                std::abs(group.widthPixels - widthPixels) < 1e-4 &&
+                group.join == join && group.cap == cap &&
+                group.sourceVertexCount + sourceVertexCount <=
+                    MAX_SOURCE_VERTICES_PER_SHAPE)
+            {
+                group.sourceVertexCount += sourceVertexCount;
+                return group;
+            }
+        }
+
+        groups.emplace_back();
+        auto& result = groups.back();
+        result.color = color;
+        result.widthPixels = widthPixels;
+        result.join = join;
+        result.cap = cap;
+        result.sourceVertexCount = sourceVertexCount;
+        return result;
+    }
+
+    FillGroup& getFillGroup(
+        std::vector<FillGroup>& groups,
+        const Color& color,
+        size_t sourceVertexCount)
+    {
+        if (!groups.empty() && sameColor(groups.back().color, color) &&
+            groups.back().sourceVertexCount + sourceVertexCount <=
+                MAX_SOURCE_VERTICES_PER_SHAPE)
+        {
+            groups.back().sourceVertexCount += sourceVertexCount;
+            return groups.back();
+        }
+
+        groups.emplace_back();
+        groups.back().color = color;
+        groups.back().sourceVertexCount = sourceVertexCount;
+        return groups.back();
+    }
+
+    void render(const FeatureList& features, const Style& style, FilterContext& context)
+    {
+        if (features.empty() || finalized)
+            return;
+
+        const SpatialReference* featureSRS = features.front()->getSRS();
+        if (!featureSRS)
+            return;
+
+        if (!featureSRS->isHorizEquivalentTo(extent.getSRS()))
+        {
+            for (auto& feature : features)
+                feature->transform(extent.getSRS());
+        }
+
+        const PolygonSymbol* masterPolygon = style.getSymbol<PolygonSymbol>();
+        const LineSymbol* masterLine = style.getSymbol<LineSymbol>();
+        const PointSymbol* masterPoint = style.getSymbol<PointSymbol>();
+
+        if (style.getSymbol<TextSymbol>() || style.getSymbol<SkinSymbol>() ||
+            style.getSymbol<CoverageSymbol>())
+        {
+            std::call_once(s_unsupportedSymbolWarning, []()
+            {
+                OE_WARN << "[FeatureImageLayer/Slug] Text, skin/icon, and coverage "
+                    "symbols are not supported by the prototype" << std::endl;
+            });
+        }
+
+        // Polygon fills. Consecutive equal colors share a Slug shape; starting a
+        // new group on each style change preserves feature draw order.
+        if (masterPolygon)
+        {
+            std::vector<FillGroup> groups;
+            for (const auto& feature : features)
+            {
+                if (!feature->getGeometry() || !feature->getGeometry()->isPolygon())
+                    continue;
+
+                const PolygonSymbol* polygon = masterPolygon;
+                if (feature->style() && feature->style()->has<PolygonSymbol>())
+                    polygon = feature->style()->get<PolygonSymbol>();
+
+                const Color color = polygon->fill()->color();
+                appendGeometry(
+                    getFillGroup(
+                        groups, color, countVertices(feature->getGeometry())).path,
+                    feature->getGeometry(),
+                    true);
+            }
+
+            for (auto& group : groups)
+                commitFill(group.path, group.color);
+        }
+
+        // Line strings and polygon outlines. Width expressions are evaluated per
+        // feature and equal results share one Slug shape.
+        if (masterLine)
+        {
+            std::vector<StrokeGroup> outlines;
+            std::vector<StrokeGroup> strokes;
+
+            for (const auto& feature : features)
+            {
+                const Geometry* geometry = feature->getGeometry();
+                if (!geometry || (!geometry->isLinear() && !geometry->isPolygon()))
+                    continue;
+
+                const LineSymbol* line = masterLine;
+                if (feature->style() && feature->style()->has<LineSymbol>())
+                    line = feature->style()->get<LineSymbol>();
+
+                const PolygonSymbol* polygon = masterPolygon;
+                if (feature->style() && feature->style()->has<PolygonSymbol>())
+                    polygon = feature->style()->get<PolygonSymbol>();
+                if (geometry->isPolygon() && polygon && !polygon->outline().get())
+                    continue;
+
+                const Stroke& stroke = line->stroke().get();
+                const auto join = stroke.lineJoin().get();
+                const auto cap = stroke.lineCap().get();
+                const size_t sourceVertexCount = countVertices(geometry);
+                const double widthPixels = toPixels(
+                    stroke.width(), feature.get(), context, 1.0,
+                    stroke.minPixels().getOrUse(1.0f));
+
+                auto& mainGroup = getStrokeGroup(
+                    strokes, stroke.color(), widthPixels, join, cap,
+                    sourceVertexCount);
+                appendGeometry(mainGroup.path, geometry, false);
+
+                if (stroke.outlineWidth().isSet())
+                {
+                    const double outlinePixels = toPixels(
+                        stroke.outlineWidth(), feature.get(), context, 0.0,
+                        stroke.minPixels().getOrUse(1.0f));
+                    auto& outlineGroup = getStrokeGroup(
+                        outlines, stroke.outlineColor().get(), outlinePixels, join, cap,
+                        sourceVertexCount);
+                    appendGeometry(outlineGroup.path, geometry, false);
+                }
+            }
+
+            for (const auto& group : outlines)
+                commitStroke(group);
+            for (const auto& group : strokes)
+                commitStroke(group);
+        }
+
+        // Point symbols become analytic circles in tile coordinates.
+        if (masterPoint)
+        {
+            std::vector<FillGroup> groups;
+            for (const auto& feature : features)
+            {
+                const Geometry* geometry = feature->getGeometry();
+                if (!geometry || !geometry->isPointSet())
+                    continue;
+
+                const PointSymbol* point = masterPoint;
+                if (feature->style() && feature->style()->has<PointSymbol>())
+                    point = feature->style()->get<PointSymbol>();
+
+                auto& group = getFillGroup(
+                    groups,
+                    point->fill()->color(),
+                    countVertices(geometry));
+                const float radius = point->size().getOrUse(1.0f) /
+                    (2.0f * static_cast<float>(tileSize));
+
+                geometry->forEachPart([&](const Geometry* part)
+                {
+                    for (const auto& position : *part)
+                        group.path.circle(
+                            normalizeX(position.x()),
+                            normalizeY(position.y()),
+                            radius);
+                });
+            }
+
+            for (auto& group : groups)
+                commitFill(group.path, group.color);
+        }
+    }
+
+    TextureWindow finalize()
+    {
+        if (finalized)
+            return {};
+        finalized = true;
+
+        slughorn::CompositeShape composite = canvas.finalize();
+
+        try
+        {
+            if (!composite.empty())
+                atlas.build();
+        }
+        catch (const std::exception& e)
+        {
+            OE_WARN << "[FeatureImageLayer/Slug] Slughorn atlas build failed: "
+                << e.what() << std::endl;
+            return {};
+        }
+
+        const unsigned layerCount = static_cast<unsigned>(composite.layers.size());
+        const unsigned atlasWidth = composite.empty() ?
+            4u : atlas.getTextureWidth();
+        const unsigned metadataTexels = METADATA_HEADER_TEXELS +
+            layerCount * METADATA_TEXELS_PER_LAYER;
+        const unsigned metadataRows = std::max(
+            1u, (metadataTexels + atlasWidth - 1u) / atlasWidth);
+
+        const auto& curveData = atlas.getCurveTextureData();
+        const auto& bandData = atlas.getBandTextureData();
+        const unsigned curveRows = composite.empty() ? 0u : curveData.height;
+        const unsigned bandRows = composite.empty() ? 0u : bandData.height;
+        const unsigned curveRowOffset = metadataRows;
+        const unsigned bandRowOffset = curveRowOffset + curveRows;
+        const unsigned textureHeight = bandRowOffset + bandRows;
+
+        if (!composite.empty() &&
+            (curveData.width != atlasWidth || bandData.width != atlasWidth))
+        {
+            OE_WARN << "[FeatureImageLayer/Slug] Slughorn returned inconsistent atlas widths"
+                << std::endl;
+            return {};
+        }
+
+        osg::ref_ptr<osg::Image> image = new osg::Image();
+        image->allocateImage(
+            static_cast<int>(atlasWidth),
+            static_cast<int>(textureHeight),
+            1,
+            GL_RGBA,
+            GL_FLOAT);
+        image->setInternalTextureFormat(GL_RGBA32F);
+        std::memset(image->data(), 0, image->getTotalSizeInBytes());
+
+        float* pixels = reinterpret_cast<float*>(image->data());
+        auto writeTexel = [&](unsigned index, float x, float y, float z, float w)
+        {
+            float* out = pixels + static_cast<size_t>(index) * 4u;
+            out[0] = x;
+            out[1] = y;
+            out[2] = z;
+            out[3] = w;
+        };
+
+        unsigned log2Width = 0u;
+        for (unsigned value = atlasWidth; value > 1u; value >>= 1u)
+            ++log2Width;
+
+        writeTexel(0u, 1.0f, static_cast<float>(layerCount),
+            static_cast<float>(log2Width), static_cast<float>(atlasWidth));
+        writeTexel(1u, static_cast<float>(curveRowOffset),
+            static_cast<float>(bandRowOffset), static_cast<float>(curveRows),
+            static_cast<float>(bandRows));
+        writeTexel(2u, backgroundColor.r(), backgroundColor.g(),
+            backgroundColor.b(), backgroundColor.a());
+
+        if (!composite.empty())
+        {
+            std::memcpy(
+                pixels + static_cast<size_t>(curveRowOffset) * atlasWidth * 4u,
+                curveData.bytes.data(),
+                curveData.bytes.size());
+
+            float* targetBand = pixels +
+                static_cast<size_t>(bandRowOffset) * atlasWidth * 4u;
+            const size_t bandValues = bandData.bytes.size() / sizeof(std::uint16_t);
+            for (size_t i = 0; i < bandValues; ++i)
+            {
+                std::uint16_t value;
+                std::memcpy(&value, bandData.bytes.data() +
+                    i * sizeof(std::uint16_t), sizeof(value));
+                targetBand[i] = static_cast<float>(value);
+            }
+
+            unsigned record = METADATA_HEADER_TEXELS;
+            for (const auto& layer : composite.layers)
+            {
+                const auto shape = atlas.getShape(layer.key);
+                if (!shape)
+                    continue;
+
+                writeTexel(record++, shape->bandScaleX, shape->bandScaleY,
+                    shape->bandOffsetX, shape->bandOffsetY);
+                writeTexel(record++, static_cast<float>(shape->bandTexX),
+                    static_cast<float>(shape->bandTexY),
+                    static_cast<float>(shape->bandMaxX),
+                    static_cast<float>(shape->bandMaxY));
+                writeTexel(record++, layer.transform.x, layer.transform.y,
+                    layer.scale, 0.0f);
+                writeTexel(record++, layer.color.r, layer.color.g,
+                    layer.color.b, layer.color.a);
+            }
+        }
+
+        osg::ref_ptr<osg::Texture2D> texture = new osg::Texture2D(image.get());
+        texture->setInternalFormat(GL_RGBA32F);
+        texture->setSourceFormat(GL_RGBA);
+        texture->setSourceType(GL_FLOAT);
+        texture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::NEAREST);
+        texture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::NEAREST);
+        texture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
+        texture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
+        texture->setResizeNonPowerOfTwoHint(false);
+        texture->setUnRefImageDataAfterApply(false);
+
+        // Keep the normal texture matrix so terrain parent-tile fallback can pass its
+        // scale/bias through to the Slug hook.
+        osg::Matrixf matrix;
+        matrix.makeIdentity();
+
+        return TextureWindow(texture.release(), matrix);
+    }
+};
+
+FeatureImageLayerSlug::FeatureImageLayerSlug(
+    unsigned tileSize,
+    const GeoExtent& extent,
+    const Color& backgroundColor,
+    unsigned atlasTextureWidth) :
+    _impl(new Impl(tileSize, extent, backgroundColor, atlasTextureWidth))
+{
+}
+
+FeatureImageLayerSlug::~FeatureImageLayerSlug() = default;
+
+void
+FeatureImageLayerSlug::render(
+    const FeatureList& features,
+    const Style& style,
+    FilterContext& context)
+{
+    _impl->render(features, style, context);
+}
+
+TextureWindow
+FeatureImageLayerSlug::finalize()
+{
+    return _impl->finalize();
+}

@@ -235,6 +235,7 @@ namespace osgEarth
         //! Configure the layer to create textures via createTexture instead of
         //! using a createImage driver
         void setUseCreateTexture();
+        void setUseCreateTexture(bool value);
 
         //! Apply a post-processing layers to the image
         virtual GeoImage applyPostLayer(

@@ -42,6 +42,10 @@ namespace osgEarth { namespace Util
         DrawInstancedAttribute = "DrawInstancedAttribute.glsl";
         _sources[DrawInstancedAttribute] = @DrawInstancedAttribute.glsl@;
 
+        // FeatureImageLayer Slughorn renderer
+        FeatureImageLayerSlug = "FeatureImageLayer.Slug.glsl";
+        _sources[FeatureImageLayerSlug] = @FeatureImageLayer.Slug.glsl@;
+
         // Frustum Grid Headers
         FrustumGrid_Headers = "FrustumGrid.h.glsl";
         _sources[FrustumGrid_Headers] = @FrustumGrid.h.glsl@;

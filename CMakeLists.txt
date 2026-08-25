@@ -95,6 +95,7 @@ option(OSGEARTH_BUILD_CESIUM_NODEKIT "Build the Cesium nodekit (osgEarthCesium)"
 option(OSGEARTH_BUILD_TRITON_NODEKIT "Build support for SunDog Triton SDK" OFF)
 option(OSGEARTH_BUILD_SILVERLINING_NODEKIT "Build support for SunDog SilverLining SDK" OFF)
 option(OSGEARTH_ENABLE_GEOCODER "Enable the geocoder (GDAL/OGR must be built with geocoder support)" OFF)
+option(OSGEARTH_ENABLE_SLUGHORN "Enable Slughorn GPU vector rendering in FeatureImageLayer" ON)
 
 option(OSGEARTH_BUILD_DOCS "Include the documentation folder" ON)
 mark_as_advanced(OSGEARTH_BUILD_DOCS)
@@ -159,7 +160,7 @@ option(OSGEARTH_SONAMES "ON to append so-version numbers to libraries" ON)
 # Update git submodules
 # https://cliutils.gitlab.io/modern-cmake/chapters/projects/submodule.html
 find_package(Git QUIET)
-if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
+if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git" AND EXISTS "${PROJECT_SOURCE_DIR}/.gitmodules")
     message(STATUS "Submodule update")
     execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
                     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}

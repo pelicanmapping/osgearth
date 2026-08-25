@@ -6,6 +6,7 @@
 #include <osgEarth/catch.hpp>
 
 #include <osgEarth/ImageLayer>
+#include <osgEarth/FeatureImageLayer>
 #include <osgEarth/Registry>
 #include <osgEarth/GDAL>
 
@@ -50,4 +51,23 @@ TEST_CASE("Attribution works")
 
     REQUIRE(status.isOK());
     REQUIRE(layer->getAttribution() == attribution);
+}
+
+TEST_CASE("FeatureImageLayer rendering technique serializes")
+{
+    FeatureImageLayer::Options options;
+    options.renderingTechnique() = "slug";
+
+    Config config = options.getConfig();
+    REQUIRE(config.value("rendering") == "slug");
+
+    FeatureImageLayer::Options restored(config);
+    REQUIRE(restored.renderingTechnique().get() == "slug");
+
+    osg::ref_ptr<FeatureImageLayer> layer = new FeatureImageLayer();
+    REQUIRE_FALSE(layer->useCreateTexture());
+    layer->setRenderingTechnique("slug");
+    REQUIRE(layer->useCreateTexture());
+    layer->setRenderingTechnique("raster");
+    REQUIRE_FALSE(layer->useCreateTexture());
 }

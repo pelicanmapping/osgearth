@@ -15,6 +15,7 @@
 #include <slughorn/canvas.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cmath>
 #include <cstring>
@@ -37,6 +38,7 @@ namespace
     constexpr unsigned METADATA_HEADER_TEXELS = 3u;
     constexpr unsigned METADATA_TEXELS_PER_LAYER = 4u;
     std::once_flag s_unsupportedSymbolWarning;
+    std::atomic_uint s_curveOverflowWarnings{ 0u };
 
     int bandCountForCurveCount(std::size_t curveCount)
     {
@@ -129,6 +131,8 @@ struct FeatureImageLayerSlug::Impl
     slughorn::canvas::Canvas canvas;
     bool finalized = false;
     bool warnedLayerLimit = false;
+    size_t droppedCurveCount = 0u;
+    size_t truncatedShapeCount = 0u;
 
     float normalizeX(double x) const
     {
@@ -225,10 +229,138 @@ struct FeatureImageLayerSlug::Impl
         return false;
     }
 
+    void enforceAtlasRowLimit(const slughorn::Layer& layer)
+    {
+        const auto shape = atlas.getShape(layer.key);
+        if (!shape || shape->curves.empty())
+            return;
+
+        const size_t rowWidth = atlas.getTextureWidth();
+        const auto splits = complexityAwareBandSplits(shape->curves);
+        const size_t numBandsX = splits.first.size() + 1u;
+        const size_t numBandsY = splits.second.size() + 1u;
+
+        const float minX = shape->bearingX;
+        const float maxX = shape->bearingX + shape->width;
+        const float minY = shape->bearingY - shape->height;
+        const float maxY = shape->bearingY;
+        const float rangeX = std::max(maxX - minX, 1e-6f);
+        const float rangeY = std::max(maxY - minY, 1e-6f);
+
+        auto makeBoundaries = [](float minimum, float range,
+                                 const std::vector<slughorn::slug_t>& values)
+        {
+            std::vector<float> result(values.size() + 2u);
+            result.front() = minimum;
+            result.back() = minimum + range;
+            for (size_t i = 0u; i < values.size(); ++i)
+            {
+                const float snapped = std::round(
+                    static_cast<float>(values[i]) *
+                    slughorn::Atlas::INDIRECTION_SIZE) /
+                    slughorn::Atlas::INDIRECTION_SIZE;
+                result[i + 1u] = minimum + snapped * range;
+            }
+            return result;
+        };
+
+        const auto xBoundaries = makeBoundaries(minX, rangeX, splits.first);
+        const auto yBoundaries = makeBoundaries(minY, rangeY, splits.second);
+        std::vector<size_t> xCounts(numBandsX, 0u);
+        std::vector<size_t> yCounts(numBandsY, 0u);
+        std::vector<size_t> xBands;
+        std::vector<size_t> yBands;
+        slughorn::Atlas::Curves kept;
+        kept.reserve(shape->curves.size());
+
+        std::vector<size_t> contourStarts;
+        const bool hasContourStarts = !shape->contourStarts.empty();
+        size_t nextContour = hasContourStarts ? 1u : 0u;
+        bool needsContourStart = hasContourStarts;
+
+        for (size_t curveIndex = 0u;
+             curveIndex < shape->curves.size(); ++curveIndex)
+        {
+            while (hasContourStarts && nextContour < shape->contourStarts.size() &&
+                   curveIndex >= shape->contourStarts[nextContour])
+            {
+                needsContourStart = true;
+                ++nextContour;
+            }
+
+            const auto& curve = shape->curves[curveIndex];
+            const float curveMinX = std::min({ curve.x1, curve.x2, curve.x3 });
+            const float curveMaxX = std::max({ curve.x1, curve.x2, curve.x3 });
+            const float curveMinY = std::min({ curve.y1, curve.y2, curve.y3 });
+            const float curveMaxY = std::max({ curve.y1, curve.y2, curve.y3 });
+
+            xBands.clear();
+            yBands.clear();
+            for (size_t band = 0u; band < numBandsX; ++band)
+            {
+                if (curveMaxX >= xBoundaries[band] &&
+                    curveMinX <= xBoundaries[band + 1u])
+                {
+                    xBands.push_back(band);
+                }
+            }
+            for (size_t band = 0u; band < numBandsY; ++band)
+            {
+                if (curveMaxY >= yBoundaries[band] &&
+                    curveMinY <= yBoundaries[band + 1u])
+                {
+                    yBands.push_back(band);
+                }
+            }
+
+            const bool fitsX = std::all_of(
+                xBands.begin(), xBands.end(),
+                [&](size_t band) { return xCounts[band] < rowWidth; });
+            const bool fitsY = std::all_of(
+                yBands.begin(), yBands.end(),
+                [&](size_t band) { return yCounts[band] < rowWidth; });
+            if (!fitsX || !fitsY)
+                continue;
+
+            if (needsContourStart)
+            {
+                if (contourStarts.empty() || contourStarts.back() != kept.size())
+                    contourStarts.push_back(kept.size());
+                needsContourStart = false;
+            }
+            kept.push_back(curve);
+            for (const auto band : xBands)
+                ++xCounts[band];
+            for (const auto band : yBands)
+                ++yCounts[band];
+        }
+
+        const size_t dropped = shape->curves.size() - kept.size();
+        if (dropped == 0u)
+            return;
+
+        slughorn::Atlas::ShapeInfo replacement;
+        replacement.curves = std::move(kept);
+        replacement.contourStarts = std::move(contourStarts);
+        replacement.autoMetrics = false;
+        replacement.bearingX = shape->bearingX;
+        replacement.bearingY = shape->bearingY;
+        replacement.width = shape->width;
+        replacement.height = shape->height;
+        replacement.advance = shape->advance;
+        replacement.splitsX = splits.first;
+        replacement.splitsY = splits.second;
+        replacement.origin = shape->origin;
+        atlas.addShape(layer.key, replacement);
+
+        droppedCurveCount += dropped;
+        ++truncatedShapeCount;
+    }
+
     void commitFill(slughorn::canvas::Path& path, const Color& color)
     {
         if (canAddLayer() && path.hasPendingPath())
-            canvas.fill(path, toSlugColor(color));
+            enforceAtlasRowLimit(canvas.fill(path, toSlugColor(color)));
     }
 
     void commitStroke(const StrokeGroup& group)
@@ -239,14 +371,14 @@ struct FeatureImageLayerSlug::Impl
         const float normalizedWidth = static_cast<float>(
             group.widthPixels / static_cast<double>(tileSize));
 
-        canvas.stroke(
+        enforceAtlasRowLimit(canvas.stroke(
             group.path,
             normalizedWidth,
             toSlugColor(group.color),
             1.0f,
             {},
             toSlugJoin(group.join),
-            toSlugCap(group.cap));
+            toSlugCap(group.cap)));
     }
 
     StrokeGroup& getStrokeGroup(
@@ -450,6 +582,20 @@ struct FeatureImageLayerSlug::Impl
         if (finalized)
             return {};
         finalized = true;
+
+        if (droppedCurveCount > 0u)
+        {
+            const unsigned warningIndex = s_curveOverflowWarnings.fetch_add(1u);
+            if (warningIndex < 10u)
+            {
+                OE_WARN << "[FeatureImageLayer/Slug] " << atlas.getTextureWidth()
+                    << "-texel atlas rows omitted "
+                    << droppedCurveCount << " curves from " << truncatedShapeCount
+                    << " shapes in one tile"
+                    << (warningIndex == 9u ? "; further warnings suppressed" : "")
+                    << std::endl;
+            }
+        }
 
         slughorn::CompositeShape composite = canvas.finalize();
 

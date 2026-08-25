@@ -436,45 +436,15 @@ FeatureImageLayer::createTexture(const TileKey& key, ProgressCallback* progress)
         renderer,
         progress);
 
-    // Slughorn's glyph-oriented 512-wide default is too narrow for complex
-    // geographic rings, especially after stroke expansion. Pick a per-tile
-    // power-of-two width from the largest sorted style batch instead. Eight
-    // curve slots per source vertex is a conservative allowance for walls,
-    // joins, caps, and point-circle expansion.
-    constexpr unsigned MIN_ATLAS_WIDTH = 512u;
-    constexpr unsigned MAX_ATLAS_WIDTH = 16384u;
-    size_t largestBatchVertexCount = 0u;
-    for (const auto& batch : batches)
-    {
-        size_t vertexCount = 0u;
-        for (const auto& feature : batch.second)
-        {
-            const Geometry* geometry = feature->getGeometry();
-            if (!geometry)
-                continue;
-
-            geometry->forEachPart(true, [&](const Geometry* part)
-            {
-                if (part)
-                    vertexCount += part->size();
-            });
-        }
-        largestBatchVertexCount = std::max(largestBatchVertexCount, vertexCount);
-    }
-
-    const size_t estimatedCurveCount = largestBatchVertexCount * 8u;
-    unsigned atlasTextureWidth = MIN_ATLAS_WIDTH;
-    while (atlasTextureWidth < estimatedCurveCount &&
-           atlasTextureWidth < MAX_ATLAS_WIDTH)
-    {
-        atlasTextureWidth <<= 1u;
-    }
-
+    // Keep every atlas at Slughorn's native row width. The osgEarth adapter
+    // omits curves from overfull band lists instead of allowing them to wrap
+    // into unrelated data or growing the texture to a driver-limit width.
+    constexpr unsigned ATLAS_TEXTURE_WIDTH = 512u;
     Util::FeatureImageLayerSlug slugBuilder(
         getTileSize(),
         key.getExtent(),
         options().backgroundColor().get(),
-        atlasTextureWidth);
+        ATLAS_TEXTURE_WIDTH);
     for (const auto& batch : batches)
         slugBuilder.render(batch.second, batch.first, context);
 

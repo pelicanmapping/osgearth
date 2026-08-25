@@ -1,0 +1,77 @@
+<!--
+By using include "select" symbols in the Roads layer, you can select multiple
+styles for each feature. Styles render in the order of appearance. The "select"
+symbol can take any javascript expression.
+
+This demo will render all road backgrounds first, and then the roads
+themselves afterwards for a nice outlining effect.
+-->
+
+<map name="Demo: feature mulit-styling">
+
+    <XYZFeatures name="osm-roads">
+        <url>https://readymap.org/readymap/mbtiles/daylight-v1.2/{z}/{x}/{-y}.pbf</url>
+        <min_level>14</min_level>
+        <max_level>14</max_level>
+        <profile>spherical-mercator</profile>
+        <format>pbf</format>
+        <fid_attribute>@id</fid_attribute>
+        <filters>
+            <attributes>highway</attributes>
+        </filters>
+    </XYZFeatures>
+    
+    <TMSImage name="Imagery">
+        <url>https://readymap.org/readymap/tiles/1.0.0/7</url>
+    </TMSImage>
+    
+    <FeatureImage name="Roads" min_level="14" max_data_level="14" rendering="slug">
+        <tile_size>256</tile_size>
+        <features>osm-roads</features>
+        <buffer_width>25m</buffer_width>
+        <styles>
+            <style type="text/css">
+                minor_road_outline {
+                    select: !is_major();
+                    stroke: #ffffff;
+                    stroke-width: 15m;
+                    stroke-linecap: round;
+                }
+                major_road_outline {
+                    select: is_major();
+                    stroke: #ffffff;
+                    stroke-width: 20m;
+                    stroke-linecap: round;
+                }
+                minor_road {
+                    select: !is_major();
+                    stroke: #3f3f3f;
+                    stroke-width: 10m;
+                    stroke-linecap: round;
+                }
+                major_road {
+                    select: is_major();
+                    stroke: #1f1f1f;
+                    stroke-width: 15m;
+                    stroke-linecap: round;
+                }
+            </style>
+            <script><![CDATA[
+                function is_major() {
+                    return ['trunk', 'primary', 'motorway', 'secondary', 'tertiary'].includes(feature.properties.highway);  
+                }
+              ]]>
+            </script>
+        </styles>
+    </FeatureImage>
+    
+    <Viewpoints home="0" time="1">
+        <viewpoint name="Annandale">
+            <heading>-3.2425e-07</heading>
+            <pitch>-89</pitch>
+            <range>2928.14m</range>
+            <long>-77.19548706709453</long>
+            <lat>38.83147622799055</lat>
+        </viewpoint>
+    </Viewpoints>
+</map>

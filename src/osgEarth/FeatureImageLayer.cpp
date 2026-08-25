@@ -444,6 +444,7 @@ FeatureImageLayer::createTexture(const TileKey& key, ProgressCallback* progress)
         key.getExtent(),
         options().backgroundColor().get(),
         getTileSize());
+
     for (const auto& batch : batches)
         slugBuilder.render(batch.second, batch.first, context);
 

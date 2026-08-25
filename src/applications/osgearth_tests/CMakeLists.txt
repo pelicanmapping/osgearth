@@ -10,6 +10,7 @@ set(TARGET_SRC
     PathTests.cpp
     ImageLayerTests.cpp
     SpatialReferenceTests.cpp
+    SlugTests.cpp
     ThreadingTests.cpp)
 
 add_osgearth_app(

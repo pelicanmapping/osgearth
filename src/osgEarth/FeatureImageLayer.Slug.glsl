@@ -71,10 +71,21 @@ vec4 oe_slug_curveFetch(ivec2 location, int curveRowOffset)
     return oe_slug_texelFetch(location + ivec2(0, curveRowOffset));
 }
 
-uvec4 oe_slug_bandFetch(ivec2 location, int bandRowOffset)
+uvec2 oe_slug_bandFetch(
+    ivec2 location,
+    int bandRowOffset,
+    int textureWidthLog2)
 {
-    vec4 value = oe_slug_texelFetch(location + ivec2(0, bandRowOffset));
-    return uvec4(value + vec4(0.5));
+    // The CPU packs two logical RG16UI records in each RGBA32F texel.
+    int logicalIndex = (location.y << textureWidthLog2) + location.x;
+    int packedIndex = logicalIndex >> 1;
+    int textureMask = (1 << textureWidthLog2) - 1;
+    ivec2 packedLocation = ivec2(
+        packedIndex & textureMask,
+        (packedIndex >> textureWidthLog2) + bandRowOffset);
+    vec4 value = oe_slug_texelFetch(packedLocation);
+    vec2 record = (logicalIndex & 1) == 0 ? value.xy : value.zw;
+    return uvec2(record + vec2(0.5));
 }
 
 uint oe_slug_calcRootCode(float y1, float y2, float y3)
@@ -91,15 +102,21 @@ vec2 oe_slug_solveHorizontal(vec4 p12, vec2 p3)
 {
     vec2 a = p12.xy - p12.zw * 2.0 + p3;
     vec2 b = p12.xy - p12.zw;
-    float ra = 1.0 / a.y;
-    float rb = 0.5 / b.y;
-    float d = sqrt(max(b.y * b.y - a.y * p12.y, 0.0));
-    float t1 = (b.y - d) * ra;
-    float t2 = (b.y + d) * ra;
+    float t1;
+    float t2;
     if (abs(a.y) < 1.0 / 65536.0)
     {
-        t1 = p12.y * rb;
+        // Straight and axis-degenerate curves dominate stroked line work.
+        // Branch before issuing the quadratic reciprocal and square root.
+        t1 = p12.y * (0.5 / b.y);
         t2 = t1;
+    }
+    else
+    {
+        float reciprocal = 1.0 / a.y;
+        float d = sqrt(max(b.y * b.y - a.y * p12.y, 0.0));
+        t1 = (b.y - d) * reciprocal;
+        t2 = (b.y + d) * reciprocal;
     }
     return vec2(
         (a.x * t1 - b.x * 2.0) * t1 + p12.x,
@@ -110,15 +127,19 @@ vec2 oe_slug_solveVertical(vec4 p12, vec2 p3)
 {
     vec2 a = p12.xy - p12.zw * 2.0 + p3;
     vec2 b = p12.xy - p12.zw;
-    float ra = 1.0 / a.x;
-    float rb = 0.5 / b.x;
-    float d = sqrt(max(b.x * b.x - a.x * p12.x, 0.0));
-    float t1 = (b.x - d) * ra;
-    float t2 = (b.x + d) * ra;
+    float t1;
+    float t2;
     if (abs(a.x) < 1.0 / 65536.0)
     {
-        t1 = p12.x * rb;
+        t1 = p12.x * (0.5 / b.x);
         t2 = t1;
+    }
+    else
+    {
+        float reciprocal = 1.0 / a.x;
+        float d = sqrt(max(b.x * b.x - a.x * p12.x, 0.0));
+        t1 = (b.x - d) * reciprocal;
+        t2 = (b.x + d) * reciprocal;
     }
     return vec2(
         (a.y * t1 - b.y * 2.0) * t1 + p12.y,
@@ -159,23 +180,29 @@ float oe_slug_render(
     int qy = clamp(int(bandCoord.y), 0, OE_SLUG_INDIRECTION_SIZE - 1);
     int qx = clamp(int(bandCoord.x), 0, OE_SLUG_INDIRECTION_SIZE - 1);
     int bandY = int(oe_slug_bandFetch(
-        shapeLocation + ivec2(qy, 0), bandRowOffset).r);
+        shapeLocation + ivec2(qy, 0),
+        bandRowOffset,
+        textureWidthLog2).r);
     int bandX = int(oe_slug_bandFetch(
         shapeLocation + ivec2(OE_SLUG_INDIRECTION_SIZE + qx, 0),
-        bandRowOffset).r);
+        bandRowOffset,
+        textureWidthLog2).r);
 
     float xCoverage = 0.0;
     float xWeight = 0.0;
     uvec2 horizontal = oe_slug_bandFetch(
         shapeLocation + ivec2(2 * OE_SLUG_INDIRECTION_SIZE + bandY, 0),
-        bandRowOffset).xy;
+        bandRowOffset,
+        textureWidthLog2);
     ivec2 horizontalLocation = oe_slug_bandLocation(
         shapeLocation, horizontal.y, textureWidthLog2);
 
     for (int curveIndex = 0; curveIndex < int(horizontal.x); ++curveIndex)
     {
         ivec2 curveLocation = ivec2(oe_slug_bandFetch(
-            horizontalLocation + ivec2(curveIndex, 0), bandRowOffset).xy);
+            horizontalLocation + ivec2(curveIndex, 0),
+            bandRowOffset,
+            textureWidthLog2));
         vec4 p12 = oe_slug_curveFetch(curveLocation, curveRowOffset) -
             vec4(renderCoord, renderCoord);
         vec2 p3 = oe_slug_curveFetch(
@@ -206,14 +233,17 @@ float oe_slug_render(
     uvec2 vertical = oe_slug_bandFetch(
         shapeLocation + ivec2(
             2 * OE_SLUG_INDIRECTION_SIZE + bandMax.y + 1 + bandX, 0),
-        bandRowOffset).xy;
+        bandRowOffset,
+        textureWidthLog2);
     ivec2 verticalLocation = oe_slug_bandLocation(
         shapeLocation, vertical.y, textureWidthLog2);
 
     for (int curveIndex = 0; curveIndex < int(vertical.x); ++curveIndex)
     {
         ivec2 curveLocation = ivec2(oe_slug_bandFetch(
-            verticalLocation + ivec2(curveIndex, 0), bandRowOffset).xy);
+            verticalLocation + ivec2(curveIndex, 0),
+            bandRowOffset,
+            textureWidthLog2));
         vec4 p12 = oe_slug_curveFetch(curveLocation, curveRowOffset) -
             vec4(renderCoord, renderCoord);
         vec2 p3 = oe_slug_curveFetch(

@@ -3,6 +3,7 @@
  * MIT License
  */
 #include "FeatureImageLayerSlug.h"
+#include "FeatureImageLayerSlugPacking.h"
 
 #include <osgEarth/Notify>
 #include <osgEarth/PointSymbol>
@@ -20,6 +21,7 @@
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #ifndef GL_RGBA32F
@@ -36,6 +38,26 @@ namespace
     constexpr unsigned METADATA_HEADER_TEXELS = 3u;
     constexpr unsigned METADATA_TEXELS_PER_LAYER = 4u;
     std::once_flag s_unsupportedSymbolWarning;
+
+    int bandCountForCurveCount(std::size_t curveCount)
+    {
+        // Retain Slughorn's inexpensive default for simple shapes. Complex
+        // shapes use the complete 32-cell indirection grid; every resulting
+        // 1/32 band is nested inside an old 1/16 band, so its curve candidate
+        // list cannot grow.
+        const auto automaticCount = std::max<std::size_t>(1u, curveCount / 2u);
+        const auto count = automaticCount > 16u ?
+            std::size_t{ slughorn::Atlas::INDIRECTION_SIZE } : automaticCount;
+        return static_cast<int>(count);
+    }
+
+    std::pair<std::vector<slughorn::slug_t>, std::vector<slughorn::slug_t>>
+    complexityAwareBandSplits(const slughorn::Atlas::Curves& curves)
+    {
+        const int bandCount = bandCountForCurveCount(curves.size());
+        return slughorn::Atlas::computeUniformSplits(
+            curves, bandCount, bandCount);
+    }
 
     slughorn::Color toSlugColor(const Color& value)
     {
@@ -98,6 +120,7 @@ struct FeatureImageLayerSlug::Impl
         atlas(atlasTextureWidth),
         canvas(atlas, slughorn::KeyIterator("osgearth"))
     {
+        canvas.setSplitStrategy(complexityAwareBandSplits);
     }
 
     unsigned tileSize;
@@ -454,15 +477,27 @@ struct FeatureImageLayerSlug::Impl
         const auto& curveData = atlas.getCurveTextureData();
         const auto& bandData = atlas.getBandTextureData();
         const unsigned curveRows = composite.empty() ? 0u : curveData.height;
-        const unsigned bandRows = composite.empty() ? 0u : bandData.height;
+        const std::size_t logicalBandTexels = composite.empty() ? 0u :
+            static_cast<std::size_t>(bandData.width) * bandData.height;
+        const std::size_t packedBandTexels =
+            detail::slugPackedBandTexelCount(logicalBandTexels);
+        const unsigned bandRows = static_cast<unsigned>(
+            (packedBandTexels + atlasWidth - 1u) / atlasWidth);
         const unsigned curveRowOffset = metadataRows;
         const unsigned bandRowOffset = curveRowOffset + curveRows;
         const unsigned textureHeight = bandRowOffset + bandRows;
 
+        const std::size_t expectedCurveBytes =
+            static_cast<std::size_t>(curveData.width) * curveData.height *
+            4u * sizeof(float);
+        const std::size_t expectedBandBytes = logicalBandTexels *
+            4u * sizeof(std::uint16_t);
         if (!composite.empty() &&
-            (curveData.width != atlasWidth || bandData.width != atlasWidth))
+            (curveData.width != atlasWidth || bandData.width != atlasWidth ||
+             curveData.bytes.size() != expectedCurveBytes ||
+             bandData.bytes.size() != expectedBandBytes))
         {
-            OE_WARN << "[FeatureImageLayer/Slug] Slughorn returned inconsistent atlas widths"
+            OE_WARN << "[FeatureImageLayer/Slug] Slughorn returned invalid atlas data"
                 << std::endl;
             return {};
         }
@@ -508,14 +543,8 @@ struct FeatureImageLayerSlug::Impl
 
             float* targetBand = pixels +
                 static_cast<size_t>(bandRowOffset) * atlasWidth * 4u;
-            const size_t bandValues = bandData.bytes.size() / sizeof(std::uint16_t);
-            for (size_t i = 0; i < bandValues; ++i)
-            {
-                std::uint16_t value;
-                std::memcpy(&value, bandData.bytes.data() +
-                    i * sizeof(std::uint16_t), sizeof(value));
-                targetBand[i] = static_cast<float>(value);
-            }
+            detail::slugPackBandRG(
+                bandData.bytes.data(), logicalBandTexels, targetBand);
 
             unsigned record = METADATA_HEADER_TEXELS;
             for (const auto& layer : composite.layers)

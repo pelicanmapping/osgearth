@@ -15,7 +15,11 @@
 #include <osgEarth/ImageUtils>
 #include <osgEarth/MBTiles>
 #include <osgDB/ReadFile>
+#include "../../osgEarth/FeatureImageLayerSlugPacking.h"
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <vector>
 
 using namespace osgEarth;
 namespace fs = std::filesystem;
@@ -479,5 +483,190 @@ static void BM_MipmapImage_RGBA8(benchmark::State& state)
     }
 }
 BENCHMARK(BM_MipmapImage_RGBA8)->Args({1024, 1024})->Args({2048, 2048})->Unit(benchmark::kMillisecond);
+
+static std::vector<std::uint16_t> createSlugBandBenchmarkData(std::size_t texelCount)
+{
+    std::vector<std::uint16_t> result(texelCount * 4u);
+    for (std::size_t i = 0u; i < result.size(); ++i)
+        result[i] = static_cast<std::uint16_t>((i * 7919u) & 0xffffu);
+    return result;
+}
+
+// Reference implementation used before the packed RG optimization.
+static void BM_SlugBandAtlasExpandRGBA32F(benchmark::State& state)
+{
+    const std::size_t texelCount = static_cast<std::size_t>(state.range(0));
+    const auto source = createSlugBandBenchmarkData(texelCount);
+    std::vector<float> destination(texelCount * 4u);
+
+    for (auto _ : state)
+    {
+        for (std::size_t i = 0u; i < source.size(); ++i)
+            destination[i] = static_cast<float>(source[i]);
+        benchmark::DoNotOptimize(destination.data());
+        benchmark::ClobberMemory();
+    }
+
+    state.SetBytesProcessed(
+        state.iterations() * static_cast<std::int64_t>(
+            source.size() * sizeof(source[0]) +
+            destination.size() * sizeof(destination[0])));
+}
+BENCHMARK(BM_SlugBandAtlasExpandRGBA32F)
+    ->Arg(262144)
+    ->Unit(benchmark::kMicrosecond);
+
+static void BM_SlugBandAtlasPackRG32F(benchmark::State& state)
+{
+    using namespace osgEarth::Util::detail;
+    const std::size_t texelCount = static_cast<std::size_t>(state.range(0));
+    const auto source = createSlugBandBenchmarkData(texelCount);
+    std::vector<float> destination(slugPackedBandTexelCount(texelCount) * 4u);
+
+    for (auto _ : state)
+    {
+        slugPackBandRG(source.data(), texelCount, destination.data());
+        benchmark::DoNotOptimize(destination.data());
+        benchmark::ClobberMemory();
+    }
+
+    state.SetBytesProcessed(
+        state.iterations() * static_cast<std::int64_t>(
+            texelCount * 2u * sizeof(source[0]) +
+            destination.size() * sizeof(destination[0])));
+}
+BENCHMARK(BM_SlugBandAtlasPackRG32F)
+    ->Arg(262144)
+    ->Unit(benchmark::kMicrosecond);
+
+struct SlugSolverVec2
+{
+    float x;
+    float y;
+};
+
+struct SlugSolverVec4
+{
+    float x;
+    float y;
+    float z;
+    float w;
+};
+
+#ifdef _MSC_VER
+#define OE_BENCHMARK_NOINLINE __declspec(noinline)
+#else
+#define OE_BENCHMARK_NOINLINE __attribute__((noinline))
+#endif
+
+// Mirrors the original Slughorn shader: quadratic work occurs before the
+// straight-curve fallback overwrites its result.
+static OE_BENCHMARK_NOINLINE SlugSolverVec2 slugSolveHorizontalLegacy(
+    const SlugSolverVec4& p12,
+    const SlugSolverVec2& p3)
+{
+    const SlugSolverVec2 a = {
+        p12.x - p12.z * 2.0f + p3.x,
+        p12.y - p12.w * 2.0f + p3.y
+    };
+    const SlugSolverVec2 b = { p12.x - p12.z, p12.y - p12.w };
+    const float reciprocal = 1.0f / a.y;
+    const float linearReciprocal = 0.5f / b.y;
+    const float discriminant = std::sqrt(std::max(
+        b.y * b.y - a.y * p12.y, 0.0f));
+    float t1 = (b.y - discriminant) * reciprocal;
+    float t2 = (b.y + discriminant) * reciprocal;
+    if (std::abs(a.y) < 1.0f / 65536.0f)
+    {
+        t1 = p12.y * linearReciprocal;
+        t2 = t1;
+    }
+    return {
+        (a.x * t1 - b.x * 2.0f) * t1 + p12.x,
+        (a.x * t2 - b.x * 2.0f) * t2 + p12.x
+    };
+}
+
+static OE_BENCHMARK_NOINLINE SlugSolverVec2 slugSolveHorizontalFast(
+    const SlugSolverVec4& p12,
+    const SlugSolverVec2& p3)
+{
+    const SlugSolverVec2 a = {
+        p12.x - p12.z * 2.0f + p3.x,
+        p12.y - p12.w * 2.0f + p3.y
+    };
+    const SlugSolverVec2 b = { p12.x - p12.z, p12.y - p12.w };
+    float t1;
+    float t2;
+    if (std::abs(a.y) < 1.0f / 65536.0f)
+    {
+        t1 = p12.y * (0.5f / b.y);
+        t2 = t1;
+    }
+    else
+    {
+        const float reciprocal = 1.0f / a.y;
+        const float discriminant = std::sqrt(std::max(
+            b.y * b.y - a.y * p12.y, 0.0f));
+        t1 = (b.y - discriminant) * reciprocal;
+        t2 = (b.y + discriminant) * reciprocal;
+    }
+    return {
+        (a.x * t1 - b.x * 2.0f) * t1 + p12.x,
+        (a.x * t2 - b.x * 2.0f) * t2 + p12.x
+    };
+}
+
+template<typename Solver>
+static void BM_SlugStraightCurveSolver(benchmark::State& state, Solver solver)
+{
+    constexpr std::size_t curveCount = 16384u;
+    std::vector<SlugSolverVec4> p12(curveCount);
+    std::vector<SlugSolverVec2> p3(curveCount);
+    for (std::size_t i = 0u; i < curveCount; ++i)
+    {
+        const float offset = static_cast<float>(i & 255u) / 1024.0f;
+        p12[i] = { -0.4f + offset, -0.25f, offset, 0.0f };
+        p3[i] = { 0.4f + offset, 0.25f };
+    }
+
+    // The optimized branch must remain algebraically identical on the path
+    // this benchmark is intended to accelerate.
+    const auto reference = slugSolveHorizontalLegacy(p12[0], p3[0]);
+    const auto optimized = slugSolveHorizontalFast(p12[0], p3[0]);
+    if (reference.x != optimized.x || reference.y != optimized.y)
+    {
+        state.SkipWithError("Slug straight-curve solver result changed");
+        return;
+    }
+
+    for (auto _ : state)
+    {
+        SlugSolverVec2 accumulated = {};
+        for (std::size_t i = 0u; i < curveCount; ++i)
+        {
+            const auto result = solver(p12[i], p3[i]);
+            accumulated.x += result.x;
+            accumulated.y += result.y;
+        }
+        benchmark::DoNotOptimize(accumulated);
+    }
+    state.SetItemsProcessed(
+        state.iterations() * static_cast<std::int64_t>(curveCount));
+}
+
+static void BM_SlugStraightCurveSolverLegacy(benchmark::State& state)
+{
+    BM_SlugStraightCurveSolver(state, slugSolveHorizontalLegacy);
+}
+BENCHMARK(BM_SlugStraightCurveSolverLegacy)->Unit(benchmark::kMicrosecond);
+
+static void BM_SlugStraightCurveSolverFast(benchmark::State& state)
+{
+    BM_SlugStraightCurveSolver(state, slugSolveHorizontalFast);
+}
+BENCHMARK(BM_SlugStraightCurveSolverFast)->Unit(benchmark::kMicrosecond);
+
+#undef OE_BENCHMARK_NOINLINE
 
 BENCHMARK_MAIN();

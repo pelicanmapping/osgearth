@@ -26,7 +26,6 @@
 #include <osgEarth/ShaderGenerator>
 #include <osgEarth/ShaderLoader>
 #include <osgEarth/VirtualProgram>
-#include <osgEarth/ImageUtils>
 #include <osgEarth/StringUtils>
 #include <osgEarth/InstanceBuilder>
 #include <osgEarth/StateTransition>
@@ -741,15 +740,13 @@ public:
         const Env& env;
         std::vector< osg::ref_ptr< osg::Array > > arrays;
 
-        // Texture image units for the material maps. These follow the same
-        // convention as osgEarth::PBRTexture (albedo / normal / pbr) and are
-        // the units the Chonk ripper reads when it encounters plain textures
-        // instead of a PBRTexture combo attribute (see Chonk.cpp).
+        // Texture image units for the original glTF material maps.
         enum : unsigned
         {
             ALBEDO_UNIT = 0u,
             NORMAL_UNIT = 1u,
-            PBR_UNIT = 2u
+            METALLIC_ROUGHNESS_UNIT = 2u,
+            OCCLUSION_UNIT = 3u
         };
 
         // Whether to load the normal, metallic-roughness and occlusion maps
@@ -771,13 +768,9 @@ public:
             extractArrays(arrays);
         }
 
-        //! Shader that applies the normal map (unit 1) and the packed
-        //! roughness/AO/metal map (unit 2) for geometry rendered through the
-        //! regular osgEarth pipeline (ShaderGenerator + PhongLighting/Sky PBR
-        //! lighting). It perturbs vp_Normal and populates the oe_pbr material
-        //! globals that osgEarth's lighting stages consume - the same thing
-        //! Chonk.glsl does for NVGL rendering. Chonk ignores this program and
-        //! reads the textures straight off the units instead.
+        //! Shader that samples the original glTF material maps directly. It
+        //! performs the glTF channel selection, normal scaling, and material
+        //! factor application that would otherwise require converted images.
         static const char* pbrMaterialShaderSource()
         {
             return R"(
@@ -795,7 +788,9 @@ void oe_gltf_pbr_vs(inout vec4 vertex_view)
 [break]
 #pragma vp_function oe_gltf_pbr_fs, fragment_coloring, 0.6
 #pragma import_defines(OE_GLTF_NORMAL_MAP)
-#pragma import_defines(OE_GLTF_PBR_MAP)
+#pragma import_defines(OE_GLTF_METALLIC_ROUGHNESS_MAP)
+#pragma import_defines(OE_GLTF_OCCLUSION_MAP)
+#pragma import_defines(OE_GLTF_PBR_FACTORS)
 #pragma import_defines(OE_IS_SHADOW_CAMERA)
 #pragma import_defines(OE_IS_DEPTH_CAMERA)
 
@@ -806,12 +801,16 @@ in vec3 oe_gltf_pbr_pos_view;
 in vec2 oe_gltf_pbr_uv;
 
 uniform sampler2D oe_gltf_normal_tex;
-uniform sampler2D oe_gltf_pbr_tex;
+uniform sampler2D oe_gltf_metallic_roughness_tex;
+uniform sampler2D oe_gltf_occlusion_tex;
+uniform float oe_gltf_normal_scale;
+uniform float oe_gltf_roughness_factor;
+uniform float oe_gltf_metallic_factor;
+uniform float oe_gltf_occlusion_strength;
 
 #ifdef OE_GLTF_NORMAL_MAP
-// Cotangent frame from screen-space derivatives (same construction as
-// Chonk.glsl's make_tbn). The bitangent follows increasing V; the reader
-// converts the glTF normal map to match.
+// Cotangent frame from screen-space derivatives. The bitangent follows
+// increasing V, so the sampled glTF normal's Y component is inverted below.
 mat3 oe_gltf_pbr_tbn(vec3 N, vec3 p, vec2 uv)
 {
     vec3 dp1 = dFdx(p);
@@ -837,29 +836,49 @@ void oe_gltf_pbr_fs(inout vec4 color)
 #ifdef OE_GLTF_NORMAL_MAP
     vec3 N = normalize(vp_Normal);
     vec3 n = texture(oe_gltf_normal_tex, oe_gltf_pbr_uv).xyz * 2.0 - 1.0;
+    n.xy *= vec2(oe_gltf_normal_scale, -oe_gltf_normal_scale);
+    float nlen = length(n);
+    n = nlen > 0.0 ? n / nlen : vec3(0.0, 0.0, 1.0);
     vec3 pn = oe_gltf_pbr_tbn(N, oe_gltf_pbr_pos_view, oe_gltf_pbr_uv) * n;
     float len = length(pn);
     vp_Normal = len > 0.0 ? pn / len : N;
 #endif
 
-#ifdef OE_GLTF_PBR_MAP
-    vec4 texel = texture(oe_gltf_pbr_tex, oe_gltf_pbr_uv);
-    oe_pbr.displacement = texel[0];
-    oe_pbr.roughness *= texel[1];
-    oe_pbr.ao *= texel[2];
-    oe_pbr.metal = clamp(oe_pbr.metal + texel[3], 0.0, 1.0);
+#ifdef OE_GLTF_PBR_FACTORS
+    float roughness = oe_gltf_roughness_factor;
+    float metal = oe_gltf_metallic_factor;
+  #ifdef OE_GLTF_METALLIC_ROUGHNESS_MAP
+    vec4 metallicRoughness = texture(oe_gltf_metallic_roughness_tex, oe_gltf_pbr_uv);
+    roughness *= metallicRoughness.g;
+    metal *= metallicRoughness.b;
+  #endif
+    oe_pbr.displacement = 0.0;
+    oe_pbr.roughness *= roughness;
+    oe_pbr.metal = clamp(oe_pbr.metal + metal, 0.0, 1.0);
+#endif
+
+#ifdef OE_GLTF_OCCLUSION_MAP
+    float occlusion = texture(oe_gltf_occlusion_tex, oe_gltf_pbr_uv).r;
+    oe_pbr.ao *= 1.0 + oe_gltf_occlusion_strength * (occlusion - 1.0);
 #endif
 }
 )";
         }
 
-        //! Installs the material maps on a stateset: textures on the PBRTexture
-        //! style units plus the shader above (with the corresponding defines and
-        //! sampler uniforms) so that the maps take effect in the standard
-        //! rendering path.
-        static void installPBRMaterial(osg::StateSet* stateset, osg::Texture2D* normalTex, osg::Texture2D* pbrTex)
+        //! Installs the original glTF maps and the shader state that interprets
+        //! their channels and factors.
+        static void installPBRMaterial(
+            osg::StateSet* stateset,
+            osg::Texture2D* normalTex,
+            osg::Texture2D* metallicRoughnessTex,
+            osg::Texture2D* occlusionTex,
+            float normalScale,
+            float roughnessFactor,
+            float metallicFactor,
+            float occlusionStrength,
+            bool applyPBRFactors)
         {
-            if (!stateset || (!normalTex && !pbrTex))
+            if (!stateset || (!normalTex && !metallicRoughnessTex && !occlusionTex && !applyPBRFactors))
                 return;
 
             VirtualProgram* vp = VirtualProgram::getOrCreate(stateset);
@@ -872,15 +891,37 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 ShaderGenerator::setIgnoreHint(normalTex, true);
                 stateset->setTextureAttribute(NORMAL_UNIT, normalTex);
                 stateset->addUniform(new osg::Uniform("oe_gltf_normal_tex", (int)NORMAL_UNIT));
+                stateset->addUniform(new osg::Uniform("oe_gltf_normal_scale", normalScale));
                 stateset->setDefine("OE_GLTF_NORMAL_MAP");
             }
 
-            if (pbrTex)
+            if (metallicRoughnessTex)
             {
-                ShaderGenerator::setIgnoreHint(pbrTex, true);
-                stateset->setTextureAttribute(PBR_UNIT, pbrTex);
-                stateset->addUniform(new osg::Uniform("oe_gltf_pbr_tex", (int)PBR_UNIT));
-                stateset->setDefine("OE_GLTF_PBR_MAP");
+                ShaderGenerator::setIgnoreHint(metallicRoughnessTex, true);
+                stateset->setTextureAttribute(METALLIC_ROUGHNESS_UNIT, metallicRoughnessTex);
+                stateset->addUniform(new osg::Uniform(
+                    "oe_gltf_metallic_roughness_tex", (int)METALLIC_ROUGHNESS_UNIT));
+                stateset->setDefine("OE_GLTF_METALLIC_ROUGHNESS_MAP");
+            }
+
+            if (occlusionTex)
+            {
+                ShaderGenerator::setIgnoreHint(occlusionTex, true);
+                stateset->setTextureAttribute(OCCLUSION_UNIT, occlusionTex);
+                stateset->addUniform(new osg::Uniform(
+                    "oe_gltf_occlusion_tex", (int)OCCLUSION_UNIT));
+                stateset->addUniform(new osg::Uniform(
+                    "oe_gltf_occlusion_strength", occlusionStrength));
+                stateset->setDefine("OE_GLTF_OCCLUSION_MAP");
+            }
+
+            if (applyPBRFactors)
+            {
+                stateset->addUniform(new osg::Uniform(
+                    "oe_gltf_roughness_factor", roughnessFactor));
+                stateset->addUniform(new osg::Uniform(
+                    "oe_gltf_metallic_factor", metallicFactor));
+                stateset->setDefine("OE_GLTF_PBR_FACTORS");
             }
         }
 
@@ -1189,250 +1230,38 @@ void oe_gltf_pbr_fs(inout vec4 color)
             return tex;
         }
 
-        //! Base color (albedo) texture for a material.
-        osg::ref_ptr<osg::Texture2D> getOrCreateColorTexture(const tinygltf::TextureInfo& info) const
+        //! Returns a glTF texture without rewriting its source image. Keep the
+        //! ShaderGenerator-managed color binding separate from maps interpreted
+        //! by our material shader, since the latter carry an ignore hint.
+        osg::ref_ptr<osg::Texture2D> getOrCreateSourceTexture(
+            int textureIndex,
+            bool shaderManaged) const
         {
-            if (!validTextureIndex(info.index))
+            if (!validTextureIndex(textureIndex))
                 return {};
 
-            const tinygltf::Texture& texture = model.textures[info.index];
+            const tinygltf::Texture& texture = model.textures[textureIndex];
+            const char* usage = shaderManaged ? "material" : "color";
             return getOrCreateTexture(
-                Stringify() << "color:" << info.index,
-                sharedTextureKey(texture, ""),
+                Stringify() << usage << ":" << textureIndex,
+                sharedTextureKey(texture, Stringify() << "|gltf-" << usage),
                 [&]() { return osg::ref_ptr<osg::Texture2D>(makeTextureFromModel(texture)); });
         }
 
-        //! Converts a glTF tangent-space normal map for use with osgEarth's
-        //! normal-mapping shaders (e.g. make_tbn in Chonk.glsl), which derive
-        //! the bitangent from screen-space derivatives so that it points in
-        //! the direction of increasing V. glTF images are stored top-row-first
-        //! with the texture coordinate origin in the upper-left corner, so
-        //! that direction runs down the image, whereas glTF normal maps encode
-        //! +Y as up the image (OpenGL convention). Negate Y to compensate, and
-        //! bake in the material's normal scale while we're at it.
-        static osg::ref_ptr<osg::Image> convertNormalMap(const osg::Image* source, float scale)
+        //! Base color (albedo) texture for a material.
+        osg::ref_ptr<osg::Texture2D> getOrCreateColorTexture(const tinygltf::TextureInfo& info) const
         {
-            if (!ImageUtils::PixelReader::supports(source))
-            {
-                OE_WARN << LC << "Unsupported normal map image format; skipping normal map" << std::endl;
-                return {};
-            }
-
-            osg::ref_ptr<osg::Image> output = new osg::Image();
-            output->allocateImage(source->s(), source->t(), 1, GL_RGB, GL_UNSIGNED_BYTE);
-            output->setInternalTextureFormat(GL_RGB8);
-
-            ImageUtils::PixelReader read(source);
-            read.setDenormalize(true); // scale 16-bit sources to [0..1] as well
-            ImageUtils::PixelWriter write(output.get());
-
-            osg::Vec4f texel;
-            osg::Vec3f n;
-            write.forEachPixel([&](auto& iter)
-                {
-                    read(texel, iter.s(), iter.t());
-                    n.set(
-                        (texel.r() * 2.0f - 1.0f) * scale,
-                        (texel.g() * 2.0f - 1.0f) * -scale,
-                        texel.b() * 2.0f - 1.0f);
-
-                    float len = n.length();
-                    if (len > 0.0f)
-                        n /= len;
-                    else
-                        n.set(0.0f, 0.0f, 1.0f);
-
-                    write(osg::Vec4f(n.x() * 0.5f + 0.5f, n.y() * 0.5f + 0.5f, n.z() * 0.5f + 0.5f, 1.0f), iter.s(), iter.t());
-                });
-
-            return output;
+            return getOrCreateSourceTexture(info.index, false);
         }
 
-        //! Normal map texture for a material.
-        osg::ref_ptr<osg::Texture2D> getOrCreateNormalTexture(const tinygltf::NormalTextureInfo& info) const
+        //! tinygltf's legacy values map only contains factors explicitly
+        //! present in pbrMetallicRoughness. Preserve the reader's existing
+        //! fallback for materials that specify no PBR maps or factors.
+        static bool hasExplicitPBRFactors(const tinygltf::Material& material)
         {
-            if (!validTextureIndex(info.index))
-                return {};
-
-            const tinygltf::Texture& texture = model.textures[info.index];
-            const float scale = static_cast<float>(info.scale);
-            const std::string usage = Stringify() << "|normal|" << scale;
-
-            return getOrCreateTexture(
-                Stringify() << "normal:" << info.index << ":" << scale,
-                sharedTextureKey(texture, usage),
-                [&]() -> osg::ref_ptr<osg::Texture2D>
-                {
-                    osg::ref_ptr<osg::Image> source = makeImageFromTexture(texture);
-                    if (!source.valid())
-                        return {};
-                    osg::ref_ptr<osg::Image> image = convertNormalMap(source.get(), scale);
-                    return makeTexture(image.get(), texture);
-                });
-        }
-
-        //! Packs the glTF metallic-roughness and occlusion maps into the
-        //! layout osgEarth's PBRTexture uses for its "pbr" texture
-        //! (see PBRMaterial.cpp assemble_DRAM):
-        //!   R = displacement (glTF has none; 0)
-        //!   G = roughness   (metallicRoughness.g * roughnessFactor)
-        //!   B = AO          (occlusion.r, attenuated by occlusion strength)
-        //!   A = metal       (metallicRoughness.b * metallicFactor)
-        static osg::ref_ptr<osg::Image> assemblePBRImage(
-            const osg::Image* metallicRoughness,
-            const osg::Image* occlusion,
-            float roughnessFactor,
-            float metallicFactor,
-            float occlusionStrength)
-        {
-            if ((metallicRoughness && !ImageUtils::PixelReader::supports(metallicRoughness)) ||
-                (occlusion && !ImageUtils::PixelReader::supports(occlusion)))
-            {
-                OE_WARN << LC << "Unsupported metallic-roughness/occlusion image format; skipping PBR map" << std::endl;
-                return {};
-            }
-
-            int s = 0, t = 0;
-            for (const osg::Image* image : { metallicRoughness, occlusion })
-            {
-                if (image)
-                {
-                    s = std::max(s, image->s());
-                    t = std::max(t, image->t());
-                }
-            }
-            if (s <= 0 || t <= 0)
-                return {};
-
-            osg::ref_ptr<osg::Image> output = new osg::Image();
-            output->allocateImage(s, t, 1, GL_RGBA, GL_UNSIGNED_BYTE);
-            output->setInternalTextureFormat(GL_RGBA8);
-
-            ImageUtils::PixelReader readMR(metallicRoughness);
-            ImageUtils::PixelReader readOcc(occlusion);
-            readMR.setDenormalize(true); // scale 16-bit sources to [0..1] as well
-            readOcc.setDenormalize(true);
-            ImageUtils::PixelWriter write(output.get());
-
-            const bool mrMatches = metallicRoughness && metallicRoughness->s() == s && metallicRoughness->t() == t;
-            const bool occMatches = occlusion && occlusion->s() == s && occlusion->t() == t;
-
-            osg::Vec4f in, out;
-            write.forEachPixel([&](auto& iter)
-                {
-                    out.set(0.0f, roughnessFactor, 1.0f, metallicFactor);
-
-                    if (metallicRoughness)
-                    {
-                        if (mrMatches)
-                            readMR(in, iter.s(), iter.t());
-                        else
-                            readMR(in, iter.u(), iter.v());
-                        out.g() = in.g() * roughnessFactor;
-                        out.a() = in.b() * metallicFactor;
-                    }
-
-                    if (occlusion)
-                    {
-                        if (occMatches)
-                            readOcc(in, iter.s(), iter.t());
-                        else
-                            readOcc(in, iter.u(), iter.v());
-                        out.b() = 1.0f + occlusionStrength * (in.r() - 1.0f);
-                    }
-
-                    write(out, iter.s(), iter.t());
-                });
-
-            return output;
-        }
-
-        //! Combined roughness/AO/metal texture for a material. Returns null when
-        //! the material has neither a metallic-roughness nor an occlusion map and
-        //! does not spell out its metallic/roughness factors, in which case the
-        //! renderer's defaults apply. (Per the glTF spec an unspecified material
-        //! is fully metallic, which looks terrible without image-based lighting,
-        //! so we only honor the factors when the file states them explicitly.)
-        osg::ref_ptr<osg::Texture2D> getOrCreatePBRTexture(const tinygltf::Material& material) const
-        {
-            const tinygltf::PbrMetallicRoughness& pbr = material.pbrMetallicRoughness;
-            const tinygltf::TextureInfo& mrInfo = pbr.metallicRoughnessTexture;
-            const tinygltf::OcclusionTextureInfo& occInfo = material.occlusionTexture;
-
-            const tinygltf::Texture* mrTexture = validTextureIndex(mrInfo.index) ? &model.textures[mrInfo.index] : nullptr;
-            const tinygltf::Texture* occTexture = validTextureIndex(occInfo.index) ? &model.textures[occInfo.index] : nullptr;
-
-            const float roughnessFactor = static_cast<float>(pbr.roughnessFactor);
-            const float metallicFactor = static_cast<float>(pbr.metallicFactor);
-            const float occlusionStrength = static_cast<float>(occInfo.strength);
-
-            if (!mrTexture && !occTexture)
-            {
-                // tinygltf's legacy "values" map only holds the keys that were
-                // actually present in the pbrMetallicRoughness object:
-                const bool explicitFactors =
-                    material.values.find("metallicFactor") != material.values.end() ||
-                    material.values.find("roughnessFactor") != material.values.end();
-
-                if (!explicitFactors)
-                    return {};
-
-                // Constant material: a 1x1 map holding the factors.
-                return getOrCreateTexture(
-                    Stringify() << "pbr:factors:" << roughnessFactor << ":" << metallicFactor,
-                    std::string(), // no cross-model sharing needed for a 1x1 image
-                    [&]() -> osg::ref_ptr<osg::Texture2D>
-                    {
-                        osg::ref_ptr<osg::Image> image = new osg::Image();
-                        image->allocateImage(1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE);
-                        image->setInternalTextureFormat(GL_RGBA8);
-                        ImageUtils::PixelWriter write(image.get());
-                        write(osg::Vec4f(0.0f, roughnessFactor, 1.0f, metallicFactor), 0, 0);
-
-                        osg::ref_ptr<osg::Texture2D> tex = new osg::Texture2D(image.get());
-                        tex->setResizeNonPowerOfTwoHint(false);
-                        tex->setDataVariance(osg::Object::STATIC);
-                        tex->setFilter(osg::Texture::MIN_FILTER, osg::Texture::NEAREST);
-                        tex->setFilter(osg::Texture::MAG_FILTER, osg::Texture::NEAREST);
-                        tex->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
-                        tex->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
-                        return tex;
-                    });
-            }
-
-            const std::string factors = Stringify()
-                << roughnessFactor << ":" << metallicFactor << ":" << occlusionStrength;
-
-            const std::string localKey = Stringify()
-                << "pbr:" << mrInfo.index << ":" << occInfo.index << ":" << factors;
-
-            // Only share across models when every source image is external:
-            std::string sharedKey;
-            {
-                const std::string mrKey = mrTexture ? sharedTextureKey(*mrTexture, "") : std::string();
-                const std::string occKey = occTexture ? sharedTextureKey(*occTexture, "") : std::string();
-                if ((!mrTexture || !mrKey.empty()) && (!occTexture || !occKey.empty()))
-                    sharedKey = mrKey + "|" + occKey + "|pbr|" + factors;
-            }
-
-            return getOrCreateTexture(localKey, sharedKey,
-                [&]() -> osg::ref_ptr<osg::Texture2D>
-                {
-                    osg::ref_ptr<osg::Image> mrImage, occImage;
-                    if (mrTexture)
-                        mrImage = makeImageFromTexture(*mrTexture);
-                    if (occTexture)
-                        occImage = (occTexture == mrTexture) ? mrImage : makeImageFromTexture(*occTexture);
-
-                    if (!mrImage.valid() && !occImage.valid())
-                        return {};
-
-                    osg::ref_ptr<osg::Image> image = assemblePBRImage(
-                        mrImage.get(), occImage.get(), roughnessFactor, metallicFactor, occlusionStrength);
-
-                    // sampler settings come from whichever texture we have
-                    return makeTexture(image.get(), mrTexture ? *mrTexture : *occTexture);
-                });
+            return
+                material.values.find("metallicFactor") != material.values.end() ||
+                material.values.find("roughnessFactor") != material.values.end();
         }
 
         template<typename ArrayType>
@@ -1581,18 +1410,34 @@ void oe_gltf_pbr_fs(inout vec4 color)
                         geom->getOrCreateStateSet()->setTextureAttributeAndModes(ALBEDO_UNIT, albedoTex.get());
                     }
 
-                    // Remaining PBR maps, laid out the way osgEarth::PBRTexture
-                    // does it: normal map on unit 1, and a combined
-                    // roughness/AO/metal map on unit 2, plus the shader that
-                    // applies them in the standard rendering path. (Chonk/NVGL
-                    // reads the same units directly.)
+                    // Bind the original glTF maps directly. The material shader
+                    // selects their glTF channels and applies the scalar factors.
                     if (loadPBRTextures)
                     {
-                        osg::ref_ptr<osg::Texture2D> normalTex = getOrCreateNormalTexture(material.normalTexture);
-                        osg::ref_ptr<osg::Texture2D> pbrTex = getOrCreatePBRTexture(material);
-                        if (normalTex.valid() || pbrTex.valid())
+                        osg::ref_ptr<osg::Texture2D> normalTex =
+                            getOrCreateSourceTexture(material.normalTexture.index, true);
+                        osg::ref_ptr<osg::Texture2D> metallicRoughnessTex =
+                            getOrCreateSourceTexture(pbr.metallicRoughnessTexture.index, true);
+                        osg::ref_ptr<osg::Texture2D> occlusionTex =
+                            getOrCreateSourceTexture(material.occlusionTexture.index, true);
+
+                        const bool applyPBRFactors =
+                            metallicRoughnessTex.valid() ||
+                            occlusionTex.valid() ||
+                            hasExplicitPBRFactors(material);
+
+                        if (normalTex.valid() || applyPBRFactors)
                         {
-                            installPBRMaterial(geom->getOrCreateStateSet(), normalTex.get(), pbrTex.get());
+                            installPBRMaterial(
+                                geom->getOrCreateStateSet(),
+                                normalTex.get(),
+                                metallicRoughnessTex.get(),
+                                occlusionTex.get(),
+                                static_cast<float>(material.normalTexture.scale),
+                                static_cast<float>(pbr.roughnessFactor),
+                                static_cast<float>(pbr.metallicFactor),
+                                static_cast<float>(material.occlusionTexture.strength),
+                                applyPBRFactors);
                         }
                     }
 

@@ -7,6 +7,10 @@
 #include <osgEarthImGui/ImGuiPanel>
 #include <osg/NodeVisitor>
 
+#include <cctype>
+#include <cstdio>
+#include <string>
+
 namespace osgEarth
 {
     class TextureInspectorGUI : public ImGuiPanel
@@ -24,6 +28,324 @@ namespace osgEarth
         }
 
     private:
+        static const char* formatName(GLenum format)
+        {
+            switch (format)
+            {
+            case GL_ALPHA: return "GL_ALPHA";
+            case GL_LUMINANCE: return "GL_LUMINANCE";
+            case GL_LUMINANCE_ALPHA: return "GL_LUMINANCE_ALPHA";
+            case GL_RED: return "GL_RED";
+            case GL_RG: return "GL_RG";
+            case GL_RGB: return "GL_RGB";
+            case GL_RGBA: return "GL_RGBA";
+            case GL_BGR: return "GL_BGR";
+            case GL_BGRA: return "GL_BGRA";
+            case GL_DEPTH_COMPONENT: return "GL_DEPTH_COMPONENT";
+#ifdef GL_DEPTH_STENCIL
+            case GL_DEPTH_STENCIL: return "GL_DEPTH_STENCIL";
+#endif
+            case GL_R8: return "GL_R8";
+            case GL_RG8: return "GL_RG8";
+            case GL_RGB8: return "GL_RGB8";
+            case GL_RGBA8: return "GL_RGBA8";
+            case GL_R16: return "GL_R16";
+            case GL_RG16: return "GL_RG16";
+            case GL_RGB16: return "GL_RGB16";
+            case GL_RGBA16: return "GL_RGBA16";
+            case GL_R16F: return "GL_R16F";
+            case GL_RG16F: return "GL_RG16F";
+#ifdef GL_RGB16F
+            case GL_RGB16F: return "GL_RGB16F";
+#endif
+#ifdef GL_RGBA16F
+            case GL_RGBA16F: return "GL_RGBA16F";
+#endif
+            case GL_R32F: return "GL_R32F";
+            case GL_RG32F: return "GL_RG32F";
+#ifdef GL_RGB32F
+            case GL_RGB32F: return "GL_RGB32F";
+#endif
+#ifdef GL_RGBA32F
+            case GL_RGBA32F: return "GL_RGBA32F";
+#endif
+            case GL_SRGB8: return "GL_SRGB8";
+            case GL_SRGB8_ALPHA8: return "GL_SRGB8_ALPHA8";
+#ifdef GL_COMPRESSED_RGB
+            case GL_COMPRESSED_RGB: return "Generic RGB compression";
+#endif
+#ifdef GL_COMPRESSED_RGBA
+            case GL_COMPRESSED_RGBA: return "Generic RGBA compression";
+#endif
+#ifdef GL_COMPRESSED_SRGB
+            case GL_COMPRESSED_SRGB: return "Generic sRGB compression";
+#endif
+#ifdef GL_COMPRESSED_SRGB_ALPHA
+            case GL_COMPRESSED_SRGB_ALPHA: return "Generic sRGBA compression";
+#endif
+#ifdef GL_COMPRESSED_RGB_S3TC_DXT1_EXT
+            case GL_COMPRESSED_RGB_S3TC_DXT1_EXT: return "DXT1 RGB";
+#endif
+#ifdef GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
+            case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT: return "DXT1 RGBA";
+#endif
+#ifdef GL_COMPRESSED_RGBA_S3TC_DXT3_EXT
+            case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT: return "DXT3 RGBA";
+#endif
+#ifdef GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
+            case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT: return "DXT5 RGBA";
+#endif
+#ifdef GL_COMPRESSED_SRGB_S3TC_DXT1_EXT
+            case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT: return "DXT1 sRGB";
+#endif
+#ifdef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT
+            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT: return "DXT1 sRGBA";
+#endif
+#ifdef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT
+            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT: return "DXT3 sRGBA";
+#endif
+#ifdef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT
+            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT: return "DXT5 sRGBA";
+#endif
+#ifdef GL_COMPRESSED_RED_RGTC1_EXT
+            case GL_COMPRESSED_RED_RGTC1_EXT: return "RGTC1";
+#endif
+#ifdef GL_COMPRESSED_SIGNED_RED_RGTC1_EXT
+            case GL_COMPRESSED_SIGNED_RED_RGTC1_EXT: return "Signed RGTC1";
+#endif
+#ifdef GL_COMPRESSED_RED_GREEN_RGTC2_EXT
+            case GL_COMPRESSED_RED_GREEN_RGTC2_EXT: return "RGTC2";
+#endif
+#ifdef GL_COMPRESSED_SIGNED_RED_GREEN_RGTC2_EXT
+            case GL_COMPRESSED_SIGNED_RED_GREEN_RGTC2_EXT: return "Signed RGTC2";
+#endif
+#ifdef GL_COMPRESSED_RGBA_BPTC_UNORM
+            case GL_COMPRESSED_RGBA_BPTC_UNORM: return "BC7 RGBA";
+#endif
+#ifdef GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM
+            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM: return "BC7 sRGBA";
+#endif
+#ifdef GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT
+            case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT: return "BC6H signed RGB";
+#endif
+#ifdef GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT
+            case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT: return "BC6H unsigned RGB";
+#endif
+#ifdef GL_COMPRESSED_R11_EAC
+            case GL_COMPRESSED_R11_EAC: return "EAC R11";
+#endif
+#ifdef GL_COMPRESSED_SIGNED_R11_EAC
+            case GL_COMPRESSED_SIGNED_R11_EAC: return "EAC signed R11";
+#endif
+#ifdef GL_COMPRESSED_RG11_EAC
+            case GL_COMPRESSED_RG11_EAC: return "EAC RG11";
+#endif
+#ifdef GL_COMPRESSED_SIGNED_RG11_EAC
+            case GL_COMPRESSED_SIGNED_RG11_EAC: return "EAC signed RG11";
+#endif
+#ifdef GL_COMPRESSED_RGB8_ETC2
+            case GL_COMPRESSED_RGB8_ETC2: return "ETC2 RGB";
+#endif
+#ifdef GL_COMPRESSED_SRGB8_ETC2
+            case GL_COMPRESSED_SRGB8_ETC2: return "ETC2 sRGB";
+#endif
+#ifdef GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2
+            case GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2: return "ETC2 RGB+A1";
+#endif
+#ifdef GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2
+            case GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2: return "ETC2 sRGB+A1";
+#endif
+#ifdef GL_COMPRESSED_RGBA8_ETC2_EAC
+            case GL_COMPRESSED_RGBA8_ETC2_EAC: return "ETC2 RGBA";
+#endif
+#ifdef GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC
+            case GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC: return "ETC2 sRGBA";
+#endif
+#ifdef GL_COMPRESSED_RGB_PVRTC_2BPPV1_IMG
+            case GL_COMPRESSED_RGB_PVRTC_2BPPV1_IMG: return "PVRTC1 RGB 2bpp";
+#endif
+#ifdef GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG
+            case GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG: return "PVRTC1 RGB 4bpp";
+#endif
+#ifdef GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG
+            case GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG: return "PVRTC1 RGBA 2bpp";
+#endif
+#ifdef GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG
+            case GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG: return "PVRTC1 RGBA 4bpp";
+#endif
+#ifdef GL_COMPRESSED_RGBA_ASTC_4x4_KHR
+            case GL_COMPRESSED_RGBA_ASTC_4x4_KHR: return "ASTC RGBA 4x4";
+#endif
+#ifdef GL_COMPRESSED_RGBA_ASTC_6x6_KHR
+            case GL_COMPRESSED_RGBA_ASTC_6x6_KHR: return "ASTC RGBA 6x6";
+#endif
+#ifdef GL_COMPRESSED_RGBA_ASTC_8x8_KHR
+            case GL_COMPRESSED_RGBA_ASTC_8x8_KHR: return "ASTC RGBA 8x8";
+#endif
+#ifdef GL_COMPRESSED_RGBA_ASTC_12x12_KHR
+            case GL_COMPRESSED_RGBA_ASTC_12x12_KHR: return "ASTC RGBA 12x12";
+#endif
+            default: return nullptr;
+            }
+        }
+
+        static const char* dataTypeName(GLenum type)
+        {
+            switch (type)
+            {
+            case GL_BYTE: return "GL_BYTE";
+            case GL_UNSIGNED_BYTE: return "GL_UNSIGNED_BYTE";
+            case GL_SHORT: return "GL_SHORT";
+            case GL_UNSIGNED_SHORT: return "GL_UNSIGNED_SHORT";
+            case GL_INT: return "GL_INT";
+            case GL_UNSIGNED_INT: return "GL_UNSIGNED_INT";
+            case GL_FLOAT: return "GL_FLOAT";
+#ifdef GL_HALF_FLOAT
+            case GL_HALF_FLOAT: return "GL_HALF_FLOAT";
+#endif
+#ifdef GL_UNSIGNED_BYTE_3_3_2
+            case GL_UNSIGNED_BYTE_3_3_2: return "GL_UNSIGNED_BYTE_3_3_2";
+#endif
+#ifdef GL_UNSIGNED_SHORT_5_6_5
+            case GL_UNSIGNED_SHORT_5_6_5: return "GL_UNSIGNED_SHORT_5_6_5";
+#endif
+#ifdef GL_UNSIGNED_SHORT_4_4_4_4
+            case GL_UNSIGNED_SHORT_4_4_4_4: return "GL_UNSIGNED_SHORT_4_4_4_4";
+#endif
+#ifdef GL_UNSIGNED_SHORT_5_5_5_1
+            case GL_UNSIGNED_SHORT_5_5_5_1: return "GL_UNSIGNED_SHORT_5_5_5_1";
+#endif
+#ifdef GL_UNSIGNED_INT_8_8_8_8
+            case GL_UNSIGNED_INT_8_8_8_8: return "GL_UNSIGNED_INT_8_8_8_8";
+#endif
+#ifdef GL_UNSIGNED_INT_10_10_10_2
+            case GL_UNSIGNED_INT_10_10_10_2: return "GL_UNSIGNED_INT_10_10_10_2";
+#endif
+#ifdef GL_UNSIGNED_INT_24_8
+            case GL_UNSIGNED_INT_24_8: return "GL_UNSIGNED_INT_24_8";
+#endif
+            default: return nullptr;
+            }
+        }
+
+        static GLenum inferDataType(GLenum internalFormat, GLenum sourceFormat)
+        {
+            switch (internalFormat)
+            {
+            case GL_R16F:
+            case GL_RG16F:
+            case GL_R32F:
+            case GL_RG32F:
+#ifdef GL_RGB16F
+            case GL_RGB16F:
+#endif
+#ifdef GL_RGBA16F
+            case GL_RGBA16F:
+#endif
+#ifdef GL_RGB32F
+            case GL_RGB32F:
+#endif
+#ifdef GL_RGBA32F
+            case GL_RGBA32F:
+#endif
+                return GL_FLOAT;
+
+            case GL_R16:
+            case GL_RG16:
+            case GL_RGB16:
+            case GL_RGBA16:
+                return GL_UNSIGNED_SHORT;
+
+            default:
+                break;
+            }
+
+            switch (sourceFormat)
+            {
+            case GL_ALPHA:
+            case GL_LUMINANCE:
+            case GL_LUMINANCE_ALPHA:
+            case GL_RED:
+            case GL_RG:
+            case GL_RGB:
+            case GL_RGBA:
+            case GL_BGR:
+            case GL_BGRA:
+                return GL_UNSIGNED_BYTE;
+            default:
+                return 0;
+            }
+        }
+
+        static std::string enumName(GLenum value, const char* (*nameFunction)(GLenum))
+        {
+            if (value == 0)
+                return "Unknown";
+
+            const char* name = nameFunction(value);
+            if (name)
+                return name;
+
+            char buffer[16];
+            std::snprintf(buffer, sizeof(buffer), "0x%04X", static_cast<unsigned int>(value));
+            return buffer;
+        }
+
+        static std::string formatBytes(unsigned int bytes)
+        {
+            char buffer[32];
+            if (bytes >= 1024u * 1024u)
+                std::snprintf(buffer, sizeof(buffer), "%.2f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+            else if (bytes >= 1024u)
+                std::snprintf(buffer, sizeof(buffer), "%.2f KB", static_cast<double>(bytes) / 1024.0);
+            else
+                std::snprintf(buffer, sizeof(buffer), "%u B", bytes);
+            return buffer;
+        }
+
+        static std::string fileName(const std::string& path)
+        {
+            const std::string::size_type separator = path.find_last_of("/\\");
+            return separator == std::string::npos ? path : path.substr(separator + 1u);
+        }
+
+        static std::string fileFormat(const std::string& path)
+        {
+            const std::string name = fileName(path);
+            const std::string::size_type dot = name.find_last_of('.');
+            if (dot == std::string::npos || dot + 1u == name.size())
+                return "Unknown";
+
+            std::string extension = name.substr(dot + 1u);
+            const std::string::size_type query = extension.find_first_of("?#");
+            if (query != std::string::npos)
+                extension.erase(query);
+
+            for (std::string::iterator i = extension.begin(); i != extension.end(); ++i)
+                *i = static_cast<char>(std::toupper(static_cast<unsigned char>(*i)));
+            return extension.empty() ? "Unknown" : extension;
+        }
+
+        static void property(const char* label, const std::string& value)
+        {
+            const float propertyStart = ImGui::GetCursorPosX();
+            ImGui::TextDisabled("%s", label);
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(propertyStart + 90.0f);
+            ImGui::TextUnformatted(value.c_str());
+        }
+
+        static void highlightedProperty(const char* label, const std::string& value, const ImVec4& color)
+        {
+            const float propertyStart = ImGui::GetCursorPosX();
+            ImGui::TextDisabled("%s", label);
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(propertyStart + 90.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextUnformatted(value.c_str());
+            ImGui::PopStyleColor();
+        }
+
         class FindTexturesVisitor : public osg::NodeVisitor
         {
         public:
@@ -74,10 +396,11 @@ namespace osgEarth
                 ImGui::Text("Found %d textures", (int)_textures.size());
                 ImGuiStyle& style = ImGui::GetStyle();
                 float window_visible_x2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-                unsigned int textureWidth = 50;
+                unsigned int textureWidth = 100;
                 for (unsigned int i = 0; i < _textures.size(); ++i)
                 {
                     auto t = _textures[i];
+                    osg::ref_ptr<osg::Image> image = t->getImage();
                     std::string name = t.get()->getName();
                     if (name.empty())
                     {
@@ -88,26 +411,73 @@ namespace osgEarth
                     ImGui::BeginGroup();
                     ImGui::Text("%s", name.c_str());
                     ImGuiEx::OSGTexture(t.get(), ri, textureWidth);
+
+                    const unsigned int contextID = osgEarth::GLUtils::getSharedContextID(*ri.getState());
+                    osg::Texture::TextureObject* textureObject = t->getTextureObject(contextID);
+
+                    const int width = t->getTextureWidth() > 0 ? t->getTextureWidth() : (image ? image->s() : 0);
+                    const int height = t->getTextureHeight() > 0 ? t->getTextureHeight() : (image ? image->t() : 0);
+                    property("Size:", std::to_string(width) + " x " + std::to_string(height));
+
+                    GLenum internalFormat = static_cast<GLenum>(t->getInternalFormat());
+                    if (internalFormat == 0 && textureObject)
+                        internalFormat = textureObject->_profile._internalFormat;
+
+                    GLenum sourceFormat = image ? image->getPixelFormat() : t->getSourceFormat();
+                    if (sourceFormat == 0 && internalFormat != 0)
+                        sourceFormat = osg::Image::computePixelFormat(internalFormat);
+                    property("Format:", enumName(sourceFormat, formatName));
+
+                    property("Internal:", enumName(internalFormat, formatName));
+
+                    const bool compressed = (image && image->isCompressed()) || osg::Texture::isCompressedInternalFormat(internalFormat);
+                    if (compressed)
+                    {
+                        const GLenum compressionFormat = image && image->isCompressed() ? image->getPixelFormat() : internalFormat;
+                        property("Compression:", enumName(compressionFormat, formatName));
+                    }
+                    else
+                    {
+                        highlightedProperty("Compression:", "None (uncompressed)", ImVec4(1.0f, 0.65f, 0.20f, 1.0f));
+                    }
+
+                    if (compressed)
+                    {
+                        // Compressed texture uploads consist of encoded blocks and do not
+                        // have an OpenGL scalar data type.
+                        property("Data type:", "Block-compressed");
+                    }
+                    else
+                    {
+                        GLenum dataType = image ? image->getDataType() : t->getSourceType();
+                        if (dataType == 0 && internalFormat != 0)
+                            dataType = inferDataType(internalFormat, sourceFormat);
+                        property("Data type:", enumName(dataType, dataTypeName));
+                    }
+
+                    if (image)
+                    {
+                        property("Mip levels:", std::to_string(image->getNumMipmapLevels()));
+                        property("Image memory:", formatBytes(image->getTotalSizeInBytesIncludingMipmaps()));
+
+                        if (!image->getFileName().empty())
+                        {
+                            property("File format:", fileFormat(image->getFileName()));
+                            property("Source:", fileName(image->getFileName()));
+                        }
+                    }
+
+                    if (textureObject && textureObject->isAllocated())
+                        property("GPU memory:", formatBytes(textureObject->size()));
+
                     ImGui::EndGroup();
 
                     float last_button_x2 = ImGui::GetItemRectMax().x;
-                    float next_button_x2 = last_button_x2 + style.ItemSpacing.x + textureWidth; // Expected position if next button was on same line
+                    float next_button_x2 = last_button_x2 + style.ItemSpacing.x + textureWidth; // Minimum expected position if next texture was on the same line
                     if (i + 1 < _textures.size() && next_button_x2 < window_visible_x2)
                         ImGui::SameLine();
 
                     ImGui::PopID();
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::BeginTooltip();
-                        ImGui::Text("%dx%d", t.get()->getTextureWidth(), t.get()->getTextureHeight());
-                        osg::Image* image = t.get()->getImage();
-                        if (image && !image->getFileName().empty())
-                        {
-                            ImGui::Text("%s", image->getFileName().c_str());
-                        }
-                        ImGui::EndTooltip();
-                    }
-
                 }
                 ImGui::End();
             }

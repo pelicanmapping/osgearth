@@ -245,6 +245,7 @@ TEST_CASE("Config primitive access handles values, fallbacks, and boundaries")
 
     REQUIRE(config.value<int>("integer", 7) == (std::numeric_limits<int>::min)());
     REQUIRE(config.value<int>("missing", 7) == 7);
+    REQUIRE(config.value<std::string>("missing", "fallback") == "fallback");
     REQUIRE_FALSE(config.get("blank", integer));
     REQUIRE(integer == (std::numeric_limits<int>::min)());
 

@@ -257,6 +257,14 @@ namespace osgEarth
         /** Encodes text to URL safe test. Escapes special charaters */
         inline static std::string urlEncode(const std::string &value);
 
+        /**
+         * Decodes percent-escaped URL path bytes without applying HTML form
+         * rules (a '+' remains a '+'). Encoded path separators and NUL bytes
+         * remain escaped so decoding cannot change the path hierarchy or
+         * introduce a string terminator.
+         */
+        inline static std::string decodePathEscapes(const std::string& value);
+
     protected:
         std::string _baseURI;
         std::string _fullURI;
@@ -497,5 +505,40 @@ namespace osgEarth
         }
 
         return escaped.str();
+    }
+
+    std::string URI::decodePathEscapes(const std::string& value)
+    {
+        auto hexValue = [](char c) -> int
+        {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+
+        std::string decoded;
+        decoded.reserve(value.size());
+        for (std::string::size_type i = 0u; i < value.size(); ++i)
+        {
+            if (value[i] == '%' && i + 2u < value.size())
+            {
+                const int high = hexValue(value[i + 1u]);
+                const int low = hexValue(value[i + 2u]);
+                if (high >= 0 && low >= 0)
+                {
+                    const unsigned char octet = static_cast<unsigned char>(
+                        (high << 4) | low);
+                    if (octet != 0u && octet != '/' && octet != '\\')
+                    {
+                        decoded.push_back(static_cast<char>(octet));
+                        i += 2u;
+                        continue;
+                    }
+                }
+            }
+            decoded.push_back(value[i]);
+        }
+        return decoded;
     }
 }

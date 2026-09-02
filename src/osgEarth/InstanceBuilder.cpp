@@ -23,6 +23,9 @@ class InstancedGeometry : public osg::Geometry
 {
 public:
     InstancedGeometry();
+    InstancedGeometry(
+        const osg::Geometry& geometry,
+        const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
     InstancedGeometry(const InstancedGeometry& geometry,const osg::CopyOp& copyop=osg::CopyOp::SHALLOW_COPY);
 
     META_Node(osgEarth, InstancedGeometry);
@@ -136,13 +139,31 @@ namespace
 
 InstancedGeometry::InstancedGeometry()
 {
-    setUseVertexArrayObject(osgEarth::Registry::capabilities().supportsVertexArrayObjects());
+    setUseDisplayList(false);
+    setUseVertexBufferObjects(true);
+    setUseVertexArrayObject(
+        osgEarth::Registry::capabilities().supportsVertexArrayObjects());
+}
+
+InstancedGeometry::InstancedGeometry(
+    const osg::Geometry& geometry,
+    const osg::CopyOp& copyop) :
+    osg::Geometry(geometry, copyop)
+{
+    setUseDisplayList(false);
+    setUseVertexBufferObjects(true);
+    setUseVertexArrayObject(
+        osgEarth::Registry::capabilities().supportsVertexArrayObjects());
 }
 
 InstancedGeometry::InstancedGeometry(const InstancedGeometry& geometry,const osg::CopyOp& copyop)
     : Geometry(geometry, copyop),
       _divisors(geometry._divisors.begin(), geometry._divisors.end())
 {
+    setUseDisplayList(false);
+    setUseVertexBufferObjects(true);
+    setUseVertexArrayObject(
+        osgEarth::Registry::capabilities().supportsVertexArrayObjects());
 }
 
 void InstancedGeometry::drawImplementation(osg::RenderInfo &renderInfo) const
@@ -178,6 +199,13 @@ InstanceBuilder::InstanceBuilder()
 osg::Geometry* InstanceBuilder::createGeometry()
 {
     return new InstancedGeometry;
+}
+
+osg::Geometry* InstanceBuilder::createGeometry(
+    const osg::Geometry& source,
+    const osg::CopyOp& copyop)
+{
+    return new InstancedGeometry(source, copyop);
 }
 
 void InstanceBuilder::installInstancing(osg::Geometry* geometry) const

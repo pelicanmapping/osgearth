@@ -67,6 +67,9 @@ namespace osgEarth
         /** whether the GPU supports DrawInstanced rendering */
         bool supportsDrawInstanced() const { return _supportsDrawInstanced; }
 
+        /** whether the GPU supports per-vertex-attribute instance divisors */
+        bool supportsInstancedArrays() const { return _supportsInstancedArrays; }
+
         /** whether the GPU can handle non-power-of-two textures. */
         bool supportsNonPowerOfTwoTextures() const { return _supportsNonPowerOfTwoTextures; }
 
@@ -109,6 +112,7 @@ namespace osgEarth
         float _GLSLversion;
         bool _supportsDepthPackedStencilBuffer;
         bool _supportsDrawInstanced;
+        bool _supportsInstancedArrays;
         bool _supportsNonPowerOfTwoTextures;
         int  _numProcessors;
         bool _supportsFragDepthWrite;

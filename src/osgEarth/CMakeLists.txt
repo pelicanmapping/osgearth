@@ -206,6 +206,8 @@ SET(TARGET_H
     ExampleResources
     Export
     Expression
+    ExternalNode
+    InstancedExternalNode
     Extension
     ExtrudeGeometryFilter
     ExtrusionSymbol
@@ -573,6 +575,8 @@ set(TARGET_SRC
     Ephemeris.cpp
     ExampleResources.cpp
     Expression.cpp
+    ExternalNode.cpp
+    InstancedExternalNode.cpp
     Extension.cpp
     ExtrudeGeometryFilter.cpp
     ExtrusionSymbol.cpp
@@ -704,6 +708,7 @@ set(TARGET_SRC
     PolygonizeLines.cpp
     PolygonSymbol.cpp
     PowerlineLayer.cpp
+    PrestigeLayer.cpp
     PrimitiveIntersector.cpp
     Profile.cpp
     Progress.cpp

@@ -545,6 +545,13 @@ Registry::blacklist(const std::string& filename)
 }
 
 void
+Registry::unblacklist(const std::string& filename)
+{
+    std::lock_guard<std::mutex> lock(_blacklist.mutex());
+    _blacklist.erase(filename);
+}
+
+void
 Registry::clearBlacklist()
 {
     _blacklist.lock();

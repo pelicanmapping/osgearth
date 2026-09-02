@@ -9,6 +9,7 @@
 
 #include <osg/FragmentProgram>
 #include <osg/GL2Extensions>
+#include <osg/GLExtensions>
 #include <osg/Version>
 #include <osgViewer/Version>
 
@@ -136,6 +137,9 @@ Capabilities::Capabilities() :
     _GLSLversion(3.3f),
     _supportsDepthPackedStencilBuffer(true),
     _supportsDrawInstanced(true),
+    // Attribute instancing is unsafe until a live context confirms both the
+    // advertised feature and osg's glVertexAttribDivisor entry point.
+    _supportsInstancedArrays(false),
     _supportsNonPowerOfTwoTextures(true),
     _numProcessors(4),
     _supportsFragDepthWrite(true),
@@ -300,6 +304,27 @@ Capabilities::Capabilities() :
             _supportsGLSL &&
             osg::isGLExtensionOrVersionSupported( id, "GL_EXT_draw_instanced", 3.1f );
         OE_DEBUG << LC << "draw instanced = " << SAYBOOL(_supportsDrawInstanced) << std::endl;
+
+#if defined(OSG_GLES3_AVAILABLE)
+        const float instancedArraysCoreVersion = 3.0f;
+#else
+        const float instancedArraysCoreVersion = 3.3f;
+#endif
+        const osg::GLExtensions* GL = osg::GLExtensions::Get(id, true);
+        const bool instancedArraysAdvertised =
+            osg::isGLExtensionOrVersionSupported(
+                id,
+                "GL_ARB_instanced_arrays",
+                instancedArraysCoreVersion) ||
+            osg::isGLExtensionSupported(id, "GL_EXT_instanced_arrays") ||
+            osg::isGLExtensionSupported(id, "GL_ANGLE_instanced_arrays");
+        _supportsInstancedArrays =
+            _supportsGLSL &&
+            instancedArraysAdvertised &&
+            GL != nullptr &&
+            GL->glVertexAttribDivisor != nullptr;
+        OE_DEBUG << LC << "instanced arrays = "
+                 << SAYBOOL(_supportsInstancedArrays) << std::endl;
 
 #if !defined(OSG_GLES3_AVAILABLE)
         _supportsNonPowerOfTwoTextures =

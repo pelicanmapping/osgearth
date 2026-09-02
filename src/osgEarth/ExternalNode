@@ -1,0 +1,229 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+
+#pragma once
+
+#include <osgEarth/Common>
+#include <osg/Group>
+#include <osg/ref_ptr>
+#include <osgDB/Options>
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace osgEarth
+{
+    class ExternalAsset;
+    class ExternalAssetSlot;
+    class InstancedExternalNode;
+
+    /**
+     * Process-wide registry for scene graphs referenced by ExternalNode.
+     *
+     * Assets are keyed by their resolved filename, reader option string, and
+     * content-affecting callback, alias, and authentication identities.
+     * The registry keeps weak entries, so an asset is released automatically
+     * when its last ExternalNode goes away. Loading the same filename more
+     * than once therefore shares one scene graph and its GPU resources.
+     * Caller URIResultCache objects are bypassed so unload releases the graph
+     * and reload always reaches the underlying source.
+     * Methods that load, reload, or unload mutate live scene graphs and must
+     * run on the update thread or while traversal is idle.
+     */
+    class OSGEARTH_EXPORT ExternalAssetManager
+    {
+    public:
+        /** A cheap, thread-safe snapshot of one live cache variant.
+         *
+         *  A filename can appear more than once when callers use different
+         *  content-affecting reader options or callbacks. Reference counts
+         *  describe scene-graph wrappers; instanceCount is the number of
+         *  logical transforms held by InstancedExternalNode batches. Model
+         *  geometry counts include each unique canonical osg::Geometry and
+         *  exclude nested external assets; total counts multiply model
+         *  geometry by ordinary references plus instance transforms.
+         */
+        struct AssetInfo
+        {
+            std::string filename;
+            std::string lastError;
+            bool loaded = false;
+            bool dependencyStatsAvailable = false;
+            std::uint64_t revision = 0u;
+            std::uint64_t referenceCount = 0u;
+            std::uint64_t ordinaryReferenceCount = 0u;
+            std::uint64_t instancedBatchCount = 0u;
+            std::uint64_t instanceCount = 0u;
+            std::uint64_t hardwareInstancedBatchCount = 0u;
+            std::uint64_t fallbackInstancedBatchCount = 0u;
+            std::uint64_t placementCount = 0u;
+            std::uint64_t modelVertexCount = 0u;
+            std::uint64_t modelTriangleCount = 0u;
+            std::uint64_t totalVertexCount = 0u;
+            std::uint64_t totalTriangleCount = 0u;
+            std::uint64_t dependencyCount = 0u;
+            std::uint64_t dependentCount = 0u;
+        };
+
+        using AssetInfoList = std::vector<AssetInfo>;
+
+        static ExternalAssetManager& instance();
+
+        /** Snapshot all assets that are currently referenced. This does not
+         *  wait for an in-progress file load; dependency counts are marked
+         *  unavailable for that snapshot instead. */
+        void getAssets(AssetInfoList& output) const;
+
+        /** Reload every live variant of a filename. Returns the number loaded.
+         *  Options provide context for resolving a relative filename. Call
+         *  from the update thread or while scene traversal is idle. */
+        unsigned reload(
+            const std::string& filename,
+            const osgDB::Options* options = nullptr);
+
+        /** Unload every live variant of a filename. Returns the number found.
+         *  Options provide context for resolving a relative filename. Call
+         *  from the update thread or while scene traversal is idle. */
+        unsigned unload(
+            const std::string& filename,
+            const osgDB::Options* options = nullptr);
+
+        /** Reload all currently referenced assets. Returns the number loaded.
+         *  Call from the update thread or while scene traversal is idle. */
+        unsigned reloadAll();
+
+        /** Unload all currently referenced assets without removing references.
+         *  Call from the update thread or while scene traversal is idle. */
+        void unloadAll();
+
+        //! Number of assets that are still referenced by ExternalNode objects.
+        unsigned getNumAssets() const;
+
+        //! Number of referenced assets whose scene graphs are loaded.
+        unsigned getNumLoadedAssets() const;
+
+    private:
+        ExternalAssetManager();
+        ~ExternalAssetManager();
+        ExternalAssetManager(const ExternalAssetManager&) = delete;
+        ExternalAssetManager& operator=(const ExternalAssetManager&) = delete;
+
+        struct Impl;
+        Impl* _impl;
+
+        osg::ref_ptr<ExternalAsset> acquire(
+            const std::string& filename,
+            const osgDB::Options* options,
+            std::string& error);
+
+        bool load(ExternalAsset* asset, bool forceReload);
+        bool unload(ExternalAsset* asset);
+
+        friend class ExternalNode;
+    };
+
+    /**
+     * A serializable scene-graph reference backed by ExternalAssetManager.
+     *
+     * Each instance owns a stable runtime slot whose child is the manager's
+     * shared payload. The serializer deliberately omits osg::Group fields, so
+     * writing this node to OSGB records only the filename and reader options
+     * rather than embedding that transient slot and its payload.
+     *
+     * Group children are manager-owned and must not be edited directly.
+     * Since the payload is shared, its update/event callbacks and other
+     * mutable state are also shared and will be traversed once per reference.
+     */
+    class OSGEARTH_EXPORT ExternalNode : public osg::Group
+    {
+    public:
+        ExternalNode();
+        explicit ExternalNode(
+            const std::string& filename,
+            const osgDB::Options* options = nullptr);
+        ExternalNode(
+            const ExternalNode& rhs,
+            const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
+
+        META_Node(osgEarth, ExternalNode);
+
+        /**
+         * Set and immediately load the external scene graph. Relative names
+         * are resolved with the supplied osgDB options. Call from the update
+         * thread or while scene traversal is idle.
+         */
+        bool setFileName(
+            const std::string& filename,
+            const osgDB::Options* options = nullptr);
+
+        const std::string& getFileName() const { return _filename; }
+
+        //! Reader option string retained for reload and OSGB serialization.
+        const std::string& getReadOptionsString() const { return _readOptionsString; }
+
+        /** Load an asset that was explicitly unloaded. Call from the update
+         *  thread or while scene traversal is idle. */
+        bool load();
+
+        //! Replace the shared scene graph for all references to this asset.
+        //! Call from the update thread or while scene traversal is idle.
+        bool reload();
+
+        //! Release the shared graph while retaining its filename.
+        //! Call from the update thread or while scene traversal is idle.
+        void unload();
+
+        //! Whether the manager currently holds a canonical payload.
+        bool isLoaded() const;
+
+        /** Thread-safe snapshot of the canonical shared payload. An explicit
+         *  optimizer pass that duplicates shared subgraphs may temporarily
+         *  place a clone in this wrapper until the next load/reload/unload. */
+        osg::ref_ptr<osg::Node> getExternalNode() const;
+
+        //! Last load failure, or an empty string after a successful load.
+        std::string getLastError() const;
+
+    protected:
+        ~ExternalNode() override;
+
+    private:
+        void attach(ExternalAsset* asset);
+        void detach();
+        void ensureSlot();
+        void getAssetSnapshot(
+            osg::ref_ptr<osg::Node>& node,
+            std::uint64_t& revision) const;
+        bool getInstancingTemplate(
+            std::uint64_t revision,
+            bool& ready,
+            osg::ref_ptr<osg::Node>& node,
+            unsigned& geometryCount,
+            std::string& error) const;
+        bool installInstancingTemplate(
+            std::uint64_t revision,
+            osg::Node* candidate,
+            unsigned candidateGeometryCount,
+            const std::string& candidateError,
+            osg::ref_ptr<osg::Node>& installed,
+            unsigned& installedGeometryCount,
+            std::string& installedError);
+        void setInstancingStats(
+            std::uint64_t instanceCount,
+            bool usingHardwareInstancing,
+            bool usingFallback);
+
+        std::string _filename;
+        std::string _readOptionsString;
+        osg::ref_ptr<osgDB::Options> _readOptions;
+        osg::ref_ptr<ExternalAsset> _asset;
+        osg::ref_ptr<ExternalAssetSlot> _slot;
+        std::string _localError;
+
+        friend class ExternalAsset;
+        friend class InstancedExternalNode;
+    };
+}

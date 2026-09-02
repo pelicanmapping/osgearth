@@ -81,6 +81,11 @@ namespace osgEarth
         void blacklist(const std::string &filename);
 
         /**
+         * Remove one filename from the blacklist
+         */
+        void unblacklist(const std::string& filename);
+
+        /**
          * Gets the number of blacklisted filenames
          */
         unsigned int getNumBlacklistedFilenames();

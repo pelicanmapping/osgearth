@@ -1,0 +1,133 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+
+#pragma once
+
+#include <osgEarth/Common>
+#include <osg/Group>
+#include <osg/Matrixf>
+#include <osg/ref_ptr>
+#include <osgDB/Options>
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace osgEarth
+{
+    class ExternalNode;
+
+    /**
+     * A reloadable external scene graph rendered at many transforms.
+     *
+     * The canonical external graph remains owned by ExternalAssetManager.
+     * The manager prepares and caches one flattened render template per asset
+     * revision. Each batch creates private graph, primitive, winding, and
+     * instance-array state while sharing the template's immutable model
+     * arrays/VBO and the canonical graph's textures. Instance attributes use
+     * a separate batch-local VBO so they cannot alter the shared static VBO.
+     * It converts primitives with
+     * the same InstanceBuilder attribute path used by
+     * EXT_mesh_gpu_instancing. The canonical graph is never modified, and no
+     * expanded picking mesh or KdTree is created.
+     *
+     * Static geometry is required for hardware conversion. Unsupported graphs
+     * (dynamic callbacks, LODs, nested ExternalNodes, or non-Geometry
+     * drawables) use ordinary shared-node traversal. A successful manager
+     * reload swaps the snapshot on the next update traversal; the explicit
+     * load/reload/unload methods synchronize immediately.
+     *
+     * Instance matrices must decompose losslessly into translation, quaternion
+     * rotation, and scale. Affine shear falls back to ordinary shared-node
+     * traversal rather than rendering incorrectly.
+     *
+     * For custom non-glTF graphs that combine branch-local FrontFace state,
+     * mirrored matrices, and a graph-semantics hardware rejection, use
+     * ordinary ExternalNodes so OSG can retain the original per-reference
+     * state hierarchy. The glTF loader performs this fallback automatically.
+     *
+     * Instances are static matrix records rather than individually traversable
+     * Nodes. Change them with setMatrices(); per-instance node masks, callbacks,
+     * and transparent depth sorting intentionally use the ordinary fallback.
+     */
+    class OSGEARTH_EXPORT InstancedExternalNode : public osg::Group
+    {
+    public:
+        using MatrixList = std::vector<osg::Matrixf>;
+
+        InstancedExternalNode();
+        InstancedExternalNode(
+            const std::string& filename,
+            const MatrixList& matrices,
+            const osgDB::Options* options = nullptr);
+        InstancedExternalNode(
+            const InstancedExternalNode& rhs,
+            const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
+
+        META_Node(osgEarth, InstancedExternalNode);
+
+        /** Set and immediately load the external scene graph. */
+        bool setFileName(
+            const std::string& filename,
+            const osgDB::Options* options = nullptr);
+
+        const std::string& getFileName() const { return _filename; }
+        const std::string& getReadOptionsString() const {
+            return _readOptionsString;
+        }
+
+        /** Replace all static instance transforms and rebuild the graph. */
+        void setMatrices(const MatrixList& matrices);
+        const MatrixList& getMatrices() const { return _matrices; }
+        unsigned getNumInstances() const {
+            return static_cast<unsigned>(_matrices.size());
+        }
+
+        bool load();
+        bool reload();
+        void unload();
+        bool isLoaded() const;
+
+        //! Snapshot of the manager's canonical, unmodified graph.
+        osg::ref_ptr<osg::Node> getExternalNode() const;
+
+        //! True when the current rendering snapshot uses OpenGL instancing.
+        bool isUsingHardwareInstancing() const {
+            return _usingHardwareInstancing;
+        }
+
+        //! Asset load failure, if any.
+        std::string getLastError() const;
+
+        //! Why hardware conversion fell back, or empty when it succeeded.
+        const std::string& getInstancingError() const {
+            return _instancingError;
+        }
+
+        /**
+         * Synchronize with manager-wide reload/unload publication now.
+         * Normally the installed update callback calls this once per frame.
+         */
+        void refresh();
+
+    protected:
+        ~InstancedExternalNode() override;
+
+    private:
+        void rebuild(osg::Node* source);
+        bool buildHardwareGraph(osg::Node* source, osg::Group* output);
+        void buildFallbackGraph(osg::Node* source, osg::Group* output);
+
+        std::string _filename;
+        std::string _readOptionsString;
+        osg::ref_ptr<osgDB::Options> _readOptions;
+        osg::ref_ptr<ExternalNode> _source;
+        std::uint64_t _observedRevision = 0u;
+        bool _hasObservedRevision = false;
+        MatrixList _matrices;
+        bool _usingHardwareInstancing = false;
+        std::string _instancingError;
+    };
+}

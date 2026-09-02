@@ -1,0 +1,455 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarthImGui/ImGuiPanel>
+#include <osgEarth/ExternalNode>
+
+#include <algorithm>
+#include <cstdint>
+#include <set>
+
+namespace osgEarth
+{
+    /** Read-only diagnostics for the process-wide external asset registry. */
+    class ExternalAssetsGUI : public ImGuiPanel
+    {
+    public:
+        ExternalAssetsGUI() :
+            ImGuiPanel("External Assets")
+        {
+        }
+
+        void draw(osg::RenderInfo&) override
+        {
+            if (!isVisible())
+                return;
+
+            ExternalAssetManager::AssetInfoList assets;
+            ExternalAssetManager::instance().getAssets(assets);
+
+            std::set<std::string> filenames;
+            std::uint64_t loaded = 0u;
+            std::uint64_t errors = 0u;
+            std::uint64_t references = 0u;
+            std::uint64_t ordinaryReferences = 0u;
+            std::uint64_t instancedBatches = 0u;
+            std::uint64_t instances = 0u;
+            std::uint64_t hardwareBatches = 0u;
+            std::uint64_t fallbackBatches = 0u;
+            std::uint64_t modelVertices = 0u;
+            std::uint64_t modelTriangles = 0u;
+            std::uint64_t totalVertices = 0u;
+            std::uint64_t totalTriangles = 0u;
+            std::uint64_t dependencyEdges = 0u;
+            bool dependencyStatsAvailable = true;
+
+            for (const auto& asset : assets)
+            {
+                filenames.insert(asset.filename);
+                loaded += asset.loaded ? 1u : 0u;
+                errors += asset.lastError.empty() ? 0u : 1u;
+                references += asset.referenceCount;
+                ordinaryReferences += asset.ordinaryReferenceCount;
+                instancedBatches += asset.instancedBatchCount;
+                instances += asset.instanceCount;
+                hardwareBatches += asset.hardwareInstancedBatchCount;
+                fallbackBatches += asset.fallbackInstancedBatchCount;
+                modelVertices += asset.modelVertexCount;
+                modelTriangles += asset.modelTriangleCount;
+                totalVertices += asset.totalVertexCount;
+                totalTriangles += asset.totalTriangleCount;
+                dependencyEdges += asset.dependencyCount;
+                dependencyStatsAvailable = dependencyStatsAvailable &&
+                    asset.dependencyStatsAvailable;
+            }
+
+            const bool expanded = ImGui::Begin(
+                name(), visible(), ImGuiWindowFlags_NoScrollbar);
+            if (expanded)
+            {
+                ImGui::Text(
+                    "Variants: %llu   Files: %llu   Loaded: %llu   Errors: %llu",
+                    value(assets.size()),
+                    value(filenames.size()),
+                    value(loaded),
+                    value(errors));
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "One filename can have multiple cache variants when "
+                        "reader options or callbacks affect its contents.");
+                }
+
+                ImGui::Text(
+                    "Wrappers: %llu   Ordinary: %llu   Batches: %llu   "
+                    "Instances: %llu   HW/Fallback: %llu/%llu",
+                    value(references),
+                    value(ordinaryReferences),
+                    value(instancedBatches),
+                    value(instances),
+                    value(hardwareBatches),
+                    value(fallbackBatches));
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Wrappers are live ExternalNode consumers. An "
+                        "InstancedExternalNode is one wrapper and one batch; "
+                        "Instances is its number of logical transforms.");
+                }
+
+                ImGui::Text(
+                    "Geometry model/total: Vertices %llu/%llu   "
+                    "Triangles %llu/%llu",
+                    value(modelVertices),
+                    value(totalVertices),
+                    value(modelTriangles),
+                    value(totalTriangles));
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Model counts unique canonical geometry in each "
+                        "asset. Total multiplies it by ordinary references "
+                        "plus all transforms in instanced batches. Nested "
+                        "external assets are reported in their own rows.");
+                }
+
+                if (dependencyStatsAvailable)
+                {
+                    ImGui::Text("Direct dependency edges: %llu",
+                        value(dependencyEdges));
+                }
+                else
+                {
+                    ImGui::TextDisabled(
+                        "Dependency counts are temporarily unavailable "
+                        "while an asset is loading.");
+                }
+
+                ImGui::Separator();
+                _filter.Draw("Filter", 350.0f);
+                ImGui::SameLine();
+                ImGui::Checkbox("Loaded only", &_loadedOnly);
+
+                const ImGuiTableFlags flags =
+                    ImGuiTableFlags_ScrollY |
+                    ImGuiTableFlags_ScrollX |
+                    ImGuiTableFlags_RowBg |
+                    ImGuiTableFlags_BordersOuter |
+                    ImGuiTableFlags_BordersV |
+                    ImGuiTableFlags_Resizable |
+                    ImGuiTableFlags_Sortable |
+                    ImGuiTableFlags_SortMulti |
+                    ImGuiTableFlags_SizingFixedFit;
+
+                if (ImGui::BeginTable(
+                        "ExternalAssetTable", 13, flags, ImVec2(0.0f, 0.0f)))
+                {
+                    ImGui::TableSetupScrollFreeze(0, 1);
+                    ImGui::TableSetupColumn(
+                        "State",
+                        ImGuiTableColumnFlags_WidthFixed |
+                            ImGuiTableColumnFlags_PreferSortDescending,
+                        95.0f,
+                        COLUMN_STATE);
+                    ImGui::TableSetupColumn(
+                        "Wrappers", numericColumnFlags(), 70.0f,
+                        COLUMN_WRAPPERS);
+                    ImGui::TableSetupColumn(
+                        "Instances", numericColumnFlags(), 70.0f,
+                        COLUMN_INSTANCES);
+                    ImGui::TableSetupColumn(
+                        "HW/FB", numericColumnFlags(), 60.0f,
+                        COLUMN_HARDWARE_FALLBACK);
+                    ImGui::TableSetupColumn(
+                        "Model verts", numericColumnFlags(), 85.0f,
+                        COLUMN_MODEL_VERTICES);
+                    ImGui::TableSetupColumn(
+                        "Total verts", numericColumnFlags(), 85.0f,
+                        COLUMN_TOTAL_VERTICES);
+                    ImGui::TableSetupColumn(
+                        "Model tris", numericColumnFlags(), 85.0f,
+                        COLUMN_MODEL_TRIANGLES);
+                    ImGui::TableSetupColumn(
+                        "Total tris", numericColumnFlags(), 85.0f,
+                        COLUMN_TOTAL_TRIANGLES);
+                    ImGui::TableSetupColumn(
+                        "Revision", numericColumnFlags(), 60.0f,
+                        COLUMN_REVISION);
+                    ImGui::TableSetupColumn(
+                        "Deps", numericColumnFlags(), 45.0f,
+                        COLUMN_DEPENDENCIES);
+                    ImGui::TableSetupColumn(
+                        "Used by", numericColumnFlags(), 55.0f,
+                        COLUMN_DEPENDENTS);
+                    ImGui::TableSetupColumn(
+                        "Filename",
+                        ImGuiTableColumnFlags_WidthFixed |
+                            ImGuiTableColumnFlags_DefaultSort,
+                        500.0f,
+                        COLUMN_FILENAME);
+                    ImGui::TableSetupColumn(
+                        "Last error", ImGuiTableColumnFlags_WidthFixed, 300.0f,
+                        COLUMN_ERROR);
+                    ImGui::TableHeadersRow();
+
+                    ImGuiTableSortSpecs* sortSpecs =
+                        ImGui::TableGetSortSpecs();
+                    sortAssets(assets, sortSpecs);
+                    if (sortSpecs)
+                        sortSpecs->SpecsDirty = false;
+
+                    unsigned row = 0u;
+                    for (const auto& asset : assets)
+                    {
+                        if (_loadedOnly && !asset.loaded)
+                            continue;
+                        if (_filter.IsActive() &&
+                            !_filter.PassFilter(asset.filename.c_str()) &&
+                            !_filter.PassFilter(asset.lastError.c_str()))
+                        {
+                            continue;
+                        }
+
+                        ImGui::PushID(row++);
+                        ImGui::TableNextRow();
+
+                        ImGui::TableSetColumnIndex(0);
+                        drawState(asset);
+
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%llu", value(asset.referenceCount));
+
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("%llu", value(asset.instanceCount));
+
+                        ImGui::TableSetColumnIndex(3);
+                        ImGui::Text(
+                            "%llu/%llu",
+                            value(asset.hardwareInstancedBatchCount),
+                            value(asset.fallbackInstancedBatchCount));
+
+                        ImGui::TableSetColumnIndex(4);
+                        ImGui::Text("%llu", value(asset.modelVertexCount));
+
+                        ImGui::TableSetColumnIndex(5);
+                        ImGui::Text("%llu", value(asset.totalVertexCount));
+
+                        ImGui::TableSetColumnIndex(6);
+                        ImGui::Text("%llu", value(asset.modelTriangleCount));
+
+                        ImGui::TableSetColumnIndex(7);
+                        ImGui::Text("%llu", value(asset.totalTriangleCount));
+
+                        ImGui::TableSetColumnIndex(8);
+                        ImGui::Text("%llu", value(asset.revision));
+
+                        ImGui::TableSetColumnIndex(9);
+                        if (asset.dependencyStatsAvailable)
+                            ImGui::Text("%llu", value(asset.dependencyCount));
+                        else
+                            ImGui::TextUnformatted("-");
+
+                        ImGui::TableSetColumnIndex(10);
+                        if (asset.dependencyStatsAvailable)
+                            ImGui::Text("%llu", value(asset.dependentCount));
+                        else
+                            ImGui::TextUnformatted("-");
+
+                        ImGui::TableSetColumnIndex(11);
+                        ImGui::TextUnformatted(asset.filename.c_str());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", asset.filename.c_str());
+                        if (ImGui::BeginPopupContextItem("AssetPathMenu"))
+                        {
+                            if (ImGui::MenuItem("Copy filename"))
+                                ImGui::SetClipboardText(asset.filename.c_str());
+                            ImGui::EndPopup();
+                        }
+
+                        ImGui::TableSetColumnIndex(12);
+                        if (!asset.lastError.empty())
+                        {
+                            ImGui::TextWrapped("%s", asset.lastError.c_str());
+                            if (ImGui::IsItemHovered())
+                            {
+                                ImGui::SetTooltip(
+                                    "%s", asset.lastError.c_str());
+                            }
+                        }
+
+                        ImGui::PopID();
+                    }
+                    ImGui::EndTable();
+                }
+            }
+            ImGui::End();
+        }
+
+    private:
+        enum Column : ImGuiID
+        {
+            COLUMN_STATE = 1u,
+            COLUMN_WRAPPERS,
+            COLUMN_INSTANCES,
+            COLUMN_HARDWARE_FALLBACK,
+            COLUMN_MODEL_VERTICES,
+            COLUMN_TOTAL_VERTICES,
+            COLUMN_MODEL_TRIANGLES,
+            COLUMN_TOTAL_TRIANGLES,
+            COLUMN_REVISION,
+            COLUMN_DEPENDENCIES,
+            COLUMN_DEPENDENTS,
+            COLUMN_FILENAME,
+            COLUMN_ERROR
+        };
+
+        static ImGuiTableColumnFlags numericColumnFlags()
+        {
+            return ImGuiTableColumnFlags_WidthFixed |
+                ImGuiTableColumnFlags_PreferSortDescending;
+        }
+
+        template<typename T>
+        static int compareValues(const T& lhs, const T& rhs)
+        {
+            return lhs < rhs ? -1 : (rhs < lhs ? 1 : 0);
+        }
+
+        static int stateRank(const ExternalAssetManager::AssetInfo& asset)
+        {
+            if (asset.loaded)
+                return asset.lastError.empty() ? 3 : 2;
+            return asset.lastError.empty() ? 0 : 1;
+        }
+
+        static int compareAssets(
+            const ExternalAssetManager::AssetInfo& lhs,
+            const ExternalAssetManager::AssetInfo& rhs,
+            ImGuiID column)
+        {
+            switch (column)
+            {
+            case COLUMN_STATE:
+                return compareValues(stateRank(lhs), stateRank(rhs));
+            case COLUMN_WRAPPERS:
+                return compareValues(lhs.referenceCount, rhs.referenceCount);
+            case COLUMN_INSTANCES:
+                return compareValues(lhs.instanceCount, rhs.instanceCount);
+            case COLUMN_HARDWARE_FALLBACK:
+            {
+                const int hardware = compareValues(
+                    lhs.hardwareInstancedBatchCount,
+                    rhs.hardwareInstancedBatchCount);
+                return hardware != 0 ? hardware : compareValues(
+                    lhs.fallbackInstancedBatchCount,
+                    rhs.fallbackInstancedBatchCount);
+            }
+            case COLUMN_MODEL_VERTICES:
+                return compareValues(
+                    lhs.modelVertexCount, rhs.modelVertexCount);
+            case COLUMN_TOTAL_VERTICES:
+                return compareValues(
+                    lhs.totalVertexCount, rhs.totalVertexCount);
+            case COLUMN_MODEL_TRIANGLES:
+                return compareValues(
+                    lhs.modelTriangleCount, rhs.modelTriangleCount);
+            case COLUMN_TOTAL_TRIANGLES:
+                return compareValues(
+                    lhs.totalTriangleCount, rhs.totalTriangleCount);
+            case COLUMN_REVISION:
+                return compareValues(lhs.revision, rhs.revision);
+            case COLUMN_DEPENDENCIES:
+                return compareValues(
+                    lhs.dependencyCount, rhs.dependencyCount);
+            case COLUMN_DEPENDENTS:
+                return compareValues(lhs.dependentCount, rhs.dependentCount);
+            case COLUMN_FILENAME:
+                return compareValues(lhs.filename, rhs.filename);
+            case COLUMN_ERROR:
+                return compareValues(lhs.lastError, rhs.lastError);
+            default:
+                return 0;
+            }
+        }
+
+        static void sortAssets(
+            ExternalAssetManager::AssetInfoList& assets,
+            const ImGuiTableSortSpecs* specs)
+        {
+            if (!specs || specs->SpecsCount == 0)
+            {
+                std::stable_sort(
+                    assets.begin(),
+                    assets.end(),
+                    [](const ExternalAssetManager::AssetInfo& lhs,
+                       const ExternalAssetManager::AssetInfo& rhs)
+                    {
+                        return lhs.filename < rhs.filename;
+                    });
+                return;
+            }
+
+            std::stable_sort(
+                assets.begin(),
+                assets.end(),
+                [specs](
+                    const ExternalAssetManager::AssetInfo& lhs,
+                    const ExternalAssetManager::AssetInfo& rhs)
+                {
+                    for (int i = 0; i < specs->SpecsCount; ++i)
+                    {
+                        const ImGuiTableColumnSortSpecs& column =
+                            specs->Specs[i];
+                        const int comparison = compareAssets(
+                            lhs, rhs, column.ColumnUserID);
+                        if (comparison == 0)
+                            continue;
+                        return column.SortDirection ==
+                            ImGuiSortDirection_Ascending ?
+                            comparison < 0 : comparison > 0;
+                    }
+                    return lhs.filename < rhs.filename;
+                });
+        }
+
+        static unsigned long long value(std::uint64_t input)
+        {
+            return static_cast<unsigned long long>(input);
+        }
+
+        static void drawState(const ExternalAssetManager::AssetInfo& asset)
+        {
+            if (asset.loaded && asset.lastError.empty())
+            {
+                ImGui::TextColored(
+                    ImVec4(0.25f, 0.9f, 0.35f, 1.0f), "Loaded");
+            }
+            else if (asset.loaded)
+            {
+                ImGui::TextColored(
+                    ImVec4(1.0f, 0.65f, 0.15f, 1.0f), "Loaded*");
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "The last reload failed; the last-good graph is "
+                        "still loaded.");
+                }
+            }
+            else if (!asset.lastError.empty())
+            {
+                ImGui::TextColored(
+                    ImVec4(1.0f, 0.25f, 0.25f, 1.0f), "Error");
+            }
+            else
+            {
+                ImGui::TextDisabled("Unloaded");
+            }
+        }
+
+        ImGuiTextFilter _filter;
+        bool _loadedOnly = false;
+    };
+}

@@ -8,6 +8,7 @@
 #include <osg/Node>
 #include <osg/Geometry>
 #include <osg/MatrixTransform>
+#include <osg/observer_ptr>
 #include <osg/Texture2D>
 #include <osg/CullFace>
 #include <osg/FrontFace>
@@ -31,10 +32,14 @@
 #include <osgEarth/StateTransition>
 #include <osgEarth/JsonUtils>
 #include <osgEarth/BuildConfig>
+#include <osgEarth/ExternalNode>
+#include <osgEarth/InstancedExternalNode>
 #ifdef OSGEARTH_HAVE_MESH_OPTIMIZER
 #include <meshoptimizer.h>
 #endif
 #include <limits>
+#include <cctype>
+#include <map>
 #include <sstream>
 
 using namespace osgEarth;
@@ -48,7 +53,7 @@ class GLTFReader
 {
 public:
     using TextureCache = osgEarth::Threading::Mutexed<
-        std::unordered_map<std::string, osg::ref_ptr<osg::Texture2D>> >;
+        std::unordered_map<std::string, osg::observer_ptr<osg::Texture2D>> >;
 
     struct NodeBuilder;
 
@@ -62,15 +67,106 @@ public:
         return uri.find(meshoptFallbackURI()) != std::string::npos;
     }
 
+    static const char* externalAssetExtension()
+    {
+        // TinyGLTF does not yet expose the glTF 2.1 core properties. The raw
+        // JSON preparation step below carries them through its existing
+        // extension Value mechanism under this private implementation key.
+        return "OE_external_asset";
+    }
+
+    static bool hasOption(
+        const osgDB::Options* options,
+        const std::string& option)
+    {
+        if (!options)
+            return false;
+
+        const std::string& value = options->getOptionString();
+        std::string::size_type pos = 0;
+        while ((pos = value.find(option, pos)) != std::string::npos)
+        {
+            const bool startsToken =
+                pos == 0 || std::isspace(static_cast<unsigned char>(value[pos - 1]));
+            const std::string::size_type end = pos + option.size();
+            const bool endsToken =
+                end == value.size() ||
+                std::isspace(static_cast<unsigned char>(value[end]));
+            if (startsToken && endsToken)
+                return true;
+            pos = end;
+        }
+        return false;
+    }
+
+    static void appendOption(
+        osgDB::Options* options,
+        const std::string& option)
+    {
+        if (!options || hasOption(options, option))
+            return;
+
+        std::string value = options->getOptionString();
+        if (!value.empty() &&
+            !std::isspace(static_cast<unsigned char>(value.back())))
+        {
+            value += ' ';
+        }
+        value += option;
+        options->setOptionString(value);
+    }
+
+    static void removeOption(
+        osgDB::Options* options,
+        const std::string& option)
+    {
+        if (!options)
+            return;
+
+        std::istringstream input(options->getOptionString());
+        std::ostringstream output;
+        std::string token;
+        bool first = true;
+        while (input >> token)
+        {
+            if (token == option)
+                continue;
+            if (!first)
+                output << ' ';
+            output << token;
+            first = false;
+        }
+        options->setOptionString(output.str());
+    }
+
+    static std::string resolveResourceURI(
+        const std::string& reference,
+        const std::string& referrer)
+    {
+        const URIContext context(referrer);
+        URI resolved(reference, context);
+
+        // URI escaping belongs to the glTF document, whereas osgDB expects a
+        // native filename for local reads. First resolve the encoded spelling
+        // only to determine whether it is remote. For a local resource, decode
+        // the reference exactly once and then combine it with the unchanged
+        // referrer. This preserves a real parent directory containing "%20"
+        // while still mapping a glTF "%20" escape to a filesystem space.
+        // Remote URLs (including escaped paths and queries) remain intact.
+        if (resolved.isRemote())
+            return resolved.full();
+
+        return URI(
+            URI::decodePathEscapes(reference), context).full();
+    }
+
     static std::string ExpandFilePath(const std::string &filepath, void * userData)
     {
         if (isMeshoptFallbackURI(filepath))
             return filepath;
 
         const std::string& referrer = *(const std::string*)userData;
-        URIContext context(referrer);
-        osgEarth::URI uri(filepath, context);
-        std::string path = uri.full();
+        std::string path = resolveResourceURI(filepath, referrer);
         OSG_NOTICE << "ExpandFilePath: expanded " << filepath << " to " << path << std::endl;
         return path;
     }
@@ -188,21 +284,201 @@ public:
             jsonText = data;
         }
 
-        if (jsonText.find("EXT_meshopt_compression") == std::string::npos)
+        const bool hasMeshopt =
+            jsonText.find("EXT_meshopt_compression") != std::string::npos;
+        const bool mayHaveExternalAssets =
+            jsonText.find("\"externalAssets\"") != std::string::npos ||
+            jsonText.find("\"externalAsset\"") != std::string::npos;
+
+        if (!hasMeshopt && !mayHaveExternalAssets)
             return true;
 
         osgEarth::Util::Json::Reader jsonReader;
         osgEarth::Util::Json::Value root;
         if (!jsonReader.parse(jsonText, root, false))
         {
-            err += "Failed to parse glTF JSON while preparing meshopt buffers:\n";
+            err += "Failed to parse glTF JSON while preparing reader input:\n";
             err += jsonReader.getFormatedErrorMessages();
             return false;
         }
 
+        bool changed = false;
+
+        osgEarth::Util::Json::Value& nodes = root["nodes"];
+        bool hasExternalReferences = false;
+        if (nodes.isArray())
+        {
+            for (unsigned int i = 0u; i < nodes.size(); ++i)
+            {
+                if (nodes[i].isObject() && nodes[i].isMember("externalAsset"))
+                {
+                    hasExternalReferences = true;
+                    break;
+                }
+            }
+        }
+
+        if (hasExternalReferences)
+        {
+            const osgEarth::Util::Json::Value& files = root["files"];
+            const osgEarth::Util::Json::Value& externalAssets =
+                root["externalAssets"];
+
+            if (!files.isArray() || !externalAssets.isArray() ||
+                !nodes.isArray())
+            {
+                err += "glTF external assets require files, externalAssets, "
+                    "and nodes arrays.\n";
+                return false;
+            }
+
+            auto readIndex = [](
+                const osgEarth::Util::Json::Value& value,
+                unsigned int& index) -> bool
+            {
+                if (value.isUInt())
+                {
+                    index = value.asUInt();
+                    return true;
+                }
+                if (value.isInt() && value.asInt() >= 0)
+                {
+                    index = static_cast<unsigned int>(value.asInt());
+                    return true;
+                }
+                return false;
+            };
+
+            for (unsigned int nodeIndex = 0u;
+                 nodeIndex < nodes.size(); ++nodeIndex)
+            {
+                osgEarth::Util::Json::Value& node = nodes[nodeIndex];
+                const osgEarth::Util::Json::Value& constNode = node;
+                if (!constNode.isMember("externalAsset"))
+                    continue;
+                const osgEarth::Util::Json::Value& externalAssetValue =
+                    constNode["externalAsset"];
+
+                unsigned int externalAssetIndex = 0u;
+                if (!readIndex(externalAssetValue, externalAssetIndex) ||
+                    externalAssetIndex >= externalAssets.size())
+                {
+                    err += Stringify() << "node[" << nodeIndex <<
+                        "].externalAsset is out of range.\n";
+                    return false;
+                }
+
+                if (constNode.isMember("mesh"))
+                {
+                    err += Stringify() << "node[" << nodeIndex <<
+                        "] cannot contain both mesh and externalAsset.\n";
+                    return false;
+                }
+
+                const osgEarth::Util::Json::Value& externalAsset =
+                    externalAssets[externalAssetIndex];
+                unsigned int fileIndex = 0u;
+                if (!externalAsset.isObject() ||
+                    !readIndex(externalAsset["file"], fileIndex) ||
+                    fileIndex >= files.size())
+                {
+                    err += Stringify() << "externalAssets[" <<
+                        externalAssetIndex << "].file is out of range.\n";
+                    return false;
+                }
+
+                const osgEarth::Util::Json::Value& file = files[fileIndex];
+                if (!file.isObject())
+                {
+                    err += Stringify() << "files[" << fileIndex <<
+                        "] must be an object.\n";
+                    return false;
+                }
+
+                const bool uriDefined = file.isMember("uri");
+                const bool bufferViewDefined = file.isMember("bufferView");
+                if (uriDefined == bufferViewDefined)
+                {
+                    err += Stringify() << "files[" << fileIndex <<
+                        "] must contain exactly one of uri or bufferView.\n";
+                    return false;
+                }
+
+                const osgEarth::Util::Json::Value& uriValue = file["uri"];
+                const osgEarth::Util::Json::Value& bufferViewValue =
+                    file["bufferView"];
+                unsigned int unusedBufferView = 0u;
+                if (uriDefined && !uriValue.isString())
+                {
+                    err += Stringify() << "files[" << fileIndex <<
+                        "].uri must be a string.\n";
+                    return false;
+                }
+                if (bufferViewDefined &&
+                    !readIndex(bufferViewValue, unusedBufferView))
+                {
+                    err += Stringify() << "files[" << fileIndex <<
+                        "].bufferView must be a non-negative index.\n";
+                    return false;
+                }
+
+                const osgEarth::Util::Json::Value& mimeTypeValue =
+                    file["mimeType"];
+                if (!mimeTypeValue.isString() ||
+                    (mimeTypeValue.asString() != "model/gltf+json" &&
+                     mimeTypeValue.asString() != "model/gltf-binary"))
+                {
+                    err += Stringify() << "files[" << fileIndex <<
+                        "] referenced as an external asset must use a glTF "
+                        "MIME type.\n";
+                    return false;
+                }
+
+                if (file.isMember("aliases") &&
+                    (!file["aliases"].isArray() ||
+                     file["aliases"].size() > 0u))
+                {
+                    err += Stringify() << "External asset file aliases in "
+                        "files[" << fileIndex << "] are not supported.\n";
+                    return false;
+                }
+
+                if (bufferViewDefined)
+                {
+                    err += Stringify() << "Embedded bufferView external asset "
+                        "files[" << fileIndex << "] is not supported.\n";
+                    return false;
+                }
+
+                const std::string uri = uriValue.asString();
+                const bool isDataURI =
+                    uri.size() >= 5u &&
+                    std::tolower(static_cast<unsigned char>(uri[0])) == 'd' &&
+                    std::tolower(static_cast<unsigned char>(uri[1])) == 'a' &&
+                    std::tolower(static_cast<unsigned char>(uri[2])) == 't' &&
+                    std::tolower(static_cast<unsigned char>(uri[3])) == 'a' &&
+                    uri[4] == ':';
+                if (isDataURI)
+                {
+                    err += Stringify() << "Embedded data URI external asset "
+                        "files[" << fileIndex << "] is not supported.\n";
+                    return false;
+                }
+
+                osgEarth::Util::Json::Value carried;
+                carried["uri"] = uri;
+                carried["mimeType"] = mimeTypeValue.asString();
+                if (externalAsset["name"].isString())
+                    carried["name"] = externalAsset["name"].asString();
+                node["extensions"][externalAssetExtension()] = carried;
+                changed = true;
+            }
+        }
+
         bool meshoptRequired = false;
-        const osgEarth::Util::Json::Value& required = root["extensionsRequired"];
-        if (required.isArray())
+        const osgEarth::Util::Json::Value& required =
+            root["extensionsRequired"];
+        if (hasMeshopt && required.isArray())
         {
             for (unsigned int i = 0; i < required.size(); ++i)
             {
@@ -216,21 +492,18 @@ public:
         }
 
 #ifndef OSGEARTH_HAVE_MESH_OPTIMIZER
-        if (meshoptRequired)
+        if (hasMeshopt && meshoptRequired)
         {
             err += "EXT_meshopt_compression is required, but osgEarth was "
                 "built without meshoptimizer support.\n";
             return false;
         }
 
-        // An optional extension has ordinary uncompressed fallback data, so
-        // leave it untouched for TinyGLTF to load.
-        return true;
-#endif
-
-        bool changed = false;
+        // An optional meshopt extension retains its ordinary uncompressed
+        // fallback data. External-asset injection, if any, still continues.
+#else
         osgEarth::Util::Json::Value& buffers = root["buffers"];
-        if (buffers.isArray())
+        if (hasMeshopt && buffers.isArray())
         {
             for (unsigned int i = 0; i < buffers.size(); ++i)
             {
@@ -258,6 +531,7 @@ public:
                 }
             }
         }
+#endif
 
         if (!changed)
             return true;
@@ -373,7 +647,9 @@ public:
         }
 
         Env env(location, readOptions);
-        return makeNodeFromModel(model, env);
+        osg::Node* result = makeNodeFromModel(model, env);
+        return result ? osgDB::ReaderWriter::ReadResult(result) :
+            osgDB::ReaderWriter::ReadResult::ERROR_IN_READING_FILE;
     }
 
     osg::Node* read(const std::string& location, const std::string& inputStream, const osgDB::Options* readOptions) const
@@ -683,18 +959,46 @@ public:
         bool zUp = env.readOptions && env.readOptions->getOptionString().find("gltfZUp") != std::string::npos;
 
         // Rotate y-up to z-up if necessary
-        osg::MatrixTransform* transform = new osg::MatrixTransform;
+        osg::ref_ptr<osg::MatrixTransform> transform = new osg::MatrixTransform;
         if (!zUp)
         {
             transform->setMatrix(osg::Matrixd::rotate(osg::Vec3d(0.0, 1.0, 0.0), osg::Vec3d(0.0, 0.0, 1.0)));
         }
 
-        for (unsigned int i = 0; i < model.scenes.size(); i++)
+        std::vector<int> sceneIndices;
+        const bool parentReversesWinding =
+            hasOption(env.readOptions, "gltfParentReversesWinding");
+        if (hasOption(env.readOptions, "gltfDefaultSceneOnly"))
         {
-            const tinygltf::Scene &scene = model.scenes[i];
+            if (model.defaultScene >= 0 &&
+                static_cast<size_t>(model.defaultScene) < model.scenes.size())
+            {
+                sceneIndices.push_back(model.defaultScene);
+            }
+        }
+        else
+        {
+            sceneIndices.reserve(model.scenes.size());
+            for (unsigned int i = 0u; i < model.scenes.size(); ++i)
+                sceneIndices.push_back(static_cast<int>(i));
+        }
 
-            for (size_t j = 0; j < scene.nodes.size(); j++) {
-                osg::Node* node = builder.createNode(model.nodes[scene.nodes[j]], false);
+        for (int sceneIndex : sceneIndices)
+        {
+            const tinygltf::Scene& scene = model.scenes[sceneIndex];
+
+            for (size_t j = 0; j < scene.nodes.size(); j++)
+            {
+                const int nodeIndex = scene.nodes[j];
+                if (nodeIndex < 0 ||
+                    static_cast<size_t>(nodeIndex) >= model.nodes.size())
+                {
+                    continue;
+                }
+
+                osg::Node* node =
+                    builder.createNode(
+                        model.nodes[nodeIndex], parentReversesWinding);
                 if (node)
                 {
                     transform->addChild(node);
@@ -702,11 +1006,23 @@ public:
             }
         }
 
+        // The external-asset instancing path leaves lightweight
+        // markers in the ordinary node hierarchy while it is being built.
+        // Resolve their complete transforms now and replace duplicate groups
+        // with one InstancedExternalNode per asset/parity variant.
+        builder.finalizeExternalAssetInstancing(transform.get());
+
         // Enable backface culling on the nodes
         transform->getOrCreateStateSet()->setAttributeAndModes(new osg::CullFace(osg::CullFace::BACK), osg::StateAttribute::ON);
 
         // Find all the StateTransitionNodes that were created and try to establishs links between the nodes.
         osgEarth::FindNodesVisitor<StateTransitionNode> findStateTransitions;
+        if (!builder.error.empty())
+        {
+            OE_WARN << LC << builder.error << std::endl;
+            return nullptr;
+        }
+
         transform->accept(findStateTransitions);
 
         for (auto& st : findStateTransitions._results)
@@ -717,7 +1033,7 @@ public:
                 std::string name = stateToNodeName.second;
 
                 // Find the named node
-                osg::Node* node = findNamedNode(transform, name);
+                osg::Node* node = findNamedNode(transform.get(), name);
                 if (node)
                 {
                     st->_stateToNode[state] = node;
@@ -729,7 +1045,7 @@ public:
             }
         }
 
-        return transform;
+        return transform.release();
     }
 
 
@@ -739,6 +1055,17 @@ public:
         const tinygltf::Model &model;
         const Env& env;
         std::vector< osg::ref_ptr< osg::Array > > arrays;
+        mutable std::string error;
+
+        struct ExternalInstanceReference : public osg::Group
+        {
+            std::string filename;
+            std::string externalName;
+            std::string batchKey;
+            osg::ref_ptr<osgDB::Options> options;
+        };
+
+        bool externalAssetInstancing = true;
 
         // Texture image units for the original glTF material maps.
         enum : unsigned
@@ -764,6 +1091,16 @@ public:
             loadPBRTextures =
                 !env.readOptions ||
                 env.readOptions->getOptionString().find("gltfSkipPBRTextures") == std::string::npos;
+
+            // Static batching is the default. Successful batches replace
+            // individual external-reference traversal nodes with one
+            // root-level matrix list. Callers needing per-reference masks,
+            // callbacks, or edits can request ordinary ExternalNodes with
+            // the gltfDisableExternalAssetInstancing read option.
+            externalAssetInstancing =
+                !GLTFReader::hasOption(
+                    env.readOptions,
+                    "gltfDisableExternalAssetInstancing");
 
             extractArrays(arrays);
         }
@@ -925,7 +1262,218 @@ void oe_gltf_pbr_fs(inout vec4 color)
             }
         }
 
-        osg::Node* createNode(const tinygltf::Node& node, bool parentReversesWinding) const
+        static std::string makeExternalBatchKey(
+            const std::string& filename,
+            const osgDB::Options* options)
+        {
+            std::ostringstream key;
+            key << filename << '\x1f';
+            if (options)
+            {
+                key << options->getOptionString() << '\x1e'
+                    << static_cast<const void*>(options->getFindFileCallback())
+                    << '\x1e'
+                    << static_cast<const void*>(options->getReadFileCallback())
+                    << '\x1e'
+                    << static_cast<const void*>(options->getAuthenticationMap())
+                    << '\x1e'
+                    << static_cast<const void*>(URIAliasMap::from(options))
+                    << '\x1e'
+                    << static_cast<const void*>(
+                        URIPostReadCallback::from(options));
+            }
+            return key.str();
+        }
+
+        void finalizeExternalAssetInstancing(osg::Group* root)
+        {
+            if (!externalAssetInstancing || !root || !error.empty())
+                return;
+
+            struct Reference
+            {
+                osg::ref_ptr<ExternalInstanceReference> marker;
+                osg::Matrixf matrix;
+            };
+
+            struct Collector : public osg::NodeVisitor
+            {
+                Collector() :
+                    osg::NodeVisitor(
+                        osg::NodeVisitor::TRAVERSE_ALL_CHILDREN)
+                {
+                    setNodeMaskOverride(~0u);
+                }
+
+                void apply(osg::Node& node) override
+                {
+                    auto* marker =
+                        dynamic_cast<ExternalInstanceReference*>(&node);
+                    if (marker)
+                    {
+                        Reference reference;
+                        reference.marker = marker;
+                        reference.matrix = osg::Matrixf(
+                            osg::computeLocalToWorld(getNodePath()));
+                        references.push_back(reference);
+                        return;
+                    }
+                    traverse(node);
+                }
+
+                std::vector<Reference> references;
+            } collector;
+
+            // Starting traversal at each scene root deliberately excludes the
+            // loader's outer Y-up-to-Z-up MatrixTransform. Batches are attached
+            // beneath that same transform, so it must remain common state.
+            for (unsigned int i = 0u; i < root->getNumChildren(); ++i)
+                root->getChild(i)->accept(collector);
+
+            std::map<std::string, std::vector<Reference>> batches;
+            for (const auto& reference : collector.references)
+                batches[reference.marker->batchKey].push_back(reference);
+
+            auto materializeOrdinaryReference =
+                [this](ExternalInstanceReference* marker) -> bool
+            {
+                osg::ref_ptr<osgEarth::ExternalNode> external =
+                    new osgEarth::ExternalNode(
+                        marker->filename,
+                        marker->options.get());
+                external->setName(marker->externalName);
+
+                std::vector<osg::ref_ptr<osg::Group>> parents;
+                parents.reserve(marker->getNumParents());
+                for (unsigned int i = 0u; i < marker->getNumParents(); ++i)
+                    parents.emplace_back(marker->getParent(i));
+                for (auto& parent : parents)
+                    parent->replaceChild(marker, external.get());
+
+                if (!external->isLoaded())
+                {
+                    if (error.empty())
+                    {
+                        error = external->getLastError();
+                        if (error.empty())
+                        {
+                            error = "Failed to load external asset " +
+                                marker->filename;
+                        }
+                    }
+                    return false;
+                }
+                return true;
+            };
+
+            for (auto& entry : batches)
+            {
+                std::vector<Reference>& references = entry.second;
+                if (references.size() < 2u)
+                {
+                    materializeOrdinaryReference(
+                        references.front().marker.get());
+                    continue;
+                }
+
+                osgEarth::InstancedExternalNode::MatrixList matrices;
+                matrices.reserve(references.size());
+                for (const auto& reference : references)
+                    matrices.push_back(reference.matrix);
+
+                ExternalInstanceReference* first =
+                    references.front().marker.get();
+                osg::ref_ptr<osgEarth::InstancedExternalNode> instanced =
+                    new osgEarth::InstancedExternalNode(
+                        first->filename,
+                        matrices,
+                        first->options.get());
+                instanced->setName(first->externalName);
+
+                if (!instanced->isLoaded())
+                {
+                    if (error.empty())
+                    {
+                        error = instanced->getLastError();
+                        if (error.empty())
+                        {
+                            error = "Failed to load external asset " +
+                                first->filename;
+                        }
+                    }
+                    continue;
+                }
+
+                // Capability and graph-semantics failures preserve the exact
+                // ordinary ExternalNode topology instead of silently changing
+                // behavior merely because the optimization was considered.
+                if (!instanced->isUsingHardwareInstancing())
+                {
+                    for (const auto& reference : references)
+                    {
+                        if (!materializeOrdinaryReference(
+                                reference.marker.get()))
+                        {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                // The instance matrices already contain every transform from
+                // the scene root to each marker. Remove the consumed marker
+                // and then prune MatrixTransforms that became empty as a
+                // result. Work upward so a hierarchy used only to position
+                // external references disappears too, while stopping at any
+                // node that still contains a mesh, child, or fallback asset.
+                std::vector<osg::ref_ptr<osg::Group>> pruneCandidates;
+                for (const auto& reference : references)
+                {
+                    ExternalInstanceReference* marker =
+                        reference.marker.get();
+                    while (marker->getNumParents() > 0u)
+                    {
+                        osg::ref_ptr<osg::Group> parent =
+                            marker->getParent(0u);
+                        parent->removeChild(marker);
+                        pruneCandidates.push_back(parent.get());
+                    }
+                }
+
+                while (!pruneCandidates.empty())
+                {
+                    osg::ref_ptr<osg::Group> candidate =
+                        pruneCandidates.back();
+                    pruneCandidates.pop_back();
+
+                    if (candidate.get() == root ||
+                        candidate->getNumChildren() != 0u ||
+                        typeid(*candidate) != typeid(osg::MatrixTransform))
+                    {
+                        continue;
+                    }
+
+                    std::vector<osg::ref_ptr<osg::Group>> parents;
+                    parents.reserve(candidate->getNumParents());
+                    for (unsigned int i = 0u;
+                         i < candidate->getNumParents(); ++i)
+                    {
+                        parents.emplace_back(candidate->getParent(i));
+                    }
+                    for (auto& parent : parents)
+                    {
+                        parent->removeChild(candidate.get());
+                        pruneCandidates.push_back(parent.get());
+                    }
+                }
+                root->addChild(instanced.get());
+            }
+        }
+
+        osg::Node* createNode(
+            const tinygltf::Node& node,
+            bool parentReversesWinding,
+            bool canInstanceExternalAssets = true) const
         {
             osg::MatrixTransform* mt = new osg::MatrixTransform;
             if (node.matrix.size() == 16)
@@ -992,19 +1540,114 @@ void oe_gltf_pbr_fs(inout vec4 color)
             }
 
             // Load any children.
+            const bool hasStateTransition =
+                node.extensions.find("OWT_state") != node.extensions.end();
+            const bool childrenCanInstanceExternalAssets =
+                canInstanceExternalAssets && !hasStateTransition;
             for (unsigned int i = 0; i < node.children.size(); i++)
             {
-                osg::Node* child = createNode(model.nodes[node.children[i]], reversesWinding);
+                osg::Node* child = createNode(
+                    model.nodes[node.children[i]],
+                    reversesWinding,
+                    childrenCanInstanceExternalAssets);
                 if (child)
                 {
                     mt->addChild(child);
                 }
             }
 
+            // glTF 2.1 external assets attach the referenced asset's default
+            // scene after the node's ordinary children. The preparation pass
+            // carries the new core properties through TinyGLTF as a private
+            // extension until TinyGLTF exposes native 2.1 structures.
+            auto external = node.extensions.find(externalAssetExtension());
+            if (external != node.extensions.end() &&
+                external->second.IsObject())
+            {
+                const tinygltf::Value& uriValue =
+                    external->second.Get("uri");
+                if (uriValue.IsString())
+                {
+                    const std::string externalFilename = resolveResourceURI(
+                        uriValue.Get<std::string>(), env.referrer);
+                    osg::ref_ptr<osgDB::Options> externalOptions =
+                        Registry::cloneOrCreateOptions(env.readOptions);
+                    // The containing glTF root already performs the Y-up to
+                    // Z-up conversion. Nested assets must remain in glTF space
+                    // and contribute only their default scene.
+                    appendOption(externalOptions.get(), "gltfZUp");
+                    appendOption(externalOptions.get(), "gltfDefaultSceneOnly");
+                    removeOption(externalOptions.get(), "gltfForceReload");
+                    // This was the pre-default opt-in token. It is now a
+                    // compatibility no-op and must not create a distinct
+                    // ExternalAssetManager cache variant.
+                    removeOption(
+                        externalOptions.get(),
+                        "gltfExternalAssetInstancing");
+                    // Front-face overrides are absolute OSG state. Carry the
+                    // cumulative determinant parity into the nested reader so
+                    // mirrored transforms on both sides of this boundary
+                    // restore counter-clockwise winding correctly. The option
+                    // also creates separate shared variants when two parents
+                    // have different parity.
+                    if (reversesWinding)
+                    {
+                        appendOption(
+                            externalOptions.get(),
+                            "gltfParentReversesWinding");
+                    }
+                    else
+                    {
+                        removeOption(
+                            externalOptions.get(),
+                            "gltfParentReversesWinding");
+                    }
+
+                    const tinygltf::Value& nameValue =
+                        external->second.Get("name");
+                    const std::string externalName = nameValue.IsString() ?
+                        nameValue.Get<std::string>() : std::string();
+
+                    if (externalAssetInstancing &&
+                        canInstanceExternalAssets &&
+                        !hasStateTransition)
+                    {
+                        osg::ref_ptr<ExternalInstanceReference> marker =
+                            new ExternalInstanceReference();
+                        marker->filename = externalFilename;
+                        marker->externalName = externalName;
+                        marker->options = externalOptions.get();
+                        marker->batchKey = makeExternalBatchKey(
+                            marker->filename,
+                            marker->options.get());
+                        marker->setName(externalName);
+                        mt->addChild(marker.get());
+                    }
+                    else
+                    {
+                        osg::ref_ptr<osgEarth::ExternalNode> externalNode =
+                            new osgEarth::ExternalNode(
+                                externalFilename, externalOptions.get());
+                        externalNode->setName(externalName);
+                        mt->addChild(externalNode.get());
+
+                        if (!externalNode->isLoaded() && error.empty())
+                        {
+                            error = externalNode->getLastError();
+                            if (error.empty())
+                            {
+                                error = "Failed to load external asset " +
+                                    externalFilename;
+                            }
+                        }
+                    }
+                }
+            }
+
             osg::Node* top = mt;
 
             // If we have an OWT_state extension setup all the state names
-            if (node.extensions.find("OWT_state") != node.extensions.end())
+            if (hasStateTransition)
             {
                 StateTransitionNode* st = new StateTransitionNode;
                 st->addChild(mt);
@@ -1045,7 +1688,9 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 tinygltf::IsDataURI(image.uri) ||
                 image.image.size() > 0;
 
-            osgEarth::URI imageURI(image.uri, env.referrer);
+            const std::string imageFilename = imageEmbedded ?
+                image.uri : resolveResourceURI(image.uri, env.referrer);
+            osgEarth::URI imageURI(imageFilename);
 
             osg::ref_ptr<osg::Image> img;
 
@@ -1181,8 +1826,7 @@ void oe_gltf_pbr_fs(inout vec4 color)
             if (imageEmbedded)
                 return {};
 
-            osgEarth::URI imageURI(image.uri, env.referrer);
-            return imageURI.full() + usage;
+            return resolveResourceURI(image.uri, env.referrer) + usage;
         }
 
         //! Looks up a texture in this model's local cache and, when sharedKey
@@ -1200,14 +1844,20 @@ void oe_gltf_pbr_fs(inout vec4 color)
 
             osg::ref_ptr<osg::Texture2D> tex;
             TextureCache* sharedCache = reader->_texCache;
-            const bool useSharedCache = sharedCache != nullptr && !sharedKey.empty();
+            const bool useSharedCache =
+                sharedCache != nullptr && !sharedKey.empty();
+            const bool forceReload =
+                hasOption(env.readOptions, "gltfForceReload");
 
-            if (useSharedCache)
+            if (useSharedCache && !forceReload)
             {
                 std::lock_guard<std::mutex> lock(sharedCache->mutex());
                 auto i = sharedCache->find(sharedKey);
                 if (i != sharedCache->end())
-                    tex = i->second;
+                {
+                    if (!i->second.lock(tex))
+                        sharedCache->erase(i);
+                }
             }
 
             if (!tex.valid())
@@ -1217,11 +1867,28 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 if (tex.valid() && useSharedCache)
                 {
                     std::lock_guard<std::mutex> lock(sharedCache->mutex());
-                    auto insResult = sharedCache->insert(TextureCache::value_type(sharedKey, tex));
-                    if (!insResult.second)
+                    if (forceReload)
                     {
-                        // Some other loader thread beat us to the cache
-                        tex = insResult.first->second;
+                        // Publish the freshly loaded texture for subsequent
+                        // ordinary reads. Existing graphs retain their old
+                        // Texture2D until the shared asset swap completes.
+                        (*sharedCache)[sharedKey] = tex.get();
+                    }
+                    else
+                    {
+                        auto insResult = sharedCache->insert(
+                            TextureCache::value_type(sharedKey, tex.get()));
+                        if (!insResult.second)
+                        {
+                            // Some other loader thread beat us to the cache.
+                            // Reclaim an expired weak entry if its graph was
+                            // released between lookup and insertion.
+                            osg::ref_ptr<osg::Texture2D> existing;
+                            if (insResult.first->second.lock(existing))
+                                tex = existing;
+                            else
+                                insResult.first->second = tex.get();
+                        }
                     }
                 }
             }

@@ -9,6 +9,7 @@
 #include <osgEarth/Export>
 #include <osg/ref_ptr>
 #include <osg/Array>
+#include <osg/CopyOp>
 #include <osg/Geometry>
 
 namespace osgEarth
@@ -18,6 +19,10 @@ namespace osgEarth
     public:
         InstanceBuilder();
         static osg::Geometry* createGeometry();
+        /** Create the VAO-safe instanced Geometry subclass from a source. */
+        static osg::Geometry* createGeometry(
+            const osg::Geometry& source,
+            const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
         osg::Vec3Array* getPositions() { return _positions.get(); };
         void setPositions(osg::Vec3Array* positions) { _positions = positions; };
         osg::Vec4Array* getRotations() { return _rotations.get(); };

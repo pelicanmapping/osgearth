@@ -708,7 +708,6 @@ set(TARGET_SRC
     PolygonizeLines.cpp
     PolygonSymbol.cpp
     PowerlineLayer.cpp
-    PrestigeLayer.cpp
     PrimitiveIntersector.cpp
     Profile.cpp
     Progress.cpp

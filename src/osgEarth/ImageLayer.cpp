@@ -22,6 +22,293 @@ using namespace osgEarth;
 //#undef  OE_DEBUG
 //#define OE_DEBUG OE_INFO
 
+namespace
+{
+    constexpr unsigned ASSEMBLE_IMAGE_REPROJECTION_MESH_SIZE = 4u;
+
+    void buildPixelCenterPoints(
+        const GeoExtent& extent,
+        unsigned cols,
+        unsigned rows,
+        std::vector<osg::Vec3d>& points)
+    {
+        points.resize(cols * rows);
+
+        double minx, miny, maxx, maxy;
+        extent.getBounds(minx, miny, maxx, maxy);
+        double dx = (maxx - minx) / static_cast<double>(cols);
+        double dy = (maxy - miny) / static_cast<double>(rows);
+
+        for (unsigned t = 0; t < rows; ++t)
+        {
+            double y = miny + (0.5 * dy) + (dy * static_cast<double>(t));
+            for (unsigned s = 0; s < cols; ++s)
+            {
+                double x = minx + (0.5 * dx) + (dx * static_cast<double>(s));
+                points[t * cols + s] = { x, y, 0.0 };
+            }
+        }
+    }
+
+    void clampPointToBounds(osg::Vec3d& point, const Bounds& bounds)
+    {
+        point.x() = clamp(point.x(), bounds.xMin(), bounds.xMax());
+        point.y() = clamp(point.y(), bounds.yMin(), bounds.yMax());
+    }
+
+    void clampPointsToBounds(std::vector<osg::Vec3d>& points, const Bounds& bounds)
+    {
+        if (bounds.valid())
+        {
+            for (auto& point : points)
+            {
+                clampPointToBounds(point, bounds);
+            }
+        }
+    }
+
+    void buildMeshAxis(unsigned size, unsigned step, std::vector<unsigned>& axis)
+    {
+        axis.clear();
+        if (size == 0u)
+            return;
+
+        axis.reserve((size + step - 1u) / step + 1u);
+        for (unsigned i = 0u; i < size; i += step)
+        {
+            axis.push_back(i);
+        }
+
+        if (axis.back() != size - 1u)
+        {
+            axis.push_back(size - 1u);
+        }
+    }
+
+    void buildExactReprojectionPoints(
+        const GeoExtent& extent,
+        unsigned cols,
+        unsigned rows,
+        const SpatialReference* source_srs,
+        const Bounds& sourceBounds,
+        std::vector<osg::Vec3d>& points)
+    {
+        buildPixelCenterPoints(extent, cols, rows, points);
+
+        auto* key_srs = extent.getSRS();
+        if (source_srs && key_srs)
+        {
+            key_srs->transform(points, source_srs);
+            clampPointsToBounds(points, sourceBounds);
+        }
+    }
+
+    bool canUseRowInterpolatedReprojection(
+        const SpatialReference* key_srs,
+        const SpatialReference* source_srs)
+    {
+        if (!key_srs || !source_srs || key_srs->isEquivalentTo(source_srs))
+            return false;
+
+        bool keyMercator = key_srs->isMercator() || key_srs->isSphericalMercator();
+        bool sourceMercator = source_srs->isMercator() || source_srs->isSphericalMercator();
+
+        bool mercatorGeographicPair =
+            (keyMercator && source_srs->isGeographic()) ||
+            (key_srs->isGeographic() && sourceMercator);
+
+        if (!mercatorGeographicPair)
+            return false;
+
+        const SpatialReference* keyGeographicSRS = keyMercator ? key_srs->getGeographicSRS() : key_srs;
+        const SpatialReference* sourceGeographicSRS = sourceMercator ? source_srs->getGeographicSRS() : source_srs;
+
+        return
+            keyGeographicSRS &&
+            sourceGeographicSRS &&
+            keyGeographicSRS->isHorizEquivalentTo(sourceGeographicSRS);
+    }
+
+    void buildRowInterpolatedReprojectionPoints(
+        const GeoExtent& extent,
+        unsigned cols,
+        unsigned rows,
+        const SpatialReference* source_srs,
+        const Bounds& sourceBounds,
+        std::vector<osg::Vec3d>& points)
+    {
+        auto* key_srs = extent.getSRS();
+        if (!canUseRowInterpolatedReprojection(key_srs, source_srs) || cols <= 1u || rows == 0u)
+        {
+            buildExactReprojectionPoints(extent, cols, rows, source_srs, sourceBounds, points);
+            return;
+        }
+
+        double minx, miny, maxx, maxy;
+        extent.getBounds(minx, miny, maxx, maxy);
+        double dx = (maxx - minx) / static_cast<double>(cols);
+        double dy = (maxy - miny) / static_cast<double>(rows);
+
+        double leftX = minx + 0.5 * dx;
+        double rightX = maxx - 0.5 * dx;
+        double centerX = minx + 0.5 * (maxx - minx);
+        double centerY = miny + 0.5 * (maxy - miny);
+
+        static thread_local std::vector<osg::Vec3d> axisPoints;
+        axisPoints.resize(rows + 2u);
+
+        axisPoints[0] = { leftX, centerY, 0.0 };
+        axisPoints[1] = { rightX, centerY, 0.0 };
+
+        for (unsigned t = 0u; t < rows; ++t)
+        {
+            double y = miny + (0.5 * dy) + (dy * static_cast<double>(t));
+            axisPoints[t + 2u] = { centerX, y, 0.0 };
+        }
+
+        if (!key_srs->transform(axisPoints, source_srs))
+        {
+            buildExactReprojectionPoints(extent, cols, rows, source_srs, sourceBounds, points);
+            return;
+        }
+
+        points.resize(cols * rows);
+
+        double invColSpan = 1.0 / static_cast<double>(cols - 1u);
+        bool clampToSourceBounds = sourceBounds.valid();
+
+        for (unsigned t = 0u; t < rows; ++t)
+        {
+            const auto& left = axisPoints[0];
+            const auto& right = axisPoints[1];
+            const auto& row = axisPoints[t + 2u];
+
+            for (unsigned s = 0u; s < cols; ++s)
+            {
+                double xmix = static_cast<double>(s) * invColSpan;
+                double leftMix = 1.0 - xmix;
+
+                osg::Vec3d& point = points[t * cols + s];
+                point.x() = leftMix * left.x() + xmix * right.x();
+                point.y() = row.y();
+                point.z() = 0.0;
+
+                if (clampToSourceBounds)
+                {
+                    clampPointToBounds(point, sourceBounds);
+                }
+            }
+        }
+    }
+
+    void buildInterpolatedReprojectionPoints(
+        const GeoExtent& extent,
+        unsigned cols,
+        unsigned rows,
+        const SpatialReference* source_srs,
+        const Bounds& sourceBounds,
+        std::vector<osg::Vec3d>& points)
+    {
+        auto* key_srs = extent.getSRS();
+        if (!source_srs || !key_srs || key_srs->isEquivalentTo(source_srs) || cols <= 2u || rows <= 2u)
+        {
+            buildExactReprojectionPoints(extent, cols, rows, source_srs, sourceBounds, points);
+            return;
+        }
+
+        if (canUseRowInterpolatedReprojection(key_srs, source_srs))
+        {
+            buildRowInterpolatedReprojectionPoints(extent, cols, rows, source_srs, sourceBounds, points);
+            return;
+        }
+
+        static thread_local std::vector<unsigned> meshCols;
+        static thread_local std::vector<unsigned> meshRows;
+        static thread_local std::vector<osg::Vec3d> meshPoints;
+
+        buildMeshAxis(cols, ASSEMBLE_IMAGE_REPROJECTION_MESH_SIZE, meshCols);
+        buildMeshAxis(rows, ASSEMBLE_IMAGE_REPROJECTION_MESH_SIZE, meshRows);
+
+        double minx, miny, maxx, maxy;
+        extent.getBounds(minx, miny, maxx, maxy);
+        double dx = (maxx - minx) / static_cast<double>(cols);
+        double dy = (maxy - miny) / static_cast<double>(rows);
+
+        unsigned meshWidth = static_cast<unsigned>(meshCols.size());
+        unsigned meshHeight = static_cast<unsigned>(meshRows.size());
+        meshPoints.resize(meshWidth * meshHeight);
+
+        for (unsigned mt = 0u; mt < meshHeight; ++mt)
+        {
+            unsigned t = meshRows[mt];
+            double y = miny + (0.5 * dy) + (dy * static_cast<double>(t));
+            for (unsigned ms = 0u; ms < meshWidth; ++ms)
+            {
+                unsigned s = meshCols[ms];
+                double x = minx + (0.5 * dx) + (dx * static_cast<double>(s));
+                meshPoints[mt * meshWidth + ms] = { x, y, 0.0 };
+            }
+        }
+
+        if (!key_srs->transform(meshPoints, source_srs))
+        {
+            buildExactReprojectionPoints(extent, cols, rows, source_srs, sourceBounds, points);
+            return;
+        }
+
+        points.resize(cols * rows);
+
+        unsigned rowCells = meshHeight > 1u ? meshHeight - 1u : 1u;
+        unsigned colCells = meshWidth > 1u ? meshWidth - 1u : 1u;
+        bool clampToSourceBounds = sourceBounds.valid();
+
+        for (unsigned my = 0u; my < rowCells; ++my)
+        {
+            unsigned my1 = meshHeight > 1u ? my + 1u : my;
+            unsigned t0 = meshRows[my];
+            unsigned t1 = meshRows[my1];
+            unsigned tEnd = my + 1u == rowCells ? t1 : t1 - 1u;
+            double invTSpan = t1 > t0 ? 1.0 / static_cast<double>(t1 - t0) : 0.0;
+
+            for (unsigned mx = 0u; mx < colCells; ++mx)
+            {
+                unsigned mx1 = meshWidth > 1u ? mx + 1u : mx;
+                unsigned s0 = meshCols[mx];
+                unsigned s1 = meshCols[mx1];
+                unsigned sEnd = mx + 1u == colCells ? s1 : s1 - 1u;
+                double invSSpan = s1 > s0 ? 1.0 / static_cast<double>(s1 - s0) : 0.0;
+
+                const auto& p00 = meshPoints[my * meshWidth + mx];
+                const auto& p10 = meshPoints[my * meshWidth + mx1];
+                const auto& p01 = meshPoints[my1 * meshWidth + mx];
+                const auto& p11 = meshPoints[my1 * meshWidth + mx1];
+
+                for (unsigned t = t0; t <= tEnd; ++t)
+                {
+                    double fy = static_cast<double>(t - t0) * invTSpan;
+                    double iy = 1.0 - fy;
+
+                    for (unsigned s = s0; s <= sEnd; ++s)
+                    {
+                        double fx = static_cast<double>(s - s0) * invSSpan;
+                        double ix = 1.0 - fx;
+
+                        osg::Vec3d& point = points[t * cols + s];
+                        point.x() = iy * (ix * p00.x() + fx * p10.x()) + fy * (ix * p01.x() + fx * p11.x());
+                        point.y() = iy * (ix * p00.y() + fx * p10.y()) + fy * (ix * p01.y() + fx * p11.y());
+                        point.z() = 0.0;
+
+                        if (clampToSourceBounds)
+                        {
+                            clampPointToBounds(point, sourceBounds);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 //------------------------------------------------------------------------
 
 void
@@ -666,7 +953,6 @@ ImageLayer::assembleImage(const TileKey& key, ProgressCallback* progress)
                 });
 
             // assume all tiles to mosaic are in the same SRS.
-            auto* key_srs = key.getExtent().getSRS();
             auto* source_srs = sources[0].second.getSRS();
 
             // new output:
@@ -677,41 +963,10 @@ ImageLayer::assembleImage(const TileKey& key, ProgressCallback* progress)
             // Working set of points. it's much faster to xform an entire vector all at once.
             // Reuse a thread_local vector to avoid memory allocation/deallocation subsequent calls
             static thread_local std::vector<osg::Vec3d> points;
-            points.resize(cols * rows);
-
-            double minx, miny, maxx, maxy;
-            key.getExtent().getBounds(minx, miny, maxx, maxy);
-            double dx = (maxx - minx) / (double)(cols);
-            double dy = (maxy - miny) / (double)(rows);
 
             Bounds sourceBounds;
             sources[0].second.getSRS()->getBounds(sourceBounds);
-
-            // build a grid of sample points:
-            for (unsigned t = 0; t < rows; ++t)
-            {
-                double y = miny + (0.5 * dy) + (dy * (double)t);
-                for (unsigned s = 0; s < cols; ++s)
-                {
-                    double x = minx + (0.5 * dx) + (dx * (double)s);
-                    points[t * cols + s] = { x, y, 0.0 };
-                }
-            }
-
-            // transform the sample points to the SRS of our source data tiles:
-            if (source_srs && key_srs)
-            {
-                key_srs->transform(points, source_srs);
-
-                if (sourceBounds.valid())
-                {
-                    for (auto& point : points)
-                    {
-                        point.x() = clamp(point.x(), sourceBounds.xMin(), sourceBounds.xMax());
-                        point.y() = clamp(point.y(), sourceBounds.yMin(), sourceBounds.yMax());
-                    }
-                }
-            }
+            buildInterpolatedReprojectionPoints(key.getExtent(), cols, rows, source_srs, sourceBounds, points);
 
             // Mosaic our sources into a single output image.
             std::vector<GeoImagePixelReader> readers;

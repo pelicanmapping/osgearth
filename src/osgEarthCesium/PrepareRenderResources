@@ -67,7 +67,7 @@ namespace osgEarth {
                 void* pMainThreadResult) noexcept;
 
             virtual void* prepareRasterInLoadThread(
-                CesiumGltf::ImageCesium& image,
+                CesiumGltf::ImageAsset& image,
                 const std::any& rendererOptions);
 
             virtual void* prepareRasterInMainThread(

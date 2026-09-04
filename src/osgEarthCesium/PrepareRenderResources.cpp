@@ -25,7 +25,7 @@ namespace
     const GLenum redFormat = GL_RED;
     #endif
 
-    osg::Image* getOsgImage(CesiumGltf::ImageCesium& image)
+    osg::Image* getOsgImage(CesiumGltf::ImageAsset& image)
     {
         GLenum format = GL_RGB;
         GLenum texFormat = GL_RGB8;
@@ -386,9 +386,9 @@ namespace {
                 }
 
                 // Load the image
-                auto& image = _model->images[texture.source].cesium;
+                auto image = _model->images[texture.source].pAsset;
 
-                osg::Image* osgImage = getOsgImage(image);
+                osg::Image* osgImage = getOsgImage(*image);
 
                 if (osgImage)
                 {
@@ -628,7 +628,7 @@ void PrepareRendererResources::free(
 }
 
 void* PrepareRendererResources::prepareRasterInLoadThread(
-    CesiumGltf::ImageCesium& image,
+    CesiumGltf::ImageAsset& image,
     const std::any& rendererOptions)
 {
     osg::Image* osgImage = getOsgImage(image);

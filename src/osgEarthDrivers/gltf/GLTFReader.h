@@ -34,6 +34,7 @@
 #include <osgEarth/BuildConfig>
 #include <osgEarth/ExternalNode>
 #include <osgEarth/InstancedExternalNode>
+#include <osgEarth/VertexCompression>
 #ifdef OSGEARTH_HAVE_MESH_OPTIMIZER
 #include <meshoptimizer.h>
 #endif
@@ -1776,6 +1777,9 @@ void oe_gltf_pbr_fs(inout vec4 color)
             tex->setResizeNonPowerOfTwoHint(false);
             tex->setDataVariance(osg::Object::STATIC);
 
+            // Preserve texture detail at grazing angles while retaining mipmaps.
+            tex->setMaxAnisotropy(16.0f);
+
             if (texture.sampler >= 0 && texture.sampler < model.samplers.size())
             {
                 const tinygltf::Sampler& sampler = model.samplers[texture.sampler];
@@ -2163,11 +2167,14 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 // If there is no color array just add one that has the base color factor in it.
                 if (!geom->getColorArray())
                 {
-                    osg::Vec4Array* colors = new osg::Vec4Array();
+                    osg::Vec4ubArray* colors = new osg::Vec4ubArray();
+                    osg::Vec4ub color = packColor(baseColorFactor);
+                    colors->setNormalize(true);
+                    colors->push_back(color);
                     osg::Array* verts = geom->getVertexArray();
                     if (verts)
                     {
-                        colors->assign(verts->getNumElements(), baseColorFactor);
+                        colors->assign(verts->getNumElements(), color);
                     }
                     geom->setColorArray(colors, osg::Array::BIND_PER_VERTEX);
                 }

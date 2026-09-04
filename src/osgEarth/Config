@@ -408,7 +408,11 @@ namespace osgEarth
         template<typename T>
         T value(const std::string& key, T fallback) const {
             const Config* conf = child_ptr(key);
-            return osgEarth::Util::as<T>(conf ? conf->value() : EMPTY_STRING, fallback);
+            if (conf)
+                return osgEarth::Util::as<T>(conf->value(), fallback);
+
+            static const std::string empty;
+            return osgEarth::Util::as<T>(empty, fallback);
         }
 
         /** Populates the output value iff the Config exists. */

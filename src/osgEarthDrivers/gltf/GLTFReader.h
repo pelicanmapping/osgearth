@@ -43,6 +43,7 @@
 #include <cctype>
 #include <map>
 #include <sstream>
+#include <utility>
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
@@ -984,6 +985,10 @@ public:
                 sceneIndices.push_back(static_cast<int>(i));
         }
 
+        // Plan batches from glTF data before allocating any per-reference OSG
+        // nodes. The outer Y-up-to-Z-up transform remains common to all batches.
+        builder.prepareExternalAssetInstancing(sceneIndices, parentReversesWinding);
+
         for (int sceneIndex : sceneIndices)
         {
             const tinygltf::Scene& scene = model.scenes[sceneIndex];
@@ -1007,11 +1012,11 @@ public:
             }
         }
 
-        // The external-asset instancing path leaves lightweight
-        // markers in the ordinary node hierarchy while it is being built.
-        // Resolve their complete transforms now and replace duplicate groups
-        // with one InstancedExternalNode per asset/parity variant.
-        builder.finalizeExternalAssetInstancing(transform.get());
+        for (const auto& entry : builder.externalBatches)
+        {
+            if (entry.second.isInstanced())
+                transform->addChild(entry.second.node.get());
+        }
 
         // Enable backface culling on the nodes
         transform->getOrCreateStateSet()->setAttributeAndModes(new osg::CullFace(osg::CullFace::BACK), osg::StateAttribute::ON);
@@ -1058,14 +1063,31 @@ public:
         std::vector< osg::ref_ptr< osg::Array > > arrays;
         mutable std::string error;
 
-        struct ExternalInstanceReference : public osg::Group
+        struct ExternalReference;
+
+        struct ExternalInstanceBatch
+        {
+            const ExternalReference* reference = nullptr;
+            osgEarth::InstancedExternalNode::MatrixList matrices;
+            osg::ref_ptr<osgEarth::InstancedExternalNode> node;
+
+            bool isInstanced() const
+            {
+                return node.valid() && node->isUsingHardwareInstancing();
+            }
+        };
+
+        struct ExternalReference
         {
             std::string filename;
             std::string externalName;
-            std::string batchKey;
             osg::ref_ptr<osgDB::Options> options;
+            ExternalInstanceBatch* batch = nullptr;
         };
 
+        // std::map keeps reference/batch addresses stable while collecting.
+        mutable std::map<std::pair<std::size_t, bool>, ExternalReference> externalReferences;
+        std::map<std::string, ExternalInstanceBatch> externalBatches;
         bool externalAssetInstancing = true;
 
         // Texture image units for the original glTF material maps.
@@ -1093,8 +1115,7 @@ public:
                 !env.readOptions ||
                 env.readOptions->getOptionString().find("gltfSkipPBRTextures") == std::string::npos;
 
-            // Static batching is the default. Successful batches replace
-            // individual external-reference traversal nodes with one
+            // Static batching is the default. Successful batches create one
             // root-level matrix list. Callers needing per-reference masks,
             // callbacks, or edits can request ordinary ExternalNodes with
             // the gltfDisableExternalAssetInstancing read option.
@@ -1297,188 +1318,154 @@ void oe_gltf_pbr_fs(inout vec4 color)
             return key.str();
         }
 
-        void finalizeExternalAssetInstancing(osg::Group* root)
+        static osg::Matrixd nodeMatrix(const tinygltf::Node& node)
         {
-            if (!externalAssetInstancing || !root || !error.empty())
+            osg::Matrixd matrix;
+            if (node.matrix.size() == 16)
+                matrix.set(node.matrix.data());
+
+            if (matrix.isIdentity())
+            {
+                osg::Matrixd scale, translation, rotation;
+                if (node.scale.size() == 3)
+                    scale.makeScale(node.scale[0], node.scale[1], node.scale[2]);
+                if (node.rotation.size() == 4)
+                    rotation.makeRotate(osg::Quat(
+                        node.rotation[0], node.rotation[1],
+                        node.rotation[2], node.rotation[3]));
+                if (node.translation.size() == 3)
+                    translation.makeTranslate(
+                        node.translation[0], node.translation[1], node.translation[2]);
+                matrix = scale * rotation * translation;
+            }
+            return matrix;
+        }
+
+        static bool matrixReversesWinding(const osg::Matrixd& matrix)
+        {
+            const double determinant =
+                matrix(0, 0) * (matrix(1, 1) * matrix(2, 2) - matrix(1, 2) * matrix(2, 1)) -
+                matrix(0, 1) * (matrix(1, 0) * matrix(2, 2) - matrix(1, 2) * matrix(2, 0)) +
+                matrix(0, 2) * (matrix(1, 0) * matrix(2, 1) - matrix(1, 1) * matrix(2, 0));
+            return determinant < 0.0;
+        }
+
+        ExternalReference* externalReference(
+            const tinygltf::Node& node, bool reversesWinding) const
+        {
+            const auto external = node.extensions.find(externalAssetExtension());
+            if (external == node.extensions.end() || !external->second.IsObject())
+                return nullptr;
+            const tinygltf::Value& uriValue = external->second.Get("uri");
+            if (!uriValue.IsString())
+                return nullptr;
+
+            const auto key = std::make_pair(
+                static_cast<std::size_t>(&node - model.nodes.data()),
+                reversesWinding);
+            auto found = externalReferences.find(key);
+            if (found != externalReferences.end())
+                return &found->second;
+
+            ExternalReference& reference = externalReferences[key];
+            reference.filename = resolveResourceURI(
+                uriValue.Get<std::string>(), env.referrer);
+            reference.options = Registry::cloneOrCreateOptions(env.readOptions);
+
+            // The containing root supplies the Y-up-to-Z-up conversion.
+            // Nested assets contribute only their default scene, in glTF space.
+            appendOption(reference.options.get(), "gltfZUp");
+            appendOption(reference.options.get(), "gltfDefaultSceneOnly");
+            removeOption(reference.options.get(), "gltfForceReload");
+            removeOption(reference.options.get(), "gltfExternalAssetInstancing");
+
+            // Absolute FrontFace state inside the asset depends on the
+            // cumulative parity, which also identifies its shared cache variant.
+            if (reversesWinding)
+                appendOption(reference.options.get(), "gltfParentReversesWinding");
+            else
+                removeOption(reference.options.get(), "gltfParentReversesWinding");
+
+            const tinygltf::Value& nameValue = external->second.Get("name");
+            if (nameValue.IsString())
+                reference.externalName = nameValue.Get<std::string>();
+            return &reference;
+        }
+
+        void collectExternalAssetInstances(
+            const tinygltf::Node& node,
+            const osg::Matrixd& parentMatrix,
+            bool parentReversesWinding)
+        {
+            // State transitions require their original traversable hierarchy.
+            if (node.extensions.find("OWT_state") != node.extensions.end())
                 return;
 
-            struct Reference
-            {
-                osg::ref_ptr<ExternalInstanceReference> marker;
-                osg::Matrixf matrix;
-            };
+            const osg::Matrixd localMatrix = nodeMatrix(node);
+            const osg::Matrixd matrix = localMatrix * parentMatrix;
+            const bool reversesWinding =
+                parentReversesWinding != matrixReversesWinding(localMatrix);
+            for (int child : node.children)
+                collectExternalAssetInstances(
+                    model.nodes[child], matrix, reversesWinding);
 
-            struct Collector : public osg::NodeVisitor
-            {
-                Collector() :
-                    osg::NodeVisitor(
-                        osg::NodeVisitor::TRAVERSE_ALL_CHILDREN)
-                {
-                    setNodeMaskOverride(~0u);
-                }
+            ExternalReference* reference = externalReference(node, reversesWinding);
+            if (!reference)
+                return;
 
-                void apply(osg::Node& node) override
+            if (!reference->batch)
+            {
+                auto& batch = externalBatches[makeExternalBatchKey(
+                    reference->filename, reference->options.get())];
+                if (!batch.reference)
+                    batch.reference = reference;
+                reference->batch = &batch;
+            }
+            // Accumulate in double precision just as computeLocalToWorld did,
+            // then convert once at the instance-array boundary.
+            reference->batch->matrices.emplace_back(matrix);
+        }
+
+        void prepareExternalAssetInstancing(
+            const std::vector<int>& sceneIndices, bool parentReversesWinding)
+        {
+            if (!externalAssetInstancing)
+                return;
+
+            for (int sceneIndex : sceneIndices)
+            {
+                for (int nodeIndex : model.scenes[sceneIndex].nodes)
                 {
-                    auto* marker =
-                        dynamic_cast<ExternalInstanceReference*>(&node);
-                    if (marker)
+                    if (nodeIndex >= 0 &&
+                        static_cast<std::size_t>(nodeIndex) < model.nodes.size())
                     {
-                        Reference reference;
-                        reference.marker = marker;
-                        reference.matrix = osg::Matrixf(
-                            osg::computeLocalToWorld(getNodePath()));
-                        references.push_back(reference);
-                        return;
+                        collectExternalAssetInstances(
+                            model.nodes[nodeIndex], osg::Matrixd(),
+                            parentReversesWinding);
                     }
-                    traverse(node);
                 }
+            }
 
-                std::vector<Reference> references;
-            } collector;
-
-            // Starting traversal at each scene root deliberately excludes the
-            // loader's outer Y-up-to-Z-up MatrixTransform. Batches are attached
-            // beneath that same transform, so it must remain common state.
-            for (unsigned int i = 0u; i < root->getNumChildren(); ++i)
-                root->getChild(i)->accept(collector);
-
-            std::map<std::string, std::vector<Reference>> batches;
-            for (const auto& reference : collector.references)
-                batches[reference.marker->batchKey].push_back(reference);
-
-            auto materializeOrdinaryReference =
-                [this](ExternalInstanceReference* marker) -> bool
+            for (auto& entry : externalBatches)
             {
-                osg::ref_ptr<osgEarth::ExternalNode> external =
-                    new osgEarth::ExternalNode(
-                        marker->filename,
-                        marker->options.get());
-                external->setName(marker->externalName);
+                ExternalInstanceBatch& batch = entry.second;
+                if (batch.matrices.size() < 2u)
+                    continue;
 
-                std::vector<osg::ref_ptr<osg::Group>> parents;
-                parents.reserve(marker->getNumParents());
-                for (unsigned int i = 0u; i < marker->getNumParents(); ++i)
-                    parents.emplace_back(marker->getParent(i));
-                for (auto& parent : parents)
-                    parent->replaceChild(marker, external.get());
-
-                if (!external->isLoaded())
+                const ExternalReference& reference = *batch.reference;
+                batch.node = new osgEarth::InstancedExternalNode(
+                    reference.filename, batch.matrices, reference.options.get());
+                batch.node->setName(reference.externalName);
+                if (!batch.node->isLoaded() && error.empty())
                 {
+                    error = batch.node->getLastError();
                     if (error.empty())
-                    {
-                        error = external->getLastError();
-                        if (error.empty())
-                        {
-                            error = "Failed to load external asset " +
-                                marker->filename;
-                        }
-                    }
-                    return false;
-                }
-                return true;
-            };
-
-            for (auto& entry : batches)
-            {
-                std::vector<Reference>& references = entry.second;
-                if (references.size() < 2u)
-                {
-                    materializeOrdinaryReference(
-                        references.front().marker.get());
-                    continue;
+                        error = "Failed to load external asset " + reference.filename;
                 }
 
-                osgEarth::InstancedExternalNode::MatrixList matrices;
-                matrices.reserve(references.size());
-                for (const auto& reference : references)
-                    matrices.push_back(reference.matrix);
-
-                ExternalInstanceReference* first =
-                    references.front().marker.get();
-                osg::ref_ptr<osgEarth::InstancedExternalNode> instanced =
-                    new osgEarth::InstancedExternalNode(
-                        first->filename,
-                        matrices,
-                        first->options.get());
-                instanced->setName(first->externalName);
-
-                if (!instanced->isLoaded())
-                {
-                    if (error.empty())
-                    {
-                        error = instanced->getLastError();
-                        if (error.empty())
-                        {
-                            error = "Failed to load external asset " +
-                                first->filename;
-                        }
-                    }
-                    continue;
-                }
-
-                // Capability and graph-semantics failures preserve the exact
-                // ordinary ExternalNode topology instead of silently changing
-                // behavior merely because the optimization was considered.
-                if (!instanced->isUsingHardwareInstancing())
-                {
-                    for (const auto& reference : references)
-                    {
-                        if (!materializeOrdinaryReference(
-                                reference.marker.get()))
-                        {
-                            break;
-                        }
-                    }
-                    continue;
-                }
-
-                // The instance matrices already contain every transform from
-                // the scene root to each marker. Remove the consumed marker
-                // and then prune MatrixTransforms that became empty as a
-                // result. Work upward so a hierarchy used only to position
-                // external references disappears too, while stopping at any
-                // node that still contains a mesh, child, or fallback asset.
-                std::vector<osg::ref_ptr<osg::Group>> pruneCandidates;
-                for (const auto& reference : references)
-                {
-                    ExternalInstanceReference* marker =
-                        reference.marker.get();
-                    while (marker->getNumParents() > 0u)
-                    {
-                        osg::ref_ptr<osg::Group> parent =
-                            marker->getParent(0u);
-                        parent->removeChild(marker);
-                        pruneCandidates.push_back(parent.get());
-                    }
-                }
-
-                while (!pruneCandidates.empty())
-                {
-                    osg::ref_ptr<osg::Group> candidate =
-                        pruneCandidates.back();
-                    pruneCandidates.pop_back();
-
-                    if (candidate.get() == root ||
-                        candidate->getNumChildren() != 0u ||
-                        typeid(*candidate) != typeid(osg::MatrixTransform))
-                    {
-                        continue;
-                    }
-
-                    std::vector<osg::ref_ptr<osg::Group>> parents;
-                    parents.reserve(candidate->getNumParents());
-                    for (unsigned int i = 0u;
-                         i < candidate->getNumParents(); ++i)
-                    {
-                        parents.emplace_back(candidate->getParent(i));
-                    }
-                    for (auto& parent : parents)
-                    {
-                        parent->removeChild(candidate.get());
-                        pruneCandidates.push_back(parent.get());
-                    }
-                }
-                root->addChild(instanced.get());
+                // Keep unsuccessful hardware candidates alive until ordinary
+                // nodes are built, so fallback references reuse their loaded
+                // payload even when manager retention is disabled.
             }
         }
 
@@ -1487,55 +1474,31 @@ void oe_gltf_pbr_fs(inout vec4 color)
             bool parentReversesWinding,
             bool canInstanceExternalAssets = true) const
         {
-            osg::MatrixTransform* mt = new osg::MatrixTransform;
-            if (node.matrix.size() == 16)
-            {
-                osg::Matrixd mat;
-                mat.set(node.matrix.data());
-                mt->setMatrix(mat);
-            }
+            const osg::Matrixd matrix = nodeMatrix(node);
+            const bool localReversesWinding = matrixReversesWinding(matrix);
+            const bool reversesWinding =
+                parentReversesWinding != localReversesWinding;
 
-            if (mt->getMatrix().isIdentity())
+            // Allocate the transform only if ordinary content needs it. A
+            // subtree consumed entirely by batches never creates OSG nodes.
+            osg::ref_ptr<osg::MatrixTransform> mt;
+            auto transform = [&]() -> osg::MatrixTransform*
             {
-                osg::Matrixd scale, translation, rotation;
-                if (node.scale.size() == 3)
+                if (!mt)
                 {
-                    scale = osg::Matrixd::scale(node.scale[0], node.scale[1], node.scale[2]);
+                    mt = new osg::MatrixTransform;
+                    mt->setMatrix(matrix);
+                    if (localReversesWinding)
+                    {
+                        mt->getOrCreateStateSet()->setAttribute(
+                            new osg::FrontFace(reversesWinding ?
+                                osg::FrontFace::CLOCKWISE :
+                                osg::FrontFace::COUNTER_CLOCKWISE));
+                    }
                 }
+                return mt.get();
+            };
 
-                if (node.rotation.size() == 4) {
-                    osg::Quat quat(node.rotation[0], node.rotation[1], node.rotation[2], node.rotation[3]);
-                    rotation.makeRotate(quat);
-                }
-
-                if (node.translation.size() == 3) {
-                    translation = osg::Matrixd::translate(node.translation[0], node.translation[1], node.translation[2]);
-                }
-
-                mt->setMatrix(scale * rotation * translation);
-            }
-
-            const osg::Matrixd& matrix = mt->getMatrix();
-            const double determinant =
-                matrix(0, 0) * (matrix(1, 1) * matrix(2, 2) - matrix(1, 2) * matrix(2, 1)) -
-                matrix(0, 1) * (matrix(1, 0) * matrix(2, 2) - matrix(1, 2) * matrix(2, 0)) +
-                matrix(0, 2) * (matrix(1, 0) * matrix(2, 1) - matrix(1, 1) * matrix(2, 0));
-            const bool localReversesWinding = determinant < 0.0;
-            const bool reversesWinding = parentReversesWinding != localReversesWinding;
-
-            // glTF permits transforms with a negative determinant. They mirror
-            // the geometry, so compensate for the resulting winding reversal.
-            // Set the counter-clockwise state as well when a second mirrored
-            // transform restores the original winding.
-            if (localReversesWinding)
-            {
-                mt->getOrCreateStateSet()->setAttribute(
-                    new osg::FrontFace(reversesWinding ?
-                        osg::FrontFace::CLOCKWISE : osg::FrontFace::COUNTER_CLOCKWISE));
-            }
-
-
-            // todo transformation
             if (node.mesh >= 0)
             {
                 osg::Group* meshNode = nullptr;
@@ -1548,134 +1511,68 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 {
                     meshNode = makeMesh(model.meshes[node.mesh], false);
                 }
-                mt->addChild(meshNode);
+                transform()->addChild(meshNode);
             }
 
-            // Load any children.
             const bool hasStateTransition =
                 node.extensions.find("OWT_state") != node.extensions.end();
             const bool childrenCanInstanceExternalAssets =
                 canInstanceExternalAssets && !hasStateTransition;
-            for (unsigned int i = 0; i < node.children.size(); i++)
+            bool consumedByBatch = false;
+            for (int childIndex : node.children)
             {
                 osg::Node* child = createNode(
-                    model.nodes[node.children[i]],
-                    reversesWinding,
+                    model.nodes[childIndex], reversesWinding,
                     childrenCanInstanceExternalAssets);
                 if (child)
-                {
-                    mt->addChild(child);
-                }
+                    transform()->addChild(child);
+                else
+                    consumedByBatch = true;
             }
 
-            // glTF 2.1 external assets attach the referenced asset's default
-            // scene after the node's ordinary children. The preparation pass
-            // carries the new core properties through TinyGLTF as a private
-            // extension until TinyGLTF exposes native 2.1 structures.
-            auto external = node.extensions.find(externalAssetExtension());
-            if (external != node.extensions.end() &&
-                external->second.IsObject())
+            // External content follows ordinary children, as in the source glTF.
+            ExternalReference* reference = externalReference(node, reversesWinding);
+            if (reference)
             {
-                const tinygltf::Value& uriValue =
-                    external->second.Get("uri");
-                if (uriValue.IsString())
+                if (childrenCanInstanceExternalAssets &&
+                    reference->batch && reference->batch->isInstanced())
                 {
-                    const std::string externalFilename = resolveResourceURI(
-                        uriValue.Get<std::string>(), env.referrer);
-                    osg::ref_ptr<osgDB::Options> externalOptions =
-                        Registry::cloneOrCreateOptions(env.readOptions);
-                    // The containing glTF root already performs the Y-up to
-                    // Z-up conversion. Nested assets must remain in glTF space
-                    // and contribute only their default scene.
-                    appendOption(externalOptions.get(), "gltfZUp");
-                    appendOption(externalOptions.get(), "gltfDefaultSceneOnly");
-                    removeOption(externalOptions.get(), "gltfForceReload");
-                    // This was the pre-default opt-in token. It is now a
-                    // compatibility no-op and must not create a distinct
-                    // ExternalAssetManager cache variant.
-                    removeOption(
-                        externalOptions.get(),
-                        "gltfExternalAssetInstancing");
-                    // Front-face overrides are absolute OSG state. Carry the
-                    // cumulative determinant parity into the nested reader so
-                    // mirrored transforms on both sides of this boundary
-                    // restore counter-clockwise winding correctly. The option
-                    // also creates separate shared variants when two parents
-                    // have different parity.
-                    if (reversesWinding)
+                    consumedByBatch = true;
+                }
+                else
+                {
+                    osg::ref_ptr<osgEarth::ExternalNode> externalNode =
+                        new osgEarth::ExternalNode(
+                            reference->filename, reference->options.get());
+                    externalNode->setName(reference->externalName);
+                    transform()->addChild(externalNode.get());
+                    if (!externalNode->isLoaded() && error.empty())
                     {
-                        appendOption(
-                            externalOptions.get(),
-                            "gltfParentReversesWinding");
-                    }
-                    else
-                    {
-                        removeOption(
-                            externalOptions.get(),
-                            "gltfParentReversesWinding");
-                    }
-
-                    const tinygltf::Value& nameValue =
-                        external->second.Get("name");
-                    const std::string externalName = nameValue.IsString() ?
-                        nameValue.Get<std::string>() : std::string();
-
-                    if (externalAssetInstancing &&
-                        canInstanceExternalAssets &&
-                        !hasStateTransition)
-                    {
-                        osg::ref_ptr<ExternalInstanceReference> marker =
-                            new ExternalInstanceReference();
-                        marker->filename = externalFilename;
-                        marker->externalName = externalName;
-                        marker->options = externalOptions.get();
-                        marker->batchKey = makeExternalBatchKey(
-                            marker->filename,
-                            marker->options.get());
-                        marker->setName(externalName);
-                        mt->addChild(marker.get());
-                    }
-                    else
-                    {
-                        osg::ref_ptr<osgEarth::ExternalNode> externalNode =
-                            new osgEarth::ExternalNode(
-                                externalFilename, externalOptions.get());
-                        externalNode->setName(externalName);
-                        mt->addChild(externalNode.get());
-
-                        if (!externalNode->isLoaded() && error.empty())
-                        {
-                            error = externalNode->getLastError();
-                            if (error.empty())
-                            {
-                                error = "Failed to load external asset " +
-                                    externalFilename;
-                            }
-                        }
+                        error = externalNode->getLastError();
+                        if (error.empty())
+                            error = "Failed to load external asset " + reference->filename;
                     }
                 }
             }
 
-            osg::Node* top = mt;
+            if (!mt && consumedByBatch)
+                return nullptr;
 
-            // If we have an OWT_state extension setup all the state names
+            // Preserve originally empty nodes, single references, mixed mesh
+            // branches, and hardware-rejected hierarchies exactly as before.
+            transform();
+            osg::ref_ptr<osg::Node> top = mt.release();
             if (hasStateTransition)
             {
                 StateTransitionNode* st = new StateTransitionNode;
-                st->addChild(mt);
-
+                st->addChild(top.get());
                 auto ext = node.extensions.find("OWT_state")->second;
                 for (auto& key : ext.Keys())
-                {
-                    std::string value = ext.Get(key).Get<std::string>();
-                    st->_stateToNodeName[key] = value;
-                }
+                    st->_stateToNodeName[key] = ext.Get(key).Get<std::string>();
                 top = st;
             }
-
             top->setName(node.name);
-
-            return top;
+            return top.release();
         }
 
         int getTextureSource(const tinygltf::Texture& texture) const

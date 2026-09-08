@@ -10,6 +10,7 @@
 #include <osgEarth/Registry>
 #include <osgEarth/StateTransition>
 #include <osgEarth/VirtualProgram>
+#include "ExternalNodeSerializer.h"
 
 #include <osg/Drawable>
 #include <osg/BufferObject>
@@ -1035,10 +1036,8 @@ namespace osgEarth { namespace Serializers { namespace InstancedExternalNode
         input >> input.BEGIN_BRACKET;
         std::string filename;
         std::string readOptions;
-        input >> input.PROPERTY("FileName");
-        input.readWrappedString(filename);
-        input >> input.PROPERTY("ReadOptions");
-        input.readWrappedString(readOptions);
+        if (!ExternalNodeSerializer::readStrings(input, filename, readOptions))
+            return false;
 
         input >> input.PROPERTY("Matrices");
         const unsigned int size = input.readSize();
@@ -1053,6 +1052,8 @@ namespace osgEarth { namespace Serializers { namespace InstancedExternalNode
         }
         input >> input.END_BRACKET;
         input >> input.END_BRACKET;
+        if (input.getException())
+            return false;
 
         osg::ref_ptr<osgDB::Options> options =
             osgEarth::Registry::cloneOrCreateOptions(input.getOptions());
@@ -1067,12 +1068,8 @@ namespace osgEarth { namespace Serializers { namespace InstancedExternalNode
         const osgEarth::InstancedExternalNode& node)
     {
         output << output.BEGIN_BRACKET << std::endl;
-        output << output.PROPERTY("FileName");
-        output.writeWrappedString(node.getFileName());
-        output << std::endl;
-        output << output.PROPERTY("ReadOptions");
-        output.writeWrappedString(node.getReadOptionsString());
-        output << std::endl;
+        if (!ExternalNodeSerializer::writeStrings(output, node))
+            return false;
 
         output << output.PROPERTY("Matrices");
         output.writeSize(node.getMatrices().size());
@@ -1084,6 +1081,26 @@ namespace osgEarth { namespace Serializers { namespace InstancedExternalNode
         return true;
     }
 
+    struct RestoreRefreshCallback : public osgDB::FinishedObjectReadCallback
+    {
+        void objectRead(osgDB::InputStream&, osg::Object& object) override
+        {
+            auto& node = static_cast<osgEarth::InstancedExternalNode&>(object);
+            // osg::Node's serializer can replace the constructor's internal
+            // refresh callback with a plain NodeCallback. Restore refresh
+            // after all fields are read, preserving any application callbacks.
+            for (osg::Callback* callback = node.getUpdateCallback(); callback;
+                 callback = callback->getNestedCallback())
+            {
+                if (dynamic_cast<RefreshCallback*>(callback))
+                    return;
+            }
+            osg::ref_ptr<RefreshCallback> refresh = new RefreshCallback;
+            refresh->setNestedCallback(node.getUpdateCallback());
+            node.setUpdateCallback(refresh.get());
+        }
+    };
+
     REGISTER_OBJECT_WRAPPER(
         InstancedExternalNode,
         new osgEarth::InstancedExternalNode,
@@ -1091,5 +1108,6 @@ namespace osgEarth { namespace Serializers { namespace InstancedExternalNode
         "osg::Object osg::Node osgEarth::InstancedExternalNode")
     {
         ADD_USER_SERIALIZER(ExternalInstances);
+        wrapper->addFinishedObjectReadCallback(new RestoreRefreshCallback);
     }
 }}}

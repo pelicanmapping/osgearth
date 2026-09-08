@@ -19,6 +19,7 @@ namespace osgEarth
     class ExternalAsset;
     class ExternalAssetSlot;
     class InstancedExternalNode;
+    class ExternalNodeSerializer;
 
     /**
      * Process-wide registry for scene graphs referenced by ExternalNode.
@@ -144,6 +145,8 @@ namespace osgEarth
      * shared payload. The serializer deliberately omits osg::Group fields, so
      * writing this node to OSGB records only the filename and reader options
      * rather than embedding that transient slot and its payload.
+     * Filenames and option strings are shared by object ID within each output
+     * stream, including references from InstancedExternalNode batches.
      *
      * Group children are manager-owned and must not be edited directly.
      * Since the payload is shared, its update/event callbacks and other
@@ -235,7 +238,12 @@ namespace osgEarth
         osg::ref_ptr<ExternalAssetSlot> _slot;
         std::string _localError;
 
+        // Keep interned strings alive for OSG's pointer-based output ID map.
+        mutable osg::ref_ptr<osg::Object> _serializedFilename;
+        mutable osg::ref_ptr<osg::Object> _serializedReadOptions;
+
         friend class ExternalAsset;
         friend class InstancedExternalNode;
+        friend class ExternalNodeSerializer;
     };
 }

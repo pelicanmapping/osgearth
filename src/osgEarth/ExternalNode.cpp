@@ -5,9 +5,11 @@
 
 #include <osgEarth/ExternalNode>
 #include <osgEarth/InstancedExternalNode>
+#include <osgEarth/IOTypes>
 #include <osgEarth/Notify>
 #include <osgEarth/Registry>
 #include <osgEarth/URI>
+#include "ExternalNodeSerializer.h"
 
 #include <osg/observer_ptr>
 #include <osg/PrimitiveSet>
@@ -1242,6 +1244,140 @@ ExternalNode::ensureSlot()
 #undef LC
 #define LC "[ExternalNode Serializer] "
 
+namespace
+{
+    // Nodes own the interned objects. Weak entries allow serialization metadata
+    // to go away with the scene instead of retaining every filename forever.
+    struct ExternalStringPool
+    {
+        std::mutex mutex;
+        std::map<std::string, osg::observer_ptr<osgEarth::StringObject>> strings;
+        unsigned writes = 0u;
+
+        osg::ref_ptr<osgEarth::StringObject> intern(const std::string& value)
+        {
+            osg::ref_ptr<osgEarth::StringObject> result;
+            auto& entry = strings[value];
+            if (!entry.lock(result))
+            {
+                result = new osgEarth::StringObject(value);
+                entry = result.get();
+            }
+            return result;
+        }
+    };
+}
+
+bool
+ExternalNodeSerializer::writeStrings(
+    osgDB::OutputStream& output, const osgEarth::ExternalNode& node)
+{
+    return writeStrings(output, node.getFileName(), node.getReadOptionsString(),
+        node._serializedFilename, node._serializedReadOptions);
+}
+
+bool
+ExternalNodeSerializer::writeStrings(
+    osgDB::OutputStream& output, const osgEarth::InstancedExternalNode& node)
+{
+    return writeStrings(output, node.getFileName(), node.getReadOptionsString(),
+        node._serializedFilename, node._serializedReadOptions);
+}
+
+bool
+ExternalNodeSerializer::writeStrings(
+    osgDB::OutputStream& output,
+    const std::string& filename, const std::string& readOptions,
+    osg::ref_ptr<osg::Object>& filenameObject,
+    osg::ref_ptr<osg::Object>& optionsObject)
+{
+    static ExternalStringPool pool;
+    osg::ref_ptr<osg::Object> file, options;
+    {
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        filenameObject = pool.intern(filename);
+        optionsObject = pool.intern(readOptions);
+        file = filenameObject;
+        options = optionsObject;
+        if (++pool.writes % 256u == 0u)
+        {
+            for (auto i = pool.strings.begin(); i != pool.strings.end();)
+            {
+                if (!i->second.valid())
+                    i = pool.strings.erase(i);
+                else
+                    ++i;
+            }
+        }
+    }
+
+    if (output.isBinary())
+    {
+        // Legacy records start with a wrapped filename. A one-byte NUL cannot
+        // name an external file, so it distinguishes the new layout without
+        // changing the surrounding OSG wrapper schema or its property count.
+        output.writeWrappedString(std::string(1u, '\0'));
+    }
+    else
+        output << output.PROPERTY("SharedStrings");
+    output << 1u << output.BEGIN_BRACKET << std::endl;
+    output << file << options;
+    output << output.END_BRACKET << std::endl;
+    return output.getException() == nullptr;
+}
+
+bool
+ExternalNodeSerializer::readStrings(
+    osgDB::InputStream& input, std::string& filename, std::string& readOptions)
+{
+    bool shared = false;
+    if (input.isBinary())
+    {
+        input.readWrappedString(filename);
+        shared = filename == std::string(1u, '\0');
+    }
+    else
+    {
+        shared = input.matchString("SharedStrings");
+        if (!shared)
+        {
+            input >> input.PROPERTY("FileName");
+            input.readWrappedString(filename);
+        }
+    }
+
+    if (shared)
+    {
+        unsigned version = 0u;
+        input >> version;
+        if (input.getException())
+            return false;
+        if (version != 1u)
+        {
+            input.throwException("Unsupported external asset string format");
+            return false;
+        }
+        osg::ref_ptr<osgEarth::StringObject> file, options;
+        input >> input.BEGIN_BRACKET >> file >> options >> input.END_BRACKET;
+        if (input.getException())
+            return false;
+        if (!file || !options)
+        {
+            input.throwException("Invalid external asset string reference");
+            return false;
+        }
+        filename = file->getString();
+        readOptions = options->getString();
+    }
+    else
+    {
+        // Original OSGB/OSGT records store both strings inline.
+        input >> input.PROPERTY("ReadOptions");
+        input.readWrappedString(readOptions);
+    }
+    return input.getException() == nullptr;
+}
+
 namespace osgEarth { namespace Serializers { namespace ExternalNode
 {
     static bool checkExternalAsset(const osgEarth::ExternalNode& node)
@@ -1256,11 +1392,11 @@ namespace osgEarth { namespace Serializers { namespace ExternalNode
         input >> input.BEGIN_BRACKET;
         std::string filename;
         std::string readOptions;
-        input >> input.PROPERTY("FileName");
-        input.readWrappedString(filename);
-        input >> input.PROPERTY("ReadOptions");
-        input.readWrappedString(readOptions);
+        if (!ExternalNodeSerializer::readStrings(input, filename, readOptions))
+            return false;
         input >> input.END_BRACKET;
+        if (input.getException())
+            return false;
 
         osg::ref_ptr<osgDB::Options> options =
             osgEarth::Registry::cloneOrCreateOptions(input.getOptions());
@@ -1274,12 +1410,8 @@ namespace osgEarth { namespace Serializers { namespace ExternalNode
         const osgEarth::ExternalNode& node)
     {
         output << output.BEGIN_BRACKET << std::endl;
-        output << output.PROPERTY("FileName");
-        output.writeWrappedString(node.getFileName());
-        output << std::endl;
-        output << output.PROPERTY("ReadOptions");
-        output.writeWrappedString(node.getReadOptionsString());
-        output << std::endl;
+        if (!ExternalNodeSerializer::writeStrings(output, node))
+            return false;
         output << output.END_BRACKET << std::endl;
         return true;
     }

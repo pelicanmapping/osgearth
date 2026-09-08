@@ -18,6 +18,7 @@
 namespace osgEarth
 {
     class ExternalNode;
+    class ExternalNodeSerializer;
 
     /**
      * A reloadable external scene graph rendered at many transforms.
@@ -47,6 +48,10 @@ namespace osgEarth
      * mirrored matrices, and a graph-semantics hardware rejection, use
      * ordinary ExternalNodes so OSG can retain the original per-reference
      * state hierarchy. The glTF loader performs this fallback automatically.
+     *
+     * OSGB/OSGT serialization records the external filename, reader options,
+     * and instance matrices; rendering children are rebuilt on read. Filename
+     * and option strings share output object IDs with ordinary ExternalNodes.
      *
      * Instances are static matrix records rather than individually traversable
      * Nodes. Change them with setMatrices(); per-instance node masks, callbacks,
@@ -129,5 +134,10 @@ namespace osgEarth
         MatrixList _matrices;
         bool _usingHardwareInstancing = false;
         std::string _instancingError;
+
+        mutable osg::ref_ptr<osg::Object> _serializedFilename;
+        mutable osg::ref_ptr<osg::Object> _serializedReadOptions;
+
+        friend class ExternalNodeSerializer;
     };
 }

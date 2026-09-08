@@ -39,6 +39,7 @@ layout(location = 6) in int albedo_index;
 layout(location = 7) in int normalmap_index;
 layout(location = 8) in int pbr_index;
 layout(location = 9) in ivec2 extended_materials;
+layout(location = 10) in uint color_is_linear;
 
 #define NT_DEFAULT 0
 #define NT_ZAXIS 1
@@ -56,6 +57,7 @@ out vec2 oe_tex_uv;
 out vec3 oe_position_vec;
 out vec3 oe_position_view;
 flat out uint oe_normal_technique;
+flat out uint oe_color_is_linear;
 flat out float oe_alpha_cutoff;
 flat out uint64_t oe_albedo_tex;
 flat out uint64_t oe_normal_tex;
@@ -70,6 +72,7 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
 
     vertex = chonkInstances[i].xform * vec4(position, 1.0);
     vp_Color = color;
+    oe_color_is_linear = color_is_linear;
     xform3 = mat3(chonkInstances[i].xform);
     vp_Normal = xform3 * normal;
     oe_normal_technique = normal_technique;
@@ -134,6 +137,7 @@ flat in uint64_t oe_pbr_tex;
 flat in float oe_alpha_cutoff;
 
 flat in uint oe_normal_technique;
+flat in uint oe_color_is_linear;
 #define NT_DEFAULT 0
 #define NT_ZAXIS 1
 #define NT_HEMISPHERE 2 
@@ -178,10 +182,13 @@ void oe_chonk_default_fragment(inout vec4 color)
     {
         color *= texture(sampler2D(oe_albedo_tex), oe_tex_uv);
     }
-    else
+    if (oe_color_is_linear != 0u)
     {
-        //color = vec4(1, 0, 0, 1); // testing
-        // no texture ... use the vertex color
+        // glTF albedo textures decode sRGB on sample; vertex colors and
+        // material factors remain linear until after their multiplication.
+        vec3 c = clamp(color.rgb, 0.0, 1.0);
+        color.rgb = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
+                        12.92 * c, lessThanEqual(c, vec3(0.0031308)));
     }
 
 #if defined(OE_IS_SHADOW_CAMERA) || defined(OE_IS_DEPTH_CAMERA)

@@ -1,0 +1,88 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/Common>
+#include <osgEarth/TiledModelLayer>
+#include <osgEarth/URI>
+
+namespace osgEarth
+{
+    /**
+     * Loads the tiled GLB hierarchy exported by Prestige.
+     */
+    class OSGEARTH_EXPORT PrestigeLayer : public TiledModelLayer
+    {
+    public: // serialization
+        struct OSGEARTH_EXPORT Options : public TiledModelLayer::Options
+        {
+            META_LayerOptions(osgEarth, Options, TiledModelLayer::Options);
+
+            OE_OPTION(URI, url);
+            OE_OPTION(bool, invertY, false);
+            OE_OPTION(bool, split, true);
+            OE_OPTION(bool, skipLOD1, false);
+            OE_OPTION(unsigned, gridSize, 5u);
+            OE_OPTION(float, lod1Range, 5000.0f);
+            OE_OPTION(float, lod0Range, 1000.0f);
+
+            Config getConfig() const override;
+            void fromConfig(const Config& conf);
+        };
+
+    public:
+        META_Layer(osgEarth, PrestigeLayer, Options, TiledModelLayer, Prestige);
+
+        //! Base directory containing the Prestige GLB files.
+        void setURL(const URI& value);
+        const URI& getURL() const;
+
+        //! Tiling profile used by the Prestige export.
+        void setProfile(const Profile* profile);
+        const Profile* getProfile() const override { return _profile.get(); }
+
+        //! Whether to flip the Y tile index.
+        void setInvertY(bool value);
+        bool getInvertY() const;
+
+        //! Whether the high-resolution data is split into a grid of
+        //! LOD1/LOD0 cells (true, the default) or stored as a single
+        //! full-tile high-resolution gltf (false).
+        void setSplit(bool value);
+        bool getSplit() const;
+
+        //! Number of rows and columns in the square detail grid. Default is 5.
+        void setGridSize(unsigned value);
+        unsigned getGridSize() const;
+
+        //! Skip LOD1 geometry and show wireframe cell bounds in its place.
+        void setSkipLOD1(bool value);
+        bool getSkipLOD1() const;
+
+        //! Distance at which the LOD1 grid replaces the LOD2 tile.
+        void setLOD1Range(float value);
+        float getLOD1Range() const;
+
+        //! Distance at which an LOD0 tile replaces its LOD1 tile.
+        void setLOD0Range(float value);
+        float getLOD0Range() const;
+
+    public: // Layer
+        Status openImplementation() override;
+        void addedToMap(const Map* map) override;
+        Config getConfig() const override;
+
+    protected: // TiledModelLayer
+        osg::ref_ptr<osg::Node> createTileImplementation(
+            const TileKey& key,
+            ProgressCallback* progress) const override;
+
+        virtual ~PrestigeLayer();
+
+    private:
+        osg::ref_ptr<const Profile> _profile;
+        osg::ref_ptr<osgDB::Options> _readOptions;
+    };
+}

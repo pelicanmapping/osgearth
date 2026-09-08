@@ -18,6 +18,12 @@
 #ifndef GL_TEXTURE_2D_ARRAY
 #define GL_TEXTURE_2D_ARRAY 0x8C1A
 #endif
+#ifndef GL_COMPRESSED_SRGB_S3TC_DXT1_EXT
+#define GL_COMPRESSED_SRGB_S3TC_DXT1_EXT 0x8C4C
+#endif
+#ifndef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT
+#define GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT 0x8C4F
+#endif
 
 // This is typically a bad idea because you could be altering a texture
 // that's in use in another thread for CPU-side sampling. So don't do it
@@ -292,10 +298,11 @@ Texture::compileGLObjects(osg::State& state) const
 
             if (compress() && !image->isCompressed())
             {
+                const bool srgb = gpuInternalFormat == GL_SRGB8 || gpuInternalFormat == GL_SRGB8_ALPHA8;
                 if (pixelFormat == GL_RGB)
-                    gpuInternalFormat = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+                    gpuInternalFormat = srgb ? GL_COMPRESSED_SRGB_S3TC_DXT1_EXT : GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
                 else if (pixelFormat == GL_RGBA)
-                    gpuInternalFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+                    gpuInternalFormat = srgb ? GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
             }
 
             // set up the first mipmap level to enforce the size limiter (maxDim)

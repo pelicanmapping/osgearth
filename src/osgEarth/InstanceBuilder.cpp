@@ -212,7 +212,10 @@ void InstanceBuilder::installInstancing(osg::Geometry* geometry) const
 {
     // XXX do something more clever
     int numInstances = _positions->getNumElements();
-    osg::StateSet* ss = geometry->getOrCreateStateSet();
+    // Loaded models may share their material state and shader program.
+    osg::StateSet* ss = geometry->getStateSet() ?
+        osg::clone(geometry->getStateSet(), osg::CopyOp::SHALLOW_COPY) : new osg::StateSet;
+    geometry->setStateSet(ss);
     // assign the instance parameters
     setPerVertexOrOverall(geometry, _positions.get(), _position.get(), POSITION_ATTRIB);
     setPerVertexOrOverall(geometry, _rotations.get(), _rotation.get(), ROTATION_ATTRIB);
@@ -224,7 +227,7 @@ void InstanceBuilder::installInstancing(osg::Geometry* geometry) const
     {
         (*it)->setNumInstances(numInstances);
     }
-    VirtualProgram* vp = VirtualProgram::getOrCreate(ss);
+    VirtualProgram* vp = VirtualProgram::cloneOrCreate(ss);
     vp->setName("DrawInstancedAttribute");
     osgEarth::Shaders pkg;
     pkg.load(vp, pkg.DrawInstancedAttribute);

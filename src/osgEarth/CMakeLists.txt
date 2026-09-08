@@ -353,6 +353,7 @@ SET(TARGET_H
     PolygonizeLines
     PolygonSymbol
     PowerlineLayer
+    PrestigeLayer
     PrimitiveIntersector
     Profile
     Progress
@@ -708,6 +709,7 @@ set(TARGET_SRC
     PolygonizeLines.cpp
     PolygonSymbol.cpp
     PowerlineLayer.cpp
+    PrestigeLayer.cpp
     PrimitiveIntersector.cpp
     Profile.cpp
     Progress.cpp

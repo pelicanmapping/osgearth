@@ -25,8 +25,10 @@ namespace osgEarth
      *
      * Assets are keyed by their resolved filename, reader option string, and
      * content-affecting callback, alias, and authentication identities.
-     * The registry keeps weak entries, so an asset is released automatically
-     * when its last ExternalNode goes away. Loading the same filename more
+     * By default the registry keeps weak entries, so an asset is released
+     * automatically when its last ExternalNode goes away. setKeepLoaded(true)
+     * retains loaded assets even after their last reference goes away.
+     * Loading the same filename more
      * than once therefore shares one scene graph and its GPU resources.
      * Caller URIResultCache objects are bypassed so unload releases the graph
      * and reload always reaches the underlying source.
@@ -72,7 +74,17 @@ namespace osgEarth
 
         static ExternalAssetManager& instance();
 
-        /** Snapshot all assets that are currently referenced. This does not
+        /** Retain successfully loaded assets, including their shared instancing
+         *  templates, after their last scene reference goes away. Enabling also
+         *  retains assets that are already loaded; disabling releases retained
+         *  assets that no longer have consumers. Explicit unload calls still
+         *  release the payload. Thread-safe; does not wait for file loads.
+         *  Defaults to false, or true if OSGEARTH_EXTERNAL_ASSETS_KEEP_LOADED=1
+         *  is set before the manager is first accessed. */
+        void setKeepLoaded(bool value);
+        bool getKeepLoaded() const;
+
+        /** Snapshot all assets that are currently referenced or retained. This does not
          *  wait for an in-progress file load; dependency counts are marked
          *  unavailable for that snapshot instead. */
         void getAssets(AssetInfoList& output) const;
@@ -91,18 +103,18 @@ namespace osgEarth
             const std::string& filename,
             const osgDB::Options* options = nullptr);
 
-        /** Reload all currently referenced assets. Returns the number loaded.
+        /** Reload all referenced or retained assets. Returns the number loaded.
          *  Call from the update thread or while scene traversal is idle. */
         unsigned reloadAll();
 
-        /** Unload all currently referenced assets without removing references.
+        /** Unload all referenced or retained assets without removing scene references.
          *  Call from the update thread or while scene traversal is idle. */
         void unloadAll();
 
-        //! Number of assets that are still referenced by ExternalNode objects.
+        //! Number of assets referenced by ExternalNode objects or retained.
         unsigned getNumAssets() const;
 
-        //! Number of referenced assets whose scene graphs are loaded.
+        //! Number of referenced or retained assets whose scene graphs are loaded.
         unsigned getNumLoadedAssets() const;
 
     private:

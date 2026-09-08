@@ -1,0 +1,2033 @@
+﻿/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarthImGui/ImGuiPanel>
+#include <osgEarth/EarthManipulator>
+#include <osgEarth/GeoTransform>
+#include <osgEarth/JsonUtils>
+#include <osgEarth/LineDrawable>
+#include <osgEarth/Registry>
+#include <osgEarth/ShaderGenerator>
+#include <osgEarth/Threading>
+#include <osgEarth/Viewpoint>
+#include <osg/ComputeBoundsVisitor>
+#include <osg/Geode>
+#include <osg/MatrixTransform>
+#include <osg/ShapeDrawable>
+#include <osgDB/FileNameUtils>
+#include <osgDB/FileUtils>
+#include <osgDB/ReadFile>
+#include <osgGA/GUIEventHandler>
+#include <osgUtil/LineSegmentIntersector>
+#include <osgViewer/View>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <limits>
+#include <map>
+#include <mutex>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#include <commdlg.h>
+#include <osgViewer/api/Win32/GraphicsWindowWin32>
+#include <osgDB/ConvertUTF>
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "user32.lib")
+#endif
+
+namespace osgEarth
+{
+    using namespace osgEarth::Util; // Json, EarthManipulator, Viewpoint
+
+    /**
+     * Editor for the Prestige "asset_points.geojson" format: a FeatureCollection
+     * of Point features whose properties reference a GLB/glTF model to instance
+     * at that location:
+     *
+     *   asset_path      model file, relative paths resolve against the project root
+     *   name            display name
+     *   rotation        degrees counter-clockwise around +up (0 = authored orientation)
+     *   scale           uniform scale (1 = native size)
+     *   elevation       meters (default 0)
+     *   elevation_mode  "relative" (default): base sits <elevation> m above the terrain
+     *                   "absolute": <elevation> is meters above the EGM96 geoid
+     *
+     * Placement matches prestige-cpp's instantiateAssetTemplate(): the model is
+     * recentered on the XY center of its bounding box, its base (min Z) is
+     * dropped to the placement height, and rotation/scale apply about that
+     * recentered origin in the local ENU frame.
+     *
+     * Interactions: click a model to select it, drag to move it along the
+     * terrain, Ctrl+drag to rotate, Alt+drag to scale. Files dragged from
+     * Explorer onto the map are added where they are dropped (Windows).
+     */
+    class PrestigeAssetsGUI : public ImGuiPanel
+    {
+    public:
+        PrestigeAssetsGUI() : ImGuiPanel("Prestige Assets")
+        {
+#ifdef _WIN32
+            s_dropInstance() = this;
+#endif
+        }
+
+        void load(const Config& conf) override
+        {
+            conf.get("LastFile", _pathInput);
+            conf.get("ProjectRoot", _projectRootInput);
+            conf.get("EditingEnabled", _editingEnabled);
+            conf.get("ShowGizmo", _showGizmo);
+        }
+
+        void save(Config& conf) override
+        {
+            conf.set("LastFile", _pathInput);
+            conf.set("ProjectRoot", _projectRootInput);
+            conf.set("EditingEnabled", _editingEnabled);
+            conf.set("ShowGizmo", _showGizmo);
+        }
+
+        void draw(osg::RenderInfo& ri) override
+        {
+            if (!isVisible()) return;
+            if (!findNodeOrHide(_mapNode, ri)) return;
+
+            _view = view(ri);
+
+            if (!_root.valid())
+            {
+                _root = new osg::Group();
+                _root->setName("Prestige Assets (editor)");
+            }
+            if (_root->getNumParents() == 0)
+                _mapNode->addChild(_root);
+
+            installEventHandler();
+            installDropTarget(ri);
+
+            // restore the previous session's file the first time the panel shows:
+            if (_autoRestore)
+            {
+                _autoRestore = false;
+                if (_filePath.empty() && !_pathInput.empty() && osgDB::fileExists(_pathInput))
+                {
+                    std::string savedRoot = _projectRootInput;
+                    loadFile(_pathInput);
+                    if (!savedRoot.empty() && savedRoot != _projectRoot)
+                    {
+                        _projectRoot = _projectRootInput = savedRoot;
+                        reresolveModels();
+                    }
+                }
+            }
+
+            processDrops(ri);
+            updateModels();
+
+            ImGui::Begin(name(), visible());
+            {
+                drawFileSection(ri);
+                ImGui::Separator();
+                drawEditSection(ri);
+
+                if (_selected >= 0 && _selected < (int)_assets.size())
+                {
+                    ImGui::Separator();
+                    drawSelectedEditor(ri);
+                }
+
+                ImGui::Separator();
+                drawAssetTable(ri);
+
+                if (!_status.empty())
+                {
+                    ImGui::Separator();
+                    ImGui::TextWrapped("%s", _status.c_str());
+                }
+            }
+            ImGui::End();
+        }
+
+    public:
+
+        // node mask for selection-highlight geometry; excluded when picking.
+        static constexpr unsigned SELECTION_MASK = 0x08000000u;
+
+        struct ModelEntry : public osg::Referenced
+        {
+            std::string absPath;
+            Threading::Future<osg::ref_ptr<osg::Node>> future;
+            osg::ref_ptr<osg::Node> node;
+            osg::BoundingBox bbox;
+            bool pending = true;
+            bool failed = false;
+        };
+
+        struct Asset
+        {
+            // geojson content:
+            std::string name;
+            std::string assetPath;       // as stored in the file (may be relative)
+            double lon = 0.0;
+            double lat = 0.0;
+            double rotation = 0.0;       // degrees CCW around up
+            double scale = 1.0;
+            double elevation = 0.0;
+            bool absolute = false;       // elevation_mode == "absolute"
+            bool writeElevation = false;
+            bool writeElevationMode = false;
+            Json::Value extraProps = Json::Value(Json::objectValue); // preserved verbatim
+
+            // runtime:
+            osg::ref_ptr<GeoTransform> xform;
+            osg::ref_ptr<osg::MatrixTransform> local;
+            osg::ref_ptr<osg::Group> selectionNode;
+            osg::ref_ptr<osg::Group> gizmoNode;             // translate/rotate/scale widgets
+            osg::ref_ptr<osg::MatrixTransform> axisNode[3]; // 0=east 1=north 2=up
+            osg::ref_ptr<osg::MatrixTransform> ringNode;    // heading rotation ring
+            osg::ref_ptr<osg::MatrixTransform> scaleNode;   // uniform scale handle
+            osg::ref_ptr<ModelEntry> model;
+            bool attached = false;
+        };
+
+        //! The assets currently loaded in the editor.
+        const std::vector<Asset>& assets() const { return _assets; }
+
+    private:
+
+        enum DragMode { DRAG_NONE, DRAG_MOVE, DRAG_ROTATE, DRAG_SCALE, DRAG_AXIS, DRAG_RING, DRAG_SCALE_HANDLE };
+
+        // pick classification for PickResult::axis
+        static constexpr int GIZMO_RING = 3;
+        static constexpr int GIZMO_SCALE = 4;
+
+        struct PickResult
+        {
+            int asset = -1;
+            int axis = -1;  // 0=east 1=north 2=up, 3=rotate ring, 4=scale handle, -1=the model
+        };
+
+        class EditHandler : public osgGA::GUIEventHandler
+        {
+        public:
+            EditHandler(PrestigeAssetsGUI* gui) : _gui(gui) { }
+            bool handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& aa) override
+            {
+                return _gui ? _gui->handleEvent(ea, aa) : false;
+            }
+            PrestigeAssetsGUI* _gui;
+        };
+
+        struct Drop
+        {
+            std::vector<std::string> files;
+            float clientX = 0.0f;
+            float clientY = 0.0f;
+        };
+
+        osg::observer_ptr<MapNode> _mapNode;
+        // NOTE: raw pointer on purpose. The viewer is typically stack-allocated
+        // (refcount 0), so an observer_ptr can never lock() it. It is refreshed
+        // every frame in draw() and outlives this panel.
+        osgViewer::View* _view = nullptr;
+        osg::ref_ptr<osg::Group> _root;
+        osg::ref_ptr<EditHandler> _handler;
+        std::vector<Asset> _assets;
+        std::map<std::string, osg::ref_ptr<ModelEntry>> _models;
+        int _selected = -1;
+        bool _dirty = false;
+        bool _editingEnabled = true;
+        bool _autoRestore = true;
+        std::string _filePath;           // currently loaded file
+        std::string _projectRoot;        // base for relative asset_path values
+        std::string _pathInput;          // path text field
+        std::string _projectRootInput;   // project root text field
+        std::string _status;
+        Json::Value _docExtras = Json::Value(Json::objectValue);   // extra top-level members
+        std::vector<Json::Value> _foreignFeatures;                 // non-point features, kept verbatim
+
+        // in-scene drag state:
+        DragMode _dragMode = DRAG_NONE;
+        int _dragAsset = -1;
+        int _dragAxis = -1;
+        float _pressX = 0.0f, _pressY = 0.0f;
+        double _startLon = 0.0, _startLat = 0.0, _startRotation = 0.0, _startScale = 1.0;
+        double _startElevation = 0.0;
+        osg::Vec3d _axisOrigin, _axisDir;
+        osg::Vec3d _enuEast, _enuNorth, _enuUp;
+        double _axisT0 = 0.0;
+        double _ringAngle0 = 0.0;
+        bool _showGizmo = true;
+
+        // drag-and-drop from the OS:
+        std::mutex _dropMutex;
+        std::vector<Drop> _drops;
+        bool _dropInstalled = false;
+
+        //-------------------------------------------------------------------
+        // UI sections
+
+        void drawFileSection(osg::RenderInfo& ri)
+        {
+            ImGui::TextDisabled("GeoJSON file:");
+
+            if (ImGui::Button("Open..."))
+            {
+#ifdef _WIN32
+                std::string file = fileDialog(false, L"GeoJSON (*.geojson;*.json)\0*.geojson;*.json\0All files (*.*)\0*.*\0", L"geojson");
+                if (!file.empty())
+                {
+                    _pathInput = file;
+                    loadFile(file);
+                }
+#else
+                if (!_pathInput.empty())
+                    loadFile(_pathInput);
+#endif
+                dirtySettings();
+            }
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(_filePath.empty());
+            if (ImGui::Button("Save"))
+            {
+                saveFile(_filePath);
+            }
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(_assets.empty() && _filePath.empty());
+            if (ImGui::Button("Save As..."))
+            {
+#ifdef _WIN32
+                std::string file = fileDialog(true, L"GeoJSON (*.geojson;*.json)\0*.geojson;*.json\0All files (*.*)\0*.*\0", L"geojson");
+                if (!file.empty())
+                {
+                    if (saveFile(file))
+                        _pathInput = file;
+                }
+#else
+                if (!_pathInput.empty() && saveFile(_pathInput))
+                    ;
+#endif
+                dirtySettings();
+            }
+            ImGui::EndDisabled();
+
+            if (_dirty)
+            {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.0f, 1.0f), "(unsaved changes)");
+            }
+
+            // editable path field + manual load, for typing paths directly:
+            ImGui::SetNextItemWidth(-70.0f);
+            inputText("##filepath", _pathInput);
+            ImGui::SameLine();
+            if (ImGui::Button("Load"))
+            {
+                loadFile(_pathInput);
+                dirtySettings();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Load the geojson file entered in the text box");
+
+            // project root:
+            ImGui::TextDisabled("Project root (for relative asset paths):");
+            ImGui::SetNextItemWidth(-70.0f);
+            inputText("##projroot", _projectRootInput);
+            ImGui::SameLine();
+            if (ImGui::Button("Apply"))
+            {
+                _projectRoot = osgDB::convertFileNameToUnixStyle(_projectRootInput);
+                reresolveModels();
+                dirtySettings();
+            }
+        }
+
+        void drawEditSection(osg::RenderInfo& ri)
+        {
+            if (ImGui::Checkbox("Enable editing in the scene", &_editingEnabled))
+                dirtySettings();
+
+            ImGui::SameLine(0.0f, 20.0f);
+            if (ImGui::Checkbox("Move arrows", &_showGizmo))
+            {
+                refreshSelectionGraphics();
+                dirtySettings();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Show edit widgets on the selected model:\narrows = move (blue = elevation), orange ring = rotate, purple cube = scale.");
+
+            ImGui::SameLine(0.0f, 20.0f);
+            if (ImGui::Button("Add model..."))
+            {
+#ifdef _WIN32
+                std::string file = fileDialog(false,
+                    L"3D models\0*.glb;*.gltf;*.obj;*.osgb;*.osgt;*.osg;*.ive;*.fbx;*.dae;*.3ds\0All files (*.*)\0*.*\0",
+                    nullptr);
+                if (!file.empty())
+                {
+                    GeoPoint p = pointAtViewportCenter(ri);
+                    if (p.isValid())
+                        addAssetAt(file, p);
+                    else
+                        setStatus("Could not find terrain at the center of the view - move the camera and try again.");
+                }
+#else
+                setStatus("Drag and drop a model file onto the map to add it.");
+#endif
+            }
+
+            ImGui::TextWrapped("Click a model to select it, then drag it to move it along the terrain.");
+            ImGui::TextWrapped("Widgets: red/green/blue arrows = move east/north/up, orange ring = rotate, purple cube = scale.");
+            ImGui::TextWrapped("Drop model files onto the map to add them. Esc = cancel drag / deselect. Del = delete.");
+        }
+
+        void drawSelectedEditor(osg::RenderInfo& ri)
+        {
+            Asset& a = _assets[_selected];
+
+            ImGui::Text("Selected: %s", a.name.c_str());
+
+            if (ImGuiLTable::Begin("selectedAsset"))
+            {
+                labelRow("Name");
+                if (inputText("##name", a.name))
+                {
+                    if (a.xform.valid())
+                        a.xform->setName(a.name);
+                    markDirty();
+                }
+
+                labelRow("Model");
+                ImGui::TextWrapped("%s", a.assetPath.c_str());
+                if (ImGui::IsItemHovered() && a.model.valid())
+                    ImGui::SetTooltip("%s", a.model->absPath.c_str());
+
+                if (a.model.valid() && a.model->failed)
+                {
+                    labelRow("Status");
+                    ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "failed to load (placeholder shown)");
+                }
+                else if (a.model.valid() && a.model->pending)
+                {
+                    labelRow("Status");
+                    ImGui::TextDisabled("loading...");
+                }
+
+                labelRow("Longitude");
+                double lon = a.lon;
+                if (ImGui::InputDouble("##lon", &lon, 0.0, 0.0, "%.9f"))
+                {
+                    a.lon = lon;
+                    applyPosition(a);
+                    markDirty();
+                }
+
+                labelRow("Latitude");
+                double lat = a.lat;
+                if (ImGui::InputDouble("##lat", &lat, 0.0, 0.0, "%.9f"))
+                {
+                    a.lat = clampBetween(lat, -90.0, 90.0);
+                    applyPosition(a);
+                    markDirty();
+                }
+
+                labelRow("Rotation");
+                float rot = (float)a.rotation;
+                if (ImGui::DragFloat("##rotation", &rot, 0.25f, 0.0f, 0.0f, "%.2f deg CCW"))
+                {
+                    a.rotation = normalizeDegrees((double)rot);
+                    applyLocalMatrix(a);
+                    markDirty();
+                }
+
+                labelRow("Scale");
+                float scale = (float)a.scale;
+                if (ImGui::DragFloat("##scale", &scale, std::max(0.0001f, scale * 0.01f), 1.0e-6f, 1.0e8f, "%.6g", ImGuiSliderFlags_Logarithmic))
+                {
+                    if (scale > 0.0f)
+                    {
+                        a.scale = (double)scale;
+                        applyLocalMatrix(a);
+                        markDirty();
+                    }
+                }
+
+                labelRow("Elevation");
+                double elev = a.elevation;
+                if (ImGui::InputDouble("##elev", &elev, 0.0, 0.0, "%.3f"))
+                {
+                    a.elevation = elev;
+                    a.writeElevation = true;
+                    applyPosition(a);
+                    markDirty();
+                }
+
+                labelRow("Elev. mode");
+                int mode = a.absolute ? 1 : 0;
+                if (ImGui::Combo("##elevmode", &mode, "relative to terrain\0absolute (EGM96 meters)\0"))
+                {
+                    bool nowAbsolute = (mode == 1);
+                    if (nowAbsolute != a.absolute)
+                    {
+                        // convert the elevation value so the model stays put:
+                        convertElevationMode(a, nowAbsolute);
+                        a.absolute = nowAbsolute;
+                        a.writeElevationMode = true;
+                        applyPosition(a);
+                        markDirty();
+                    }
+                }
+
+                ImGuiLTable::End();
+            }
+
+            if (ImGui::Button("Zoom to"))
+                zoomTo(a);
+
+            ImGui::SameLine();
+            if (ImGui::Button("Duplicate"))
+                duplicateAsset(_selected);
+
+            ImGui::SameLine();
+            if (ImGui::Button("Delete"))
+                deleteAsset(_selected);
+
+            ImGui::SameLine();
+            if (ImGui::Button("Deselect"))
+                selectAsset(-1);
+        }
+
+        void drawAssetTable(osg::RenderInfo& ri)
+        {
+            ImGui::Text("Assets (%d)", (int)_assets.size());
+
+            const ImGuiTableFlags flags =
+                ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+
+            float height = std::min(300.0f, 60.0f + (float)_assets.size() * ImGui::GetTextLineHeightWithSpacing());
+
+            if (ImGui::BeginTable("assetTable", 4, flags, ImVec2(0, height)))
+            {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 3.0f);
+                ImGui::TableSetupColumn("Rotation", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableSetupColumn("Scale", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableHeadersRow();
+
+                for (int i = 0; i < (int)_assets.size(); ++i)
+                {
+                    Asset& a = _assets[i];
+                    ImGui::PushID(i);
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+
+                    bool selected = (i == _selected);
+                    if (ImGui::Selectable(a.name.c_str(), selected,
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
+                    {
+                        selectAsset(i);
+                        if (ImGui::IsMouseDoubleClicked(0))
+                            zoomTo(a);
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s\nDouble-click to zoom", a.assetPath.c_str());
+
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.2f", a.rotation);
+
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.5g", a.scale);
+
+                    ImGui::TableNextColumn();
+                    if (a.model.valid() && a.model->failed)
+                        ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "missing");
+                    else if (a.model.valid() && a.model->pending)
+                        ImGui::TextDisabled("loading");
+                    else
+                        ImGui::TextDisabled("ok");
+
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+        }
+
+        //-------------------------------------------------------------------
+        // small ImGui helpers
+
+        static void labelRow(const char* label)
+        {
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(label);
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-1);
+        }
+
+        static bool inputText(const char* id, std::string& value)
+        {
+            char buf[2048];
+            snprintf(buf, sizeof(buf), "%s", value.c_str());
+            if (ImGui::InputText(id, buf, sizeof(buf)))
+            {
+                value = buf;
+                return true;
+            }
+            return false;
+        }
+
+        void setStatus(const std::string& msg)
+        {
+            _status = msg;
+        }
+
+        void markDirty()
+        {
+            _dirty = true;
+        }
+
+        //-------------------------------------------------------------------
+        // math / path helpers
+
+        static double clampBetween(double v, double lo, double hi)
+        {
+            return v < lo ? lo : v > hi ? hi : v;
+        }
+
+        static double normalizeDegrees(double deg)
+        {
+            while (deg > 180.0) deg -= 360.0;
+            while (deg < -180.0) deg += 360.0;
+            return deg;
+        }
+
+        static bool startsWithNoCase(const std::string& s, const std::string& prefix)
+        {
+            if (s.size() < prefix.size()) return false;
+            for (size_t i = 0; i < prefix.size(); ++i)
+                if (::tolower((unsigned char)s[i]) != ::tolower((unsigned char)prefix[i]))
+                    return false;
+            return true;
+        }
+
+        // The Prestige convention keeps asset_points.geojson in <root>/assets/,
+        // with asset_path values relative to <root>.
+        static std::string defaultProjectRoot(const std::string& geojsonPath)
+        {
+            std::string dir = osgDB::convertFileNameToUnixStyle(osgDB::getFilePath(geojsonPath));
+            if (ciEquals(osgDB::getSimpleFileName(dir), "assets"))
+                return osgDB::getFilePath(dir);
+            return dir;
+        }
+
+        std::string resolveAssetPath(const std::string& assetPath) const
+        {
+            std::string p = osgDB::convertFileNameToUnixStyle(assetPath);
+            if (!osgDB::isAbsolutePath(p) && !_projectRoot.empty())
+                p = osgDB::concatPaths(_projectRoot, p);
+            return p;
+        }
+
+        std::string toStoredPath(const std::string& absPath) const
+        {
+            std::string abs = osgDB::convertFileNameToUnixStyle(absPath);
+            if (!_projectRoot.empty())
+            {
+                std::string root = osgDB::convertFileNameToUnixStyle(_projectRoot);
+                if (!root.empty() && root[root.size() - 1] != '/')
+                    root += "/";
+                if (startsWithNoCase(abs, root))
+                    return abs.substr(root.size());
+            }
+            return abs;
+        }
+
+        static bool isModelFile(const std::string& path)
+        {
+            static const std::set<std::string> exts = {
+                "glb", "gltf", "obj", "osgb", "osgt", "osg", "ive", "fbx", "dae", "3ds", "lwo", "flt"
+            };
+            return exts.count(osgDB::getLowerCaseFileExtension(path)) > 0;
+        }
+
+        std::string uniqueName(const std::string& base) const
+        {
+            std::set<std::string> names;
+            for (const auto& a : _assets)
+                names.insert(a.name);
+            if (names.count(base) == 0)
+                return base;
+            for (int i = 1; ; ++i)
+            {
+                std::string candidate = base + "_" + std::to_string(i);
+                if (names.count(candidate) == 0)
+                    return candidate;
+            }
+        }
+
+        //-------------------------------------------------------------------
+        // JSON I/O
+
+        static double numberOr(const Json::Value& v, double fallback)
+        {
+            if (v.isNumeric()) return v.asDouble();
+            if (v.isString())
+            {
+                const std::string s = v.asString();
+                char* end = nullptr;
+                double d = strtod(s.c_str(), &end);
+                if (end && end != s.c_str()) return d;
+            }
+            return fallback;
+        }
+
+    public:
+        //! Loads a Prestige asset_points geojson file into the editor.
+        bool loadFile(const std::string& inPath)
+        {
+            std::string path = Strings::trim(inPath);
+            if (path.empty())
+            {
+                setStatus("Enter a geojson file path first.");
+                return false;
+            }
+
+            std::ifstream in(path.c_str(), std::ios::binary);
+            if (!in)
+            {
+                setStatus("Failed to open: " + path);
+                return false;
+            }
+            std::stringstream buffer;
+            buffer << in.rdbuf();
+
+            Json::Reader reader;
+            Json::Value doc;
+            if (!reader.parse(buffer.str(), doc) || !doc.isObject())
+            {
+                setStatus("Not valid JSON: " + path);
+                return false;
+            }
+
+            clearAssets();
+
+            _filePath = path;
+            _projectRoot = defaultProjectRoot(path);
+            _pathInput = path;
+            _projectRootInput = _projectRoot;
+
+            _docExtras = Json::Value(Json::objectValue);
+            for (const auto& member : doc.getMemberNames())
+            {
+                if (member != "type" && member != "features")
+                    _docExtras[member] = doc[member];
+            }
+
+            const Json::Value& features = doc["features"];
+            if (features.isArray())
+            {
+                for (Json::Value::ArrayIndex i = 0; i < features.size(); ++i)
+                {
+                    const Json::Value& f = features[i];
+                    const Json::Value& geom = f["geometry"];
+
+                    bool isPoint =
+                        geom.isObject() &&
+                        geom["type"].isString() && geom["type"].asString() == "Point" &&
+                        geom["coordinates"].isArray() && geom["coordinates"].size() >= 2;
+
+                    if (!isPoint)
+                    {
+                        // preserved and re-written verbatim on save.
+                        _foreignFeatures.push_back(f);
+                        continue;
+                    }
+
+                    Asset a;
+                    a.lon = numberOr(geom["coordinates"][0u], 0.0);
+                    a.lat = numberOr(geom["coordinates"][1u], 0.0);
+
+                    const Json::Value& props = f["properties"];
+                    if (props.isObject())
+                    {
+                        if (props["name"].isString()) a.name = props["name"].asString();
+                        if (props["asset_path"].isString()) a.assetPath = props["asset_path"].asString();
+                        if (props.isMember("rotation")) a.rotation = numberOr(props["rotation"], 0.0);
+                        if (props.isMember("scale")) a.scale = numberOr(props["scale"], 1.0);
+                        if (props.isMember("elevation"))
+                        {
+                            a.elevation = numberOr(props["elevation"], 0.0);
+                            a.writeElevation = true;
+                        }
+                        if (props.isMember("elevation_mode"))
+                        {
+                            a.absolute = props["elevation_mode"].isString() &&
+                                props["elevation_mode"].asString() == "absolute";
+                            a.writeElevationMode = true;
+                        }
+
+                        for (const auto& key : props.getMemberNames())
+                        {
+                            if (key != "name" && key != "asset_path" && key != "rotation" &&
+                                key != "scale" && key != "elevation" && key != "elevation_mode")
+                            {
+                                a.extraProps[key] = props[key];
+                            }
+                        }
+                    }
+
+                    if (a.name.empty())
+                    {
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "Asset_%05d", (int)i);
+                        a.name = buf;
+                    }
+
+                    _assets.push_back(a);
+                }
+            }
+
+            for (auto& a : _assets)
+                buildAssetNode(a);
+
+            _selected = -1;
+            _dirty = false;
+            setStatus("Loaded " + std::to_string(_assets.size()) + " asset(s) from " + path);
+            return true;
+        }
+
+    private:
+        // shortest numeric representation that round-trips exactly, preferring
+        // plain decimal notation, with a trailing ".0" so whole numbers still
+        // read as doubles (matches the original file's style).
+        static std::string jsonNumber(double v)
+        {
+            if (v != v) return "0.0"; // NaN guard
+            char buf[400] = { 0 };
+            std::string best;
+            for (int prec = 1; prec <= 17; ++prec)
+            {
+                snprintf(buf, sizeof(buf), "%.*g", prec, v);
+                if (strtod(buf, nullptr) == v)
+                {
+                    best = buf;
+                    break;
+                }
+            }
+            if (best.empty())
+                best = "0.0";
+
+            // %g may pick exponent form (9e+01); prefer a plain decimal form
+            // when one of similar length also round-trips.
+            if (best.find_first_of("eE") != std::string::npos)
+            {
+                for (int dec = 0; dec <= 17; ++dec)
+                {
+                    snprintf(buf, sizeof(buf), "%.*f", dec, v);
+                    if (strtod(buf, nullptr) == v)
+                    {
+                        std::string plain(buf);
+                        if (plain.size() <= best.size() + 6)
+                            best = plain;
+                        break;
+                    }
+                }
+            }
+
+            if (best.find_first_of(".eE") == std::string::npos)
+                best += ".0";
+            return best;
+        }
+
+        static std::string compactJson(const Json::Value& v)
+        {
+            Json::FastWriter writer;
+            std::string s = writer.write(v);
+            while (!s.empty() && (s[s.size() - 1] == '\n' || s[s.size() - 1] == '\r' || s[s.size() - 1] == ' '))
+                s.erase(s.size() - 1);
+            return s;
+        }
+
+        void writeFeature(std::ostream& out, const Asset& a) const
+        {
+            out << "    {\n";
+            out << "      \"type\": \"Feature\",\n";
+            out << "      \"properties\": {\n";
+
+            std::vector<std::string> lines;
+            lines.push_back(std::string("\"name\": ") + Json::valueToQuotedString(a.name.c_str()));
+            lines.push_back(std::string("\"asset_path\": ") + Json::valueToQuotedString(a.assetPath.c_str()));
+            lines.push_back(std::string("\"rotation\": ") + jsonNumber(a.rotation));
+            lines.push_back(std::string("\"scale\": ") + jsonNumber(a.scale));
+            if (a.writeElevationMode || a.absolute)
+                lines.push_back(std::string("\"elevation_mode\": \"") + (a.absolute ? "absolute" : "relative") + "\"");
+            if (a.writeElevation || a.elevation != 0.0)
+                lines.push_back(std::string("\"elevation\": ") + jsonNumber(a.elevation));
+            for (const auto& key : a.extraProps.getMemberNames())
+                lines.push_back(std::string(Json::valueToQuotedString(key.c_str())) + ": " + compactJson(a.extraProps[key]));
+
+            for (size_t i = 0; i < lines.size(); ++i)
+                out << "        " << lines[i] << (i + 1 < lines.size() ? "," : "") << "\n";
+
+            out << "      },\n";
+            out << "      \"geometry\": {\n";
+            out << "        \"type\": \"Point\",\n";
+            out << "        \"coordinates\": [\n";
+            out << "          " << jsonNumber(a.lon) << ",\n";
+            out << "          " << jsonNumber(a.lat) << "\n";
+            out << "        ]\n";
+            out << "      }\n";
+            out << "    }";
+        }
+
+    public:
+        //! Writes the current assets to a geojson file in the Prestige format.
+        bool saveFile(const std::string& inPath)
+        {
+            std::string path = Strings::trim(inPath);
+            if (path.empty())
+            {
+                setStatus("Enter a file path to save to.");
+                return false;
+            }
+
+            std::ostringstream out;
+            out << "{\n";
+            out << "  \"type\": \"FeatureCollection\",\n";
+
+            for (const auto& member : _docExtras.getMemberNames())
+                out << "  " << Json::valueToQuotedString(member.c_str()) << ": " << compactJson(_docExtras[member]) << ",\n";
+
+            out << "  \"features\": [\n";
+
+            bool first = true;
+            for (const auto& a : _assets)
+            {
+                if (!first) out << ",\n";
+                writeFeature(out, a);
+                first = false;
+            }
+            for (const auto& f : _foreignFeatures)
+            {
+                if (!first) out << ",\n";
+                out << "    " << compactJson(f);
+                first = false;
+            }
+            if (!first) out << "\n";
+
+            out << "  ]\n";
+            out << "}\n";
+
+            std::ofstream file(path.c_str(), std::ios::binary | std::ios::trunc);
+            if (!file)
+            {
+                setStatus("Failed to write: " + path);
+                return false;
+            }
+            file << out.str();
+            file.close();
+
+            _filePath = path;
+            _dirty = false;
+            setStatus("Saved " + std::to_string(_assets.size()) + " asset(s) to " + path);
+            return true;
+        }
+
+    private:
+        //-------------------------------------------------------------------
+        // scene management
+
+        void clearAssets()
+        {
+            if (_root.valid())
+                _root->removeChildren(0, _root->getNumChildren());
+            _assets.clear();
+            _foreignFeatures.clear();
+            _docExtras = Json::Value(Json::objectValue);
+            _selected = -1;
+            _dragAsset = -1;
+            _dragMode = DRAG_NONE;
+        }
+
+        // Model files can be hundreds of MB each and decode multi-GB texture
+        // buffers transiently; a narrow dedicated pool keeps the peak memory
+        // (and disk churn) bounded while still loading in the background.
+        static jobs::context& loadContext()
+        {
+            static jobs::context s = []()
+                {
+                    jobs::context c;
+                    auto* pool = jobs::get_pool("oe.prestige_assets");
+                    pool->set_concurrency(2);
+                    c.pool = pool;
+                    return c;
+                }();
+            return s;
+        }
+
+        ModelEntry* getOrLoadModel(const std::string& absPath)
+        {
+            auto it = _models.find(absPath);
+            if (it != _models.end())
+                return it->second.get();
+
+            osg::ref_ptr<ModelEntry> entry = new ModelEntry();
+            entry->absPath = absPath;
+
+            if (!osgDB::fileExists(absPath))
+            {
+                entry->pending = false;
+                entry->failed = true;
+                OE_WARN << "[PrestigeAssets] Model file not found: " << absPath << std::endl;
+            }
+            else
+            {
+                entry->future = jobs::dispatch([absPath](Cancelable& c)
+                    {
+                        // GLB loads decode large texture buffers; anything thrown
+                        // here (e.g. bad_alloc) must not escape the job thread.
+                        // NOTE: shader generation runs on the main thread when the
+                        // model is attached - it is not safe to run concurrently.
+                        osg::ref_ptr<osg::Node> node;
+                        try
+                        {
+                            node = osgDB::readRefNodeFile(absPath);
+                        }
+                        catch (const std::exception& e)
+                        {
+                            OE_WARN << "[PrestigeAssets] Exception loading " << absPath << ": " << e.what() << std::endl;
+                            node = nullptr;
+                        }
+                        catch (...)
+                        {
+                            OE_WARN << "[PrestigeAssets] Unknown exception loading " << absPath << std::endl;
+                            node = nullptr;
+                        }
+                        return node;
+                    },
+                    loadContext());
+            }
+
+            _models[absPath] = entry;
+            return entry.get();
+        }
+
+        void buildAssetNode(Asset& a)
+        {
+            a.xform = new GeoTransform();
+            a.xform->setName(a.name);
+            if (_mapNode.valid())
+                a.xform->setTerrain(_mapNode->getTerrain());
+
+            a.local = new osg::MatrixTransform();
+            a.xform->addChild(a.local);
+
+            a.model = getOrLoadModel(resolveAssetPath(a.assetPath));
+            a.attached = false;
+
+            if (_root.valid())
+                _root->addChild(a.xform);
+
+            applyPosition(a);
+            applyLocalMatrix(a);
+        }
+
+        void reresolveModels()
+        {
+            for (auto& a : _assets)
+            {
+                a.model = getOrLoadModel(resolveAssetPath(a.assetPath));
+                a.attached = false;
+                if (a.local.valid())
+                    a.local->removeChildren(0, a.local->getNumChildren());
+                a.selectionNode = nullptr;
+            }
+        }
+
+        void updateModels()
+        {
+            for (auto& kv : _models)
+            {
+                ModelEntry* e = kv.second.get();
+                if (e->pending && e->future.available())
+                {
+                    e->node = e->future.value();
+                    if (e->node.valid())
+                    {
+                        // main thread: safe to run the (stateful) shader generator.
+                        Registry::shaderGenerator().run(e->node.get());
+
+                        osg::ComputeBoundsVisitor cbv;
+                        e->node->accept(cbv);
+                        e->bbox = cbv.getBoundingBox();
+                        if (!e->bbox.valid())
+                            e->failed = true;
+                    }
+                    else
+                    {
+                        e->failed = true;
+                        OE_WARN << "[PrestigeAssets] Failed to load model: " << e->absPath << std::endl;
+                    }
+                    e->pending = false;
+                }
+            }
+
+            for (auto& a : _assets)
+            {
+                if (!a.attached && a.model.valid() && !a.model->pending)
+                    attachModel(a);
+            }
+        }
+
+        osg::BoundingBox assetBBox(const Asset& a) const
+        {
+            if (a.model.valid() && !a.model->pending && !a.model->failed && a.model->bbox.valid())
+                return a.model->bbox;
+            // placeholder box bounds:
+            return osg::BoundingBox(-5.0f, -5.0f, 0.0f, 5.0f, 5.0f, 10.0f);
+        }
+
+        void attachModel(Asset& a)
+        {
+            if (!a.local.valid()) return;
+
+            a.local->removeChildren(0, a.local->getNumChildren());
+
+            if (a.model.valid() && a.model->node.valid() && !a.model->failed)
+                a.local->addChild(a.model->node.get());
+            else
+                a.local->addChild(makeMissingPlaceholder());
+
+            a.selectionNode = makeSelectionBox(assetBBox(a));
+            a.local->addChild(a.selectionNode.get());
+
+            buildGizmo(a);
+
+            a.attached = true;
+            applyLocalMatrix(a);
+            refreshSelectionGraphics();
+        }
+
+        static osg::Node* makeMissingPlaceholder()
+        {
+            osg::ShapeDrawable* sd = new osg::ShapeDrawable(
+                new osg::Box(osg::Vec3(0.0f, 0.0f, 5.0f), 10.0f, 10.0f, 10.0f));
+            sd->setColor(osg::Vec4(1.0f, 0.25f, 0.25f, 1.0f));
+            osg::Geode* geode = new osg::Geode();
+            geode->addDrawable(sd);
+            Registry::shaderGenerator().run(geode);
+            return geode;
+        }
+
+        // unit-length +Z arrow (shaft + cone tip), shared per axis color.
+        static osg::Node* sharedArrow(int axis)
+        {
+            static osg::ref_ptr<osg::Node> s_arrows[3];
+            if (!s_arrows[axis].valid())
+            {
+                static const osg::Vec4 colors[3] = {
+                    osg::Vec4(0.95f, 0.2f, 0.2f, 1.0f),   // east - red
+                    osg::Vec4(0.2f, 0.85f, 0.2f, 1.0f),   // north - green
+                    osg::Vec4(0.25f, 0.5f, 1.0f, 1.0f) }; // up - blue
+
+                osg::ShapeDrawable* shaft = new osg::ShapeDrawable(
+                    new osg::Cylinder(osg::Vec3(0.0f, 0.0f, 0.4f), 0.02f, 0.8f));
+                shaft->setColor(colors[axis]);
+                osg::ShapeDrawable* tip = new osg::ShapeDrawable(
+                    new osg::Cone(osg::Vec3(0.0f, 0.0f, 0.85f), 0.06f, 0.3f));
+                tip->setColor(colors[axis]);
+
+                osg::Geode* geode = new osg::Geode();
+                geode->addDrawable(shaft);
+                geode->addDrawable(tip);
+                Registry::shaderGenerator().run(geode);
+                s_arrows[axis] = geode;
+            }
+            return s_arrows[axis].get();
+        }
+
+        // unit-radius flat annulus in the XY plane (heading rotation ring).
+        static osg::Node* sharedRing()
+        {
+            static osg::ref_ptr<osg::Node> s_ring;
+            if (!s_ring.valid())
+            {
+                const int segments = 48;
+                const float outer = 1.0f, inner = 0.8f, z = 0.02f;
+
+                osg::Vec3Array* verts = new osg::Vec3Array();
+                verts->reserve((segments + 1) * 2);
+                for (int i = 0; i <= segments; ++i)
+                {
+                    float angle = (float)(2.0 * osg::PI * (double)i / (double)segments);
+                    float c = cosf(angle), s = sinf(angle);
+                    verts->push_back(osg::Vec3(c * outer, s * outer, z));
+                    verts->push_back(osg::Vec3(c * inner, s * inner, z));
+                }
+
+                osg::Geometry* geom = new osg::Geometry();
+                geom->setVertexArray(verts);
+                osg::Vec3Array* normals = new osg::Vec3Array();
+                normals->push_back(osg::Vec3(0, 0, 1));
+                geom->setNormalArray(normals, osg::Array::BIND_OVERALL);
+                osg::Vec4Array* colors = new osg::Vec4Array();
+                colors->push_back(osg::Vec4(1.0f, 0.55f, 0.1f, 1.0f)); // orange
+                geom->setColorArray(colors, osg::Array::BIND_OVERALL);
+                geom->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLE_STRIP, 0, (GLsizei)verts->size()));
+
+                osg::Geode* geode = new osg::Geode();
+                geode->addDrawable(geom);
+                Registry::shaderGenerator().run(geode);
+                s_ring = geode;
+            }
+            return s_ring.get();
+        }
+
+        // unit-length diagonal stalk with a cube tip (uniform scale handle).
+        static osg::Node* sharedScaleHandle()
+        {
+            static osg::ref_ptr<osg::Node> s_handle;
+            if (!s_handle.valid())
+            {
+                const osg::Vec4 color(0.75f, 0.3f, 0.95f, 1.0f); // purple
+                osg::ShapeDrawable* stalk = new osg::ShapeDrawable(
+                    new osg::Cylinder(osg::Vec3(0.0f, 0.0f, 0.44f), 0.015f, 0.88f));
+                stalk->setColor(color);
+                osg::ShapeDrawable* cube = new osg::ShapeDrawable(
+                    new osg::Box(osg::Vec3(0.0f, 0.0f, 0.94f), 0.12f));
+                cube->setColor(color);
+
+                osg::Geode* geode = new osg::Geode();
+                geode->addDrawable(stalk);
+                geode->addDrawable(cube);
+                Registry::shaderGenerator().run(geode);
+                s_handle = geode;
+            }
+            return s_handle.get();
+        }
+
+        void buildGizmo(Asset& a)
+        {
+            if (a.gizmoNode.valid() || !a.xform.valid())
+                return;
+            a.gizmoNode = new osg::Group();
+            for (int k = 0; k < 3; ++k)
+            {
+                a.axisNode[k] = new osg::MatrixTransform();
+                a.axisNode[k]->addChild(sharedArrow(k));
+                a.gizmoNode->addChild(a.axisNode[k].get());
+            }
+            a.ringNode = new osg::MatrixTransform();
+            a.ringNode->addChild(sharedRing());
+            a.gizmoNode->addChild(a.ringNode.get());
+
+            a.scaleNode = new osg::MatrixTransform();
+            a.scaleNode->addChild(sharedScaleHandle());
+            a.gizmoNode->addChild(a.scaleNode.get());
+
+            a.gizmoNode->setNodeMask(0); // off until selected
+            // sibling of the model transform so the widgets stay ENU-aligned and
+            // unaffected by the model's rotation/scale.
+            a.xform->addChild(a.gizmoNode.get());
+        }
+
+        // Arrows must clear the model so their tips stay grabbable: longer than
+        // both the displayed height and the footprint radius.
+        double gizmoLength(const Asset& a) const
+        {
+            osg::BoundingBox bb = assetBBox(a);
+            double height = ((double)bb.zMax() - (double)bb.zMin()) * a.scale * 1.15;
+            double horiz = (double)bb.radius() * a.scale * 0.9;
+            return clampBetween(std::max(height, horiz), 8.0, 250.0);
+        }
+
+        // The rotation ring hugs the model's footprint like a turntable.
+        double gizmoRingRadius(const Asset& a) const
+        {
+            osg::BoundingBox bb = assetBBox(a);
+            double dx = (double)bb.xMax() - (double)bb.xMin();
+            double dy = (double)bb.yMax() - (double)bb.yMin();
+            double halfDiag = 0.5 * std::sqrt(dx * dx + dy * dy);
+            return clampBetween(halfDiag * a.scale * 1.15, 6.0, 200.0);
+        }
+
+        void updateGizmoSize(Asset& a)
+        {
+            if (!a.axisNode[0].valid()) return;
+            double len = gizmoLength(a);
+            osg::Matrixd S = osg::Matrixd::scale(len, len, len);
+            a.axisNode[0]->setMatrix(S * osg::Matrixd::rotate(osg::PI_2, osg::Vec3d(0, 1, 0)));  // +Z -> +X (east)
+            a.axisNode[1]->setMatrix(S * osg::Matrixd::rotate(-osg::PI_2, osg::Vec3d(1, 0, 0))); // +Z -> +Y (north)
+            a.axisNode[2]->setMatrix(S);                                                          // up
+
+            if (a.ringNode.valid())
+            {
+                double r = gizmoRingRadius(a);
+                a.ringNode->setMatrix(osg::Matrixd::scale(r, r, r));
+            }
+            if (a.scaleNode.valid())
+            {
+                // diagonal (east+north+up) stalk with the cube tip clear of the model
+                a.scaleNode->setMatrix(
+                    osg::Matrixd::scale(len, len, len) *
+                    osg::Matrixd::rotate(osg::Vec3d(0, 0, 1), osg::Vec3d(1, 1, 1)));
+            }
+        }
+
+        static osg::Group* makeSelectionBox(const osg::BoundingBox& bb)
+        {
+            LineDrawable* lines = new LineDrawable(GL_LINES);
+            static const int edges[24] = {
+                0,1, 1,3, 3,2, 2,0,   // bottom
+                4,5, 5,7, 7,6, 6,4,   // top
+                0,4, 1,5, 2,6, 3,7 }; // verticals
+            for (int i = 0; i < 24; ++i)
+                lines->pushVertex(bb.corner(edges[i]));
+            lines->setColor(osg::Vec4(1.0f, 0.9f, 0.1f, 1.0f));
+            lines->setLineWidth(2.0f);
+            lines->finish();
+
+            osg::Group* group = new osg::Group();
+            group->addChild(lines);
+            group->setNodeMask(0); // off until selected
+            return group;
+        }
+
+        void refreshSelectionGraphics()
+        {
+            for (int i = 0; i < (int)_assets.size(); ++i)
+            {
+                if (_assets[i].selectionNode.valid())
+                    _assets[i].selectionNode->setNodeMask(i == _selected ? SELECTION_MASK : 0u);
+                if (_assets[i].gizmoNode.valid())
+                    _assets[i].gizmoNode->setNodeMask((i == _selected && _showGizmo) ? ~SELECTION_MASK : 0u);
+            }
+        }
+
+        void selectAsset(int index)
+        {
+            _selected = index;
+            refreshSelectionGraphics();
+        }
+
+        // When switching elevation modes, recompute the elevation value from the
+        // asset's current resolved position so it stays visually in place.
+        void convertElevationMode(Asset& a, bool toAbsolute)
+        {
+            if (!_mapNode.valid() || !a.xform.valid())
+                return;
+
+            const SpatialReference* mapSRS = _mapNode->getMapSRS();
+            GeoPoint current;
+            if (!current.fromWorld(mapSRS, a.xform->getMatrix().getTrans()) || !current.isValid())
+                return;
+
+            if (toAbsolute)
+            {
+                // absolute elevations are EGM96 (MSL) meters:
+                const SpatialReference* egm96 = SpatialReference::get("wgs84", "egm96");
+                if (egm96)
+                {
+                    GeoPoint msl = current.transform(egm96);
+                    if (msl.isValid())
+                    {
+                        a.elevation = msl.alt();
+                        a.writeElevation = true;
+                    }
+                }
+            }
+            else
+            {
+                // relative elevations are meters above the terrain:
+                double terrainHAE = 0.0;
+                osg::ref_ptr<Terrain> terrain = _mapNode->getTerrain();
+                if (terrain.valid() &&
+                    terrain->getHeight(mapSRS->getGeographicSRS(), a.lon, a.lat, nullptr, &terrainHAE))
+                {
+                    GeoPoint geo = current.transform(mapSRS->getGeographicSRS());
+                    if (geo.isValid())
+                    {
+                        a.elevation = geo.alt() - terrainHAE;
+                        a.writeElevation = true;
+                    }
+                }
+            }
+        }
+
+        // Applies the geographic position. "relative" mode uses osgEarth's
+        // relative-altitude clamping (base sits <elevation> m above terrain),
+        // matching Prestige. "absolute" mode converts EGM96 (MSL) meters to
+        // the map's vertical datum.
+        void applyPosition(Asset& a)
+        {
+            if (!a.xform.valid() || !_mapNode.valid()) return;
+
+            const SpatialReference* mapSRS = _mapNode->getMapSRS();
+            const SpatialReference* geoSRS = mapSRS->getGeographicSRS();
+
+            if (a.absolute)
+            {
+                const SpatialReference* egm96 = SpatialReference::get("wgs84", "egm96");
+                GeoPoint p(egm96 ? egm96 : geoSRS, a.lon, a.lat, a.elevation, ALTMODE_ABSOLUTE);
+                GeoPoint mapPos = p.transform(mapSRS);
+                if (mapPos.isValid())
+                    a.xform->setPosition(mapPos);
+            }
+            else
+            {
+                a.xform->setPosition(GeoPoint(geoSRS, a.lon, a.lat, a.elevation, ALTMODE_RELATIVE));
+            }
+        }
+
+        // Local placement replicating prestige-cpp instantiateAssetTemplate():
+        //   T(0,0,-groundZ*s) * Rz(rotation) * S(s) * T(-centerX,-centerY,0)
+        // (column-vector order; reversed here for OSG's row-vector matrices)
+        void applyLocalMatrix(Asset& a)
+        {
+            if (!a.local.valid()) return;
+
+            osg::BoundingBox bb = assetBBox(a);
+            double cx = 0.5 * ((double)bb.xMin() + (double)bb.xMax());
+            double cy = 0.5 * ((double)bb.yMin() + (double)bb.yMax());
+            double groundZ = (double)bb.zMin();
+            double s = a.scale;
+
+            osg::Matrixd m =
+                osg::Matrixd::translate(-cx, -cy, 0.0) *
+                osg::Matrixd::scale(s, s, s) *
+                osg::Matrixd::rotate(osg::DegreesToRadians(a.rotation), osg::Vec3d(0.0, 0.0, 1.0)) *
+                osg::Matrixd::translate(0.0, 0.0, -groundZ * s);
+
+            a.local->setMatrix(m);
+            updateGizmoSize(a);
+        }
+
+        void deleteAsset(int index)
+        {
+            if (index < 0 || index >= (int)_assets.size()) return;
+            Asset& a = _assets[index];
+            if (a.xform.valid() && _root.valid())
+                _root->removeChild(a.xform.get());
+            _assets.erase(_assets.begin() + index);
+            if (_selected == index) _selected = -1;
+            else if (_selected > index) _selected--;
+            _dragAsset = -1;
+            _dragMode = DRAG_NONE;
+            refreshSelectionGraphics();
+            markDirty();
+        }
+
+        void duplicateAsset(int index)
+        {
+            if (index < 0 || index >= (int)_assets.size()) return;
+
+            Asset copy;
+            const Asset& src = _assets[index];
+            copy.name = uniqueName(src.name);
+            copy.assetPath = src.assetPath;
+            copy.lon = src.lon + 0.0002; // ~20m east so the copy is visible
+            copy.lat = src.lat;
+            copy.rotation = src.rotation;
+            copy.scale = src.scale;
+            copy.elevation = src.elevation;
+            copy.absolute = src.absolute;
+            copy.writeElevation = src.writeElevation;
+            copy.writeElevationMode = src.writeElevationMode;
+            copy.extraProps = src.extraProps;
+
+            _assets.push_back(copy);
+            buildAssetNode(_assets.back());
+            selectAsset((int)_assets.size() - 1);
+            markDirty();
+        }
+
+        void addAssetAt(const std::string& absFile, const GeoPoint& mapPoint)
+        {
+            GeoPoint geo = mapPoint.transform(mapPoint.getSRS()->getGeographicSRS());
+            if (!geo.isValid())
+                return;
+
+            if (_projectRoot.empty())
+                _projectRoot = _projectRootInput = osgDB::convertFileNameToUnixStyle(osgDB::getFilePath(absFile));
+
+            Asset a;
+            a.assetPath = toStoredPath(absFile);
+            a.name = uniqueName(osgDB::getNameLessExtension(osgDB::getSimpleFileName(absFile)));
+            a.lon = geo.x();
+            a.lat = geo.y();
+
+            _assets.push_back(a);
+            buildAssetNode(_assets.back());
+            selectAsset((int)_assets.size() - 1);
+            markDirty();
+            setStatus("Added " + a.name + " - drag it to position it.");
+        }
+
+        void zoomTo(const Asset& a)
+        {
+            if (!_view || !_mapNode.valid()) return;
+            auto* manip = dynamic_cast<EarthManipulator*>(_view->getCameraManipulator());
+            if (!manip) return;
+
+            double radius = 50.0;
+            osg::BoundingBox bb = assetBBox(a);
+            if (bb.valid())
+                radius = std::max(10.0, (double)bb.radius() * a.scale);
+
+            // The manipulator needs an ABSOLUTE focal point; the stored position
+            // may be ALTMODE_RELATIVE (terrain-clamped). The transform's matrix
+            // already holds the resolved world position.
+            GeoPoint focal;
+            if (a.xform.valid())
+                focal.fromWorld(_mapNode->getMapSRS(), a.xform->getMatrix().getTrans());
+            if (!focal.isValid())
+                focal = GeoPoint(_mapNode->getMapSRS()->getGeographicSRS(), a.lon, a.lat, 0.0, ALTMODE_ABSOLUTE);
+
+            Viewpoint vp;
+            vp.focalPoint() = focal;
+            vp.pitch() = Angle(-35.0, Units::DEGREES);
+            vp.range() = Distance(radius * 4.0, Units::METERS);
+            manip->setViewpoint(vp, 1.0);
+        }
+
+        GeoPoint pointAtViewportCenter(osg::RenderInfo& ri)
+        {
+            if (!_view || !_mapNode.valid())
+                return GeoPoint();
+            const osg::Viewport* vp = camera(ri)->getViewport();
+            if (!vp)
+                return GeoPoint();
+            return getPointAtMouse(_mapNode.get(), _view,
+                (float)(vp->x() + vp->width() * 0.5), (float)(vp->y() + vp->height() * 0.5));
+        }
+
+        //-------------------------------------------------------------------
+        // in-scene editing
+
+        void installEventHandler()
+        {
+            if (_handler.valid() || !_view) return;
+            _handler = new EditHandler(this);
+            // push_back so the ImGui handler (at the front) sees events first.
+            _view->getEventHandlers().push_back(_handler);
+        }
+
+        PickResult pickAt(osgViewer::View* v, float x, float y)
+        {
+            PickResult result;
+
+            osgUtil::LineSegmentIntersector::Intersections hits;
+            if (!v->getCamera() ||
+                !v->computeIntersections(v->getCamera(), osgUtil::Intersector::WINDOW, x, y, hits, ~SELECTION_MASK))
+            {
+                return result;
+            }
+
+            // nearest-first; take the first hit that lies inside one of our
+            // assets. Within a hit, a gizmo arrow wins over the model (the
+            // arrow's path also contains the asset's transform).
+            for (const auto& hit : hits)
+            {
+                for (const auto* node : hit.nodePath)
+                {
+                    for (size_t i = 0; i < _assets.size(); ++i)
+                    {
+                        const Asset& a = _assets[i];
+                        for (int k = 0; k < 3; ++k)
+                            if (a.axisNode[k].get() == node)
+                            {
+                                result.asset = (int)i;
+                                result.axis = k;
+                                return result;
+                            }
+                        if (a.ringNode.get() == node)
+                        {
+                            result.asset = (int)i;
+                            result.axis = GIZMO_RING;
+                            return result;
+                        }
+                        if (a.scaleNode.get() == node)
+                        {
+                            result.asset = (int)i;
+                            result.axis = GIZMO_SCALE;
+                            return result;
+                        }
+                    }
+                }
+                for (const auto* node : hit.nodePath)
+                {
+                    for (size_t i = 0; i < _assets.size(); ++i)
+                        if (_assets[i].xform.get() == node)
+                        {
+                            result.asset = (int)i;
+                            return result;
+                        }
+                }
+            }
+
+            return result;
+        }
+
+        // Signed angle (radians, CCW from east) of the pick ray's intersection
+        // with the horizontal plane through the drag anchor. NaN if the ray is
+        // parallel to the plane or hits at the anchor itself.
+        double ringAngle(const osg::Vec3d& rayA, const osg::Vec3d& rayB) const
+        {
+            osg::Vec3d dir = rayB - rayA;
+            double denom = dir * _enuUp;
+            if (std::abs(denom) < 1.0e-12)
+                return std::numeric_limits<double>::quiet_NaN();
+            double s = ((_axisOrigin - rayA) * _enuUp) / denom;
+            osg::Vec3d v = rayA + dir * s - _axisOrigin;
+            double e = v * _enuEast;
+            double n = v * _enuNorth;
+            if (e * e + n * n < 1.0e-12)
+                return std::numeric_limits<double>::quiet_NaN();
+            return std::atan2(n, e);
+        }
+
+        static bool windowRay(osgViewer::View* v, float x, float y, osg::Vec3d& nearP, osg::Vec3d& farP)
+        {
+            osg::Camera* cam = v->getCamera();
+            if (!cam || !cam->getViewport()) return false;
+            osg::Matrixd VPW = cam->getViewMatrix() * cam->getProjectionMatrix() * cam->getViewport()->computeWindowMatrix();
+            osg::Matrixd inv;
+            if (!inv.invert(VPW)) return false;
+            nearP = osg::Vec3d(x, y, 0.0) * inv;
+            farP = osg::Vec3d(x, y, 1.0) * inv;
+            return true;
+        }
+
+        // Parameter (meters) along the axis line (origin, unit dir) of the point
+        // closest to the pick ray. NaN when the ray is near-parallel to the axis.
+        static double axisParameter(const osg::Vec3d& rayA, const osg::Vec3d& rayB,
+            const osg::Vec3d& origin, const osg::Vec3d& dir)
+        {
+            osg::Vec3d u = rayB - rayA;
+            osg::Vec3d w0 = rayA - origin;
+            double a = u * u;
+            double b = u * dir;
+            double d = u * w0;
+            double e = dir * w0;
+            double denom = a - b * b; // dir is unit length
+            if (a <= 0.0 || denom < 1.0e-9 * a)
+                return std::numeric_limits<double>::quiet_NaN();
+            return (a * e - b * d) / denom;
+        }
+
+        bool handleEvent(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& aa)
+        {
+            if (!isVisible() || !_editingEnabled || !_mapNode.valid())
+                return false;
+
+            // An active drag session owns the mouse until the button releases,
+            // even if the cursor strays over an ImGui window (which marks
+            // events handled). Without this, a release over a panel would
+            // leave the drag stuck on.
+            bool dragSession = (_dragAsset >= 0);
+            if (ea.getHandled() && !dragSession)
+                return false;
+
+            osgViewer::View* v = dynamic_cast<osgViewer::View*>(aa.asView());
+            if (!v)
+                return false;
+
+            ImGuiIO* io = ImGui::GetCurrentContext() ? &ImGui::GetIO() : nullptr;
+
+            switch (ea.getEventType())
+            {
+            case osgGA::GUIEventAdapter::PUSH:
+            {
+                if (ea.getButton() != osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON)
+                    return false;
+                if (io && io->WantCaptureMouse)
+                    return false;
+
+                PickResult pick = pickAt(v, ea.getX(), ea.getY());
+                if (pick.asset < 0)
+                    return false;
+
+                selectAsset(pick.asset);
+                _dragAsset = pick.asset;
+                _pressX = ea.getX();
+                _pressY = ea.getY();
+
+                Asset& a = _assets[pick.asset];
+                _startLon = a.lon;
+                _startLat = a.lat;
+                _startRotation = a.rotation;
+                _startScale = a.scale;
+                _startElevation = a.elevation;
+
+                if (pick.axis >= 0)
+                {
+                    // grabbed a gizmo widget: capture the asset's ENU frame.
+                    osg::Matrixd m = a.xform->getMatrix();
+                    _axisOrigin = m.getTrans();
+                    _enuEast.set(m(0, 0), m(0, 1), m(0, 2));  _enuEast.normalize();
+                    _enuNorth.set(m(1, 0), m(1, 1), m(1, 2)); _enuNorth.normalize();
+                    _enuUp.set(m(2, 0), m(2, 1), m(2, 2));    _enuUp.normalize();
+
+                    osg::Vec3d rayA, rayB;
+                    bool haveRay = windowRay(v, ea.getX(), ea.getY(), rayA, rayB);
+                    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+                    if (pick.axis == GIZMO_RING)
+                    {
+                        _dragMode = DRAG_RING;
+                        _ringAngle0 = haveRay ? ringAngle(rayA, rayB) : nan;
+                    }
+                    else if (pick.axis == GIZMO_SCALE)
+                    {
+                        _dragMode = DRAG_SCALE_HANDLE;
+                        _axisDir = _enuEast + _enuNorth + _enuUp;
+                        _axisDir.normalize();
+                        _axisT0 = haveRay ? axisParameter(rayA, rayB, _axisOrigin, _axisDir) : nan;
+                    }
+                    else
+                    {
+                        // translate arrow
+                        _dragMode = DRAG_AXIS;
+                        _dragAxis = pick.axis;
+                        _axisDir = pick.axis == 0 ? _enuEast : pick.axis == 1 ? _enuNorth : _enuUp;
+                        _axisT0 = haveRay ? axisParameter(rayA, rayB, _axisOrigin, _axisDir) : nan;
+                    }
+                }
+                else
+                {
+                    int mods = ea.getModKeyMask();
+                    _dragMode =
+                        (mods & osgGA::GUIEventAdapter::MODKEY_CTRL) ? DRAG_ROTATE :
+                        (mods & osgGA::GUIEventAdapter::MODKEY_ALT) ? DRAG_SCALE :
+                        DRAG_MOVE;
+                }
+
+                return true; // keep the camera manipulator from grabbing the gesture
+            }
+
+            case osgGA::GUIEventAdapter::DRAG:
+            {
+                if (_dragAsset < 0 || _dragAsset >= (int)_assets.size())
+                    return false;
+
+                Asset& a = _assets[_dragAsset];
+
+                if (_dragMode == DRAG_MOVE)
+                {
+                    GeoPoint p = getPointAtMouse(_mapNode.get(), v, ea.getX(), ea.getY());
+                    if (p.isValid())
+                    {
+                        GeoPoint geo = p.transform(p.getSRS()->getGeographicSRS());
+                        if (geo.isValid())
+                        {
+                            a.lon = geo.x();
+                            a.lat = geo.y();
+                            applyPosition(a);
+                            markDirty();
+                        }
+                    }
+                }
+                else if (_dragMode == DRAG_ROTATE)
+                {
+                    double dx = (double)ea.getX() - (double)_pressX;
+                    a.rotation = normalizeDegrees(_startRotation + dx * 0.25);
+                    applyLocalMatrix(a);
+                    markDirty();
+                }
+                else if (_dragMode == DRAG_SCALE)
+                {
+                    double dy = (double)ea.getY() - (double)_pressY;
+                    double s = _startScale * std::exp(dy * 0.01);
+                    a.scale = clampBetween(s, 1.0e-9, 1.0e12);
+                    applyLocalMatrix(a);
+                    markDirty();
+                }
+                else if (_dragMode == DRAG_AXIS)
+                {
+                    osg::Vec3d rayA, rayB;
+                    if (windowRay(v, ea.getX(), ea.getY(), rayA, rayB))
+                    {
+                        double t = axisParameter(rayA, rayB, _axisOrigin, _axisDir);
+                        double d = t - _axisT0;
+                        if (std::isfinite(d))
+                        {
+                            if (_dragAxis == 2)
+                            {
+                                a.elevation = _startElevation + d;
+                                a.writeElevation = true;
+                            }
+                            else if (_dragAxis == 0)
+                            {
+                                double mPerDeg = 111319.49 * std::max(0.01, std::cos(osg::DegreesToRadians(_startLat)));
+                                a.lon = _startLon + d / mPerDeg;
+                            }
+                            else
+                            {
+                                a.lat = clampBetween(_startLat + d / 111132.95, -90.0, 90.0);
+                            }
+                            applyPosition(a);
+                            markDirty();
+                        }
+                    }
+                }
+                else if (_dragMode == DRAG_RING)
+                {
+                    osg::Vec3d rayA, rayB;
+                    if (windowRay(v, ea.getX(), ea.getY(), rayA, rayB))
+                    {
+                        double angle = ringAngle(rayA, rayB);
+                        if (std::isfinite(angle) && std::isfinite(_ringAngle0))
+                        {
+                            a.rotation = normalizeDegrees(_startRotation + osg::RadiansToDegrees(angle - _ringAngle0));
+                            applyLocalMatrix(a);
+                            markDirty();
+                        }
+                    }
+                }
+                else if (_dragMode == DRAG_SCALE_HANDLE)
+                {
+                    osg::Vec3d rayA, rayB;
+                    if (windowRay(v, ea.getX(), ea.getY(), rayA, rayB))
+                    {
+                        double t = axisParameter(rayA, rayB, _axisOrigin, _axisDir);
+                        if (std::isfinite(t) && std::isfinite(_axisT0) && _axisT0 > 1.0e-6)
+                        {
+                            // pulling the handle outward grows the model by the
+                            // same ratio, like dragging the corner of a box.
+                            double ratio = clampBetween(t / _axisT0, 0.01, 100.0);
+                            a.scale = clampBetween(_startScale * ratio, 1.0e-9, 1.0e12);
+                            applyLocalMatrix(a);
+                            markDirty();
+                        }
+                    }
+                }
+                return true;
+            }
+
+            case osgGA::GUIEventAdapter::RELEASE:
+            {
+                if (ea.getButton() == osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON && _dragAsset >= 0)
+                {
+                    _dragAsset = -1;
+                    _dragAxis = -1;
+                    _dragMode = DRAG_NONE;
+                    return true;
+                }
+                return false;
+            }
+
+            case osgGA::GUIEventAdapter::KEYDOWN:
+            {
+                if (io && io->WantCaptureKeyboard)
+                    return false;
+
+                if (ea.getKey() == osgGA::GUIEventAdapter::KEY_Escape)
+                {
+                    if (_dragAsset >= 0 && _dragAsset < (int)_assets.size())
+                    {
+                        // cancel the in-progress drag:
+                        Asset& a = _assets[_dragAsset];
+                        a.lon = _startLon;
+                        a.lat = _startLat;
+                        a.rotation = _startRotation;
+                        a.scale = _startScale;
+                        a.elevation = _startElevation;
+                        applyPosition(a);
+                        applyLocalMatrix(a);
+                        _dragAsset = -1;
+                        _dragAxis = -1;
+                        _dragMode = DRAG_NONE;
+                        return true;
+                    }
+                    if (_selected >= 0)
+                    {
+                        selectAsset(-1);
+                        return true;
+                    }
+                }
+                else if (ea.getKey() == osgGA::GUIEventAdapter::KEY_Delete)
+                {
+                    if (_selected >= 0 && _dragAsset < 0)
+                    {
+                        deleteAsset(_selected);
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            default:
+                return false;
+            }
+        }
+
+        //-------------------------------------------------------------------
+        // OS drag-and-drop (Windows)
+
+#ifdef _WIN32
+        static PrestigeAssetsGUI*& s_dropInstance()
+        {
+            static PrestigeAssetsGUI* s = nullptr;
+            return s;
+        }
+        static WNDPROC& s_prevWndProc()
+        {
+            static WNDPROC s = nullptr;
+            return s;
+        }
+        static bool& s_wndIsUnicode()
+        {
+            static bool s = true;
+            return s;
+        }
+
+        static LRESULT CALLBACK dropWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+        {
+            if (msg == WM_DROPFILES && s_dropInstance())
+            {
+                HDROP hdrop = (HDROP)wParam;
+                POINT pt = { 0, 0 };
+                DragQueryPoint(hdrop, &pt);
+
+                Drop drop;
+                drop.clientX = (float)pt.x;
+                drop.clientY = (float)pt.y;
+
+                UINT count = DragQueryFileW(hdrop, 0xFFFFFFFF, NULL, 0);
+                for (UINT i = 0; i < count; ++i)
+                {
+                    wchar_t path[MAX_PATH];
+                    if (DragQueryFileW(hdrop, i, path, MAX_PATH) > 0)
+                        drop.files.push_back(osgDB::convertUTF16toUTF8(path));
+                }
+                DragFinish(hdrop);
+
+                if (!drop.files.empty())
+                {
+                    std::lock_guard<std::mutex> lock(s_dropInstance()->_dropMutex);
+                    s_dropInstance()->_drops.push_back(drop);
+                }
+                return 0;
+            }
+
+            return s_wndIsUnicode() ?
+                ::CallWindowProcW(s_prevWndProc(), hwnd, msg, wParam, lParam) :
+                ::CallWindowProcA(s_prevWndProc(), hwnd, msg, wParam, lParam);
+        }
+
+        void installDropTarget(osg::RenderInfo& ri)
+        {
+            if (_dropInstalled) return;
+            _dropInstalled = true;
+
+            auto* gw = dynamic_cast<osgViewer::GraphicsWindowWin32*>(ri.getState()->getGraphicsContext());
+            if (!gw) return;
+
+            HWND hwnd = gw->getHWND();
+            if (!hwnd) return;
+
+            s_dropInstance() = this;
+            s_wndIsUnicode() = (::IsWindowUnicode(hwnd) != FALSE);
+            ::DragAcceptFiles(hwnd, TRUE);
+            s_prevWndProc() = s_wndIsUnicode() ?
+                (WNDPROC)::SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)&PrestigeAssetsGUI::dropWndProc) :
+                (WNDPROC)::SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)&PrestigeAssetsGUI::dropWndProc);
+        }
+
+        static std::string fileDialog(bool save, const wchar_t* filter, const wchar_t* defaultExt)
+        {
+            wchar_t buf[1024];
+            buf[0] = 0;
+
+            OPENFILENAMEW ofn;
+            ZeroMemory(&ofn, sizeof(ofn));
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = ::GetActiveWindow();
+            ofn.lpstrFile = buf;
+            ofn.nMaxFile = 1024;
+            ofn.lpstrFilter = filter;
+            ofn.nFilterIndex = 1;
+            ofn.lpstrDefExt = defaultExt;
+            ofn.Flags = OFN_NOCHANGEDIR | OFN_HIDEREADONLY |
+                (save ? OFN_OVERWRITEPROMPT : (OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST));
+
+            BOOL ok = save ? ::GetSaveFileNameW(&ofn) : ::GetOpenFileNameW(&ofn);
+            if (!ok)
+                return std::string();
+            return osgDB::convertUTF16toUTF8(buf);
+        }
+#else
+        void installDropTarget(osg::RenderInfo&) { }
+#endif
+
+        void processDrops(osg::RenderInfo& ri)
+        {
+            std::vector<Drop> drops;
+            {
+                std::lock_guard<std::mutex> lock(_dropMutex);
+                drops.swap(_drops);
+            }
+            if (drops.empty()) return;
+
+            if (!_view || !_mapNode.valid())
+                return;
+
+            const osg::Viewport* vp = camera(ri)->getViewport();
+            double height = vp ? vp->height() : 0.0;
+
+            for (const auto& d : drops)
+            {
+                // client coords are top-left origin; OSG events are bottom-left.
+                float ex = d.clientX;
+                float ey = (float)(height - d.clientY);
+
+                GeoPoint p = getPointAtMouse(_mapNode.get(), _view, ex, ey);
+                if (!p.isValid())
+                    p = pointAtViewportCenter(ri);
+                if (!p.isValid())
+                {
+                    setStatus("Could not find terrain under the drop point.");
+                    continue;
+                }
+
+                int added = 0;
+                for (const auto& f : d.files)
+                {
+                    if (!isModelFile(f))
+                        continue;
+                    // offset multiple files so they don't stack exactly:
+                    GeoPoint place = p;
+                    place.x() += 0.0002 * added;
+                    addAssetAt(f, place);
+                    ++added;
+                }
+                if (added == 0 && !d.files.empty())
+                    setStatus("No recognized model files in the drop (expected .glb/.gltf/etc).");
+            }
+        }
+    };
+}

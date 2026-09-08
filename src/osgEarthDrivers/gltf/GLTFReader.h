@@ -35,6 +35,7 @@
 #include <osgEarth/ExternalNode>
 #include <osgEarth/InstancedExternalNode>
 #include <osgEarth/VertexCompression>
+#include <osgEarth/Chonk>
 #ifdef OSGEARTH_HAVE_MESH_OPTIMIZER
 #include <meshoptimizer.h>
 #endif
@@ -45,7 +46,6 @@
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
-
 
 #undef LC
 #define LC "[GLTFWriter] "
@@ -1106,6 +1106,22 @@ public:
             extractArrays(arrays);
         }
 
+        //! glTF colors are linear until after texture modulation. The rest of
+        //! osgEarth's coloring/lighting pipeline expects sRGB color values.
+        static void installBaseColor(osg::Geometry* geom)
+        {
+            geom->setUserValue(CHONK_HINT_LINEAR_COLOR, true);
+            ShaderLoader::load(VirtualProgram::getOrCreate(geom->getOrCreateStateSet()), R"(
+#pragma vp_function oe_gltf_color_fs, fragment_coloring, 0.55
+void oe_gltf_color_fs(inout vec4 color)
+{
+    vec3 c = clamp(color.rgb, 0.0, 1.0);
+    color.rgb = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
+                    12.92 * c, lessThanEqual(c, vec3(0.0031308)));
+}
+)");
+        }
+
         //! Shader that samples the original glTF material maps directly. It
         //! performs the glTF channel selection, normal scaling, and material
         //! factor application that would otherwise require converted images.
@@ -1125,10 +1141,6 @@ void oe_gltf_pbr_vs(inout vec4 vertex_view)
 
 [break]
 #pragma vp_function oe_gltf_pbr_fs, fragment_coloring, 0.6
-#pragma import_defines(OE_GLTF_NORMAL_MAP)
-#pragma import_defines(OE_GLTF_METALLIC_ROUGHNESS_MAP)
-#pragma import_defines(OE_GLTF_OCCLUSION_MAP)
-#pragma import_defines(OE_GLTF_PBR_FACTORS)
 #pragma import_defines(OE_IS_SHADOW_CAMERA)
 #pragma import_defines(OE_IS_DEPTH_CAMERA)
 
@@ -1141,12 +1153,10 @@ in vec2 oe_gltf_pbr_uv;
 uniform sampler2D oe_gltf_normal_tex;
 uniform sampler2D oe_gltf_metallic_roughness_tex;
 uniform sampler2D oe_gltf_occlusion_tex;
-uniform float oe_gltf_normal_scale;
-uniform float oe_gltf_roughness_factor;
-uniform float oe_gltf_metallic_factor;
-uniform float oe_gltf_occlusion_strength;
 
-#ifdef OE_GLTF_NORMAL_MAP
+uniform vec4 oe_gltf_pbr_flags;
+uniform vec4 oe_gltf_pbr_factors; // normal scale, roughness, metallic, AO strength
+
 // Cotangent frame from screen-space derivatives. The bitangent follows
 // increasing V, so the sampled glTF normal's Y component is inverted below.
 mat3 oe_gltf_pbr_tbn(vec3 N, vec3 p, vec2 uv)
@@ -1163,7 +1173,6 @@ mat3 oe_gltf_pbr_tbn(vec3 N, vec3 p, vec2 uv)
     float invmax = det > 0.0 ? inversesqrt(det) : 0.0;
     return mat3(T * invmax, B * invmax, N);
 }
-#endif
 
 void oe_gltf_pbr_fs(inout vec4 color)
 {
@@ -1171,34 +1180,38 @@ void oe_gltf_pbr_fs(inout vec4 color)
     return;
 #endif
 
-#ifdef OE_GLTF_NORMAL_MAP
-    vec3 N = normalize(vp_Normal);
-    vec3 n = texture(oe_gltf_normal_tex, oe_gltf_pbr_uv).xyz * 2.0 - 1.0;
-    n.xy *= vec2(oe_gltf_normal_scale, -oe_gltf_normal_scale);
-    float nlen = length(n);
-    n = nlen > 0.0 ? n / nlen : vec3(0.0, 0.0, 1.0);
-    vec3 pn = oe_gltf_pbr_tbn(N, oe_gltf_pbr_pos_view, oe_gltf_pbr_uv) * n;
-    float len = length(pn);
-    vp_Normal = len > 0.0 ? pn / len : N;
-#endif
+    if (oe_gltf_pbr_flags.x > 0.5)
+    {
+        vec3 N = normalize(vp_Normal);
+        vec3 n = texture(oe_gltf_normal_tex, oe_gltf_pbr_uv).xyz * 2.0 - 1.0;
+        n.xy *= vec2(oe_gltf_pbr_factors.x, -oe_gltf_pbr_factors.x);
+        float nlen = length(n);
+        n = nlen > 0.0 ? n / nlen : vec3(0.0, 0.0, 1.0);
+        vec3 pn = oe_gltf_pbr_tbn(N, oe_gltf_pbr_pos_view, oe_gltf_pbr_uv) * n;
+        float len = length(pn);
+        vp_Normal = len > 0.0 ? pn / len : N;
+    }
 
-#ifdef OE_GLTF_PBR_FACTORS
-    float roughness = oe_gltf_roughness_factor;
-    float metal = oe_gltf_metallic_factor;
-  #ifdef OE_GLTF_METALLIC_ROUGHNESS_MAP
-    vec4 metallicRoughness = texture(oe_gltf_metallic_roughness_tex, oe_gltf_pbr_uv);
-    roughness *= metallicRoughness.g;
-    metal *= metallicRoughness.b;
-  #endif
-    oe_pbr.displacement = 0.0;
-    oe_pbr.roughness *= roughness;
-    oe_pbr.metal = clamp(oe_pbr.metal + metal, 0.0, 1.0);
-#endif
+    if (oe_gltf_pbr_flags.w > 0.5)
+    {
+        float roughness = oe_gltf_pbr_factors.y;
+        float metal = oe_gltf_pbr_factors.z;
+        if (oe_gltf_pbr_flags.y > 0.5)
+        {
+            vec4 metallicRoughness = texture(oe_gltf_metallic_roughness_tex, oe_gltf_pbr_uv);
+            roughness *= metallicRoughness.g;
+            metal *= metallicRoughness.b;
+        }
+        oe_pbr.displacement = 0.0;
+        oe_pbr.roughness *= roughness;
+        oe_pbr.metal = clamp(oe_pbr.metal + metal, 0.0, 1.0);
+    }
 
-#ifdef OE_GLTF_OCCLUSION_MAP
-    float occlusion = texture(oe_gltf_occlusion_tex, oe_gltf_pbr_uv).r;
-    oe_pbr.ao *= 1.0 + oe_gltf_occlusion_strength * (occlusion - 1.0);
-#endif
+    if (oe_gltf_pbr_flags.z > 0.5)
+    {
+        float occlusion = texture(oe_gltf_occlusion_tex, oe_gltf_pbr_uv).r;
+        oe_pbr.ao *= 1.0 + oe_gltf_pbr_factors.w * (occlusion - 1.0);
+    }
 }
 )";
         }
@@ -1223,14 +1236,25 @@ void oe_gltf_pbr_fs(inout vec4 color)
             vp->setName("glTF PBR material");
             ShaderLoader::load(vp, pbrMaterialShaderSource());
 
+            stateset->addUniform(new osg::Uniform(
+                "oe_gltf_pbr_flags", osg::Vec4f(
+                normalTex ? 1.0f : 0.0f,
+                metallicRoughnessTex ? 1.0f : 0.0f,
+                occlusionTex ? 1.0f : 0.0f,
+                applyPBRFactors ? 1.0f : 0.0f)));
+            stateset->addUniform(new osg::Uniform(
+                "oe_gltf_pbr_factors", osg::Vec4f(
+                normalScale,
+                roughnessFactor,
+                metallicFactor,
+                occlusionStrength)));
+
             if (normalTex)
             {
                 // Keep the ShaderGenerator from folding these into the color.
                 ShaderGenerator::setIgnoreHint(normalTex, true);
                 stateset->setTextureAttribute(NORMAL_UNIT, normalTex);
                 stateset->addUniform(new osg::Uniform("oe_gltf_normal_tex", (int)NORMAL_UNIT));
-                stateset->addUniform(new osg::Uniform("oe_gltf_normal_scale", normalScale));
-                stateset->setDefine("OE_GLTF_NORMAL_MAP");
             }
 
             if (metallicRoughnessTex)
@@ -1239,7 +1263,6 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 stateset->setTextureAttribute(METALLIC_ROUGHNESS_UNIT, metallicRoughnessTex);
                 stateset->addUniform(new osg::Uniform(
                     "oe_gltf_metallic_roughness_tex", (int)METALLIC_ROUGHNESS_UNIT));
-                stateset->setDefine("OE_GLTF_METALLIC_ROUGHNESS_MAP");
             }
 
             if (occlusionTex)
@@ -1248,18 +1271,6 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 stateset->setTextureAttribute(OCCLUSION_UNIT, occlusionTex);
                 stateset->addUniform(new osg::Uniform(
                     "oe_gltf_occlusion_tex", (int)OCCLUSION_UNIT));
-                stateset->addUniform(new osg::Uniform(
-                    "oe_gltf_occlusion_strength", occlusionStrength));
-                stateset->setDefine("OE_GLTF_OCCLUSION_MAP");
-            }
-
-            if (applyPBRFactors)
-            {
-                stateset->addUniform(new osg::Uniform(
-                    "oe_gltf_roughness_factor", roughnessFactor));
-                stateset->addUniform(new osg::Uniform(
-                    "oe_gltf_metallic_factor", metallicFactor));
-                stateset->setDefine("OE_GLTF_PBR_FACTORS");
             }
         }
 
@@ -1762,7 +1773,7 @@ void oe_gltf_pbr_fs(inout vec4 color)
         }
 
         //! Wraps an image in a texture configured from the glTF texture's sampler.
-        osg::Texture2D* makeTexture(osg::Image* img, const tinygltf::Texture& texture) const
+        osg::Texture2D* makeTexture(osg::Image* img, const tinygltf::Texture& texture, bool srgb) const
         {
             if (!img)
                 return nullptr;
@@ -1773,6 +1784,10 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 img->setInternalTextureFormat(GL_RGBA8);
 
             osg::ref_ptr<osg::Texture2D> tex = new osg::Texture2D(img);
+            // Set the texture format, not the shared image's format: one image
+            // can supply both sRGB base color and linear material data.
+            if (srgb)
+                tex->setInternalFormat(img->getPixelFormat() == GL_RGB ? GL_SRGB8 : GL_SRGB8_ALPHA8);
             //tex->setUnRefImageDataAfterApply(imageEmbedded);
             tex->setResizeNonPowerOfTwoHint(false);
             tex->setDataVariance(osg::Object::STATIC);
@@ -1802,10 +1817,10 @@ void oe_gltf_pbr_fs(inout vec4 color)
             return tex.release();
         }
 
-        osg::Texture2D* makeTextureFromModel(const tinygltf::Texture& texture) const
+        osg::Texture2D* makeTextureFromModel(const tinygltf::Texture& texture, bool srgb) const
         {
             osg::ref_ptr<osg::Image> img = makeImageFromTexture(texture);
-            return makeTexture(img.get(), texture);
+            return makeTexture(img.get(), texture, srgb);
         }
 
         bool validTextureIndex(int index) const
@@ -1916,7 +1931,7 @@ void oe_gltf_pbr_fs(inout vec4 color)
             return getOrCreateTexture(
                 Stringify() << usage << ":" << textureIndex,
                 sharedTextureKey(texture, Stringify() << "|gltf-" << usage),
-                [&]() { return osg::ref_ptr<osg::Texture2D>(makeTextureFromModel(texture)); });
+                [&]() { return osg::ref_ptr<osg::Texture2D>(makeTextureFromModel(texture, !shaderManaged)); });
         }
 
         //! Base color (albedo) texture for a material.
@@ -1933,6 +1948,53 @@ void oe_gltf_pbr_fs(inout vec4 color)
             return
                 material.values.find("metallicFactor") != material.values.end() ||
                 material.values.find("roughnessFactor") != material.values.end();
+        }
+
+        template<typename ArrayType>
+        static osg::Vec4Array* multiplyVertexColors(
+            const ArrayType* source, const osg::Vec4& factor, unsigned components)
+        {
+            if (!source)
+                return nullptr;
+
+            // Work on a new array: different primitives can share COLOR_0
+            // while using different material factors. Alpha is always linear.
+            auto* result = new osg::Vec4Array(osg::Array::BIND_PER_VERTEX);
+            result->reserve(source->size());
+            const float scale = source->getNormalize() ?
+                1.0f / float(std::numeric_limits<typename ArrayType::ElementDataType::value_type>::max()) : 1.0f;
+            for (const auto& value : *source)
+            {
+                osg::Vec4 color = factor;
+                for (unsigned c = 0; c < components; ++c)
+                    color[c] *= float(value[c]) * scale;
+                result->push_back(color);
+            }
+            return result;
+        }
+
+        osg::Vec4Array* makeColorArray(int index, const osg::Vec4& factor) const
+        {
+            const osg::Array* source = arrays[index].get();
+            if (!source)
+                return nullptr;
+            switch (source->getType())
+            {
+            case osg::Array::Vec3ArrayType:
+                return multiplyVertexColors(static_cast<const osg::Vec3Array*>(source), factor, 3);
+            case osg::Array::Vec4ArrayType:
+                return multiplyVertexColors(static_cast<const osg::Vec4Array*>(source), factor, 4);
+            case osg::Array::Vec3ubArrayType:
+                return multiplyVertexColors(static_cast<const osg::Vec3ubArray*>(source), factor, 3);
+            case osg::Array::Vec4ubArrayType:
+                return multiplyVertexColors(static_cast<const osg::Vec4ubArray*>(source), factor, 4);
+            case osg::Array::Vec3usArrayType:
+                return multiplyVertexColors(static_cast<const osg::Vec3usArray*>(source), factor, 3);
+            case osg::Array::Vec4usArrayType:
+                return multiplyVertexColors(static_cast<const osg::Vec4usArray*>(source), factor, 4);
+            default:
+                return nullptr;
+            }
         }
 
         template<typename ArrayType>
@@ -2038,6 +2100,7 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 }
                 geom->setName(typeid(*this).name());
                 geom->setUseVertexBufferObjects(true);
+                installBaseColor(geom);
 
                 osg::Geode* geode = new osg::Geode;
                 geode->addDrawable(geom);
@@ -2050,9 +2113,6 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 {
                     const tinygltf::Material& material = model.materials[primitive.material];
                     const tinygltf::PbrMetallicRoughness& pbr = material.pbrMetallicRoughness;
-
-                    // Note: create the geometry's stateset lazily; an empty one
-                    // still costs a state graph node at draw time.
 
                     if (material.doubleSided)
                     {
@@ -2154,9 +2214,7 @@ void oe_gltf_pbr_fs(inout vec4 color)
                     }
                     else if (it->first.compare("COLOR_0") == 0)
                     {
-                        // TODO:  Multipy by the baseColorFactor here?
-                        //OE_DEBUG << "Setting color array " << arrays[it->second].get() << std::endl;
-                        geom->setColorArray(arrays[it->second].get());
+                        geom->setColorArray(makeColorArray(it->second, baseColorFactor));
                     }
                     else
                     {

@@ -13,7 +13,7 @@
 
 namespace osgEarth
 {
-    /** Read-only diagnostics for the process-wide external asset registry. */
+    /** Diagnostics and retention control for the process-wide external asset registry. */
     class ExternalAssetsGUI : public ImGuiPanel
     {
     public:
@@ -70,6 +70,20 @@ namespace osgEarth
                 name(), visible(), ImGuiWindowFlags_NoScrollbar);
             if (expanded)
             {
+                auto& manager = ExternalAssetManager::instance();
+                bool keepLoaded = manager.getKeepLoaded();
+                if (ImGui::Checkbox("Keep loaded", &keepLoaded))
+                    manager.setKeepLoaded(keepLoaded);
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Retain loaded models and shared instancing templates "
+                        "when tiles leave the scene. Applies to existing and "
+                        "future loads. Uncheck to release unused assets. "
+                        "Explicit unload calls still work. Memory usage can "
+                        "grow as you visit new assets.");
+                }
+
                 ImGui::Text(
                     "Variants: %llu   Files: %llu   Loaded: %llu   Errors: %llu",
                     value(assets.size()),

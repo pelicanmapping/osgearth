@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <exception>
 #include <map>
 #include <limits>
@@ -588,6 +589,10 @@ struct ExternalAssetManager::Impl
     mutable std::recursive_mutex loadMutex;
     mutable std::map<std::string, osg::observer_ptr<ExternalAsset>> assets;
     mutable std::map<std::string, std::set<std::string>> dependencies;
+    // Protected by assetsMutex. Keep the asset itself alive so its canonical
+    // graph and shared instancing template both survive tile eviction.
+    bool keepLoaded = false;
+    std::map<std::string, osg::ref_ptr<ExternalAsset>> retainedAssets;
 
     bool hasPath(
         const std::string& start,
@@ -652,11 +657,47 @@ ExternalAssetManager::instance()
 ExternalAssetManager::ExternalAssetManager() :
     _impl(new Impl())
 {
+    const char* keepLoaded = std::getenv("OSGEARTH_EXTERNAL_ASSETS_KEEP_LOADED");
+    _impl->keepLoaded = keepLoaded && std::string(keepLoaded) == "1";
 }
 
 ExternalAssetManager::~ExternalAssetManager()
 {
     delete _impl;
+}
+
+void
+ExternalAssetManager::setKeepLoaded(bool value)
+{
+    // Release unused graphs outside the registry lock; destructors can release
+    // nested external references and application-owned callbacks.
+    std::map<std::string, osg::ref_ptr<ExternalAsset>> released;
+    {
+        std::lock_guard<std::mutex> lock(_impl->assetsMutex);
+        if (_impl->keepLoaded == value)
+            return;
+        _impl->keepLoaded = value;
+        if (value)
+        {
+            for (const auto& entry : _impl->assets)
+            {
+                osg::ref_ptr<ExternalAsset> asset;
+                if (entry.second.lock(asset) && asset->node().valid())
+                    _impl->retainedAssets[entry.first] = asset;
+            }
+        }
+        else
+        {
+            released.swap(_impl->retainedAssets);
+        }
+    }
+}
+
+bool
+ExternalAssetManager::getKeepLoaded() const
+{
+    std::lock_guard<std::mutex> lock(_impl->assetsMutex);
+    return _impl->keepLoaded;
 }
 
 void
@@ -841,6 +882,11 @@ ExternalAssetManager::load(ExternalAsset* asset, bool forceReload)
             std::string(),
             stats.vertices,
             stats.triangles);
+        {
+            std::lock_guard<std::mutex> lock(_impl->assetsMutex);
+            if (_impl->keepLoaded)
+                _impl->retainedAssets[asset->_key] = asset;
+        }
         return true;
     }
 
@@ -874,11 +920,16 @@ ExternalAssetManager::unload(ExternalAsset* asset)
 {
     if (!asset)
         return false;
+    osg::ref_ptr<ExternalAsset> keepAlive = asset;
     std::lock_guard<std::recursive_mutex> loadLock(_impl->loadMutex);
     osgDB::Registry::instance()->removeFromObjectCache(
         asset->_resolvedFilename, asset->_options.get());
     asset->publish(nullptr, std::string(), 0u, 0u);
     _impl->dependencies.erase(asset->_key);
+    {
+        std::lock_guard<std::mutex> lock(_impl->assetsMutex);
+        _impl->retainedAssets.erase(asset->_key);
+    }
     return true;
 }
 

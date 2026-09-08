@@ -367,7 +367,7 @@ public:
                     _model.samplers.push_back(sampler);
 
                     // Add the texture
-                    Texture texture;
+                    tinygltf::Texture texture;
                     texture.source = index;
                     texture.sampler = index;
                     _model.textures.push_back(texture);

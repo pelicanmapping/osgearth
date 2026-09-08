@@ -375,6 +375,9 @@ namespace
 
                 auto verts = dynamic_cast<osg::Vec3Array*>(node.getVertexArray());
                 auto colors = dynamic_cast<osg::Vec4Array*>(node.getColorArray());
+                auto packed_colors = dynamic_cast<osg::Vec4ubArray*>(node.getColorArray());
+                bool color_is_linear = false;
+                node.getUserValue(CHONK_HINT_LINEAR_COLOR, color_is_linear);
                 auto normals = dynamic_cast<osg::Vec3Array*>(node.getNormalArray());
                 auto normal_techniques = dynamic_cast<osg::UByteArray*>(node.getVertexAttribArray(NORMAL_TECHNIQUE_SLOT));
                 auto flexors = dynamic_cast<osg::Vec3Array*>(node.getTexCoordArray(FLEXOR_SLOT));
@@ -390,6 +393,7 @@ namespace
                 for (unsigned i = 0; i < numVerts; ++i)
                 {
                     Chonk::VertexGPU v;
+                    v.color_is_linear = color_is_linear ? 1 : 0;
 
                     if (verts)
                     {
@@ -400,6 +404,11 @@ namespace
                     {
                         int k = colors->getBinding() == osg::Array::BIND_PER_VERTEX ? i : 0;
                         v.color = Color((*colors)[k]).asNormalizedRGBA();
+                    }
+                    else if (packed_colors)
+                    {
+                        int k = packed_colors->getBinding() == osg::Array::BIND_PER_VERTEX ? i : 0;
+                        v.color = (*packed_colors)[k];
                     }
                     else
                     {
@@ -1119,7 +1128,7 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
     glEnableClientState_(GL_VERTEX_ATTRIB_ARRAY_UNIFIED_NV);
     glEnableClientState_(GL_ELEMENT_ARRAY_UNIFIED_NV);
 
-    const VADef formats[10] = {
+    const VADef formats[11] = {
         {3, GL_FLOAT,         GL_FALSE, offsetof(Chonk::VertexGPU, position)},
         {3, GL_FLOAT,         GL_FALSE, offsetof(Chonk::VertexGPU, normal)},
         {1, GL_UNSIGNED_BYTE, GL_FALSE, offsetof(Chonk::VertexGPU, normal_technique)},
@@ -1129,11 +1138,12 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
         {1, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, albedo_index)},
         {1, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, normalmap_index)},
         {1, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, pbr_index)},
-        {2, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, extended_material_index)}
+        {2, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, extended_material_index)},
+        {1, GL_UNSIGNED_BYTE, GL_FALSE, offsetof(Chonk::VertexGPU, color_is_linear)}
     };
 
     // configure the format of each vertex attribute in our structure.
-    for (unsigned location = 0; location < 10; ++location)
+    for (unsigned location = 0; location < 11; ++location)
     {
         const VADef& d = formats[location];
         if ((d.type == GL_INT) ||

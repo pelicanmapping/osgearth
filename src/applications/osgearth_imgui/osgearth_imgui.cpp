@@ -6,6 +6,7 @@
 #include <osgEarth/EarthManipulator>
 #include <osgEarth/ExampleResources>
 #include <osgViewer/Viewer>
+#include <osgGA/TrackballManipulator>
 
 #include <osgEarthImGui/LayersGUI>
 #include <osgEarthImGui/ContentBrowserGUI>
@@ -16,12 +17,14 @@
 #include <osgEarthImGui/LiveCamerasGUI>
 #include <osgEarthImGui/SystemGUI>
 #include <osgEarthImGui/EnvironmentGUI>
+#include <osgEarthImGui/ExternalAssetsGUI>
 #include <osgEarthImGui/TerrainGUI>
 #include <osgEarthImGui/ShaderGUI>
 #include <osgEarthImGui/CameraGUI>
 #include <osgEarthImGui/RenderingGUI>
 #include <osgEarthImGui/AnnotationsGUI>
 #include <osgEarthImGui/PickerGUI>
+#include <osgEarthImGui/PrestigeAssetsGUI>
 #include <osgEarthImGui/OpenEarthFileGUI>
 #include <osgEarthImGui/ResourceLibraryGUI>
 #include <osgEarthImGui/DecalsGUI>
@@ -94,11 +97,13 @@ main(int argc, char** argv)
         ui->add("Tools", new ContentBrowserGUI());
         ui->add("Tools", new DecalsGUI());
         ui->add("Tools", new EnvironmentGUI());
+        ui->add("Tools", new ExternalAssetsGUI());
         ui->add("Tools", new NetworkMonitorGUI());
         ui->add("Tools", new NVGLInspectorGUI());
         ui->add("Tools", new AnnotationsGUI());
         ui->add("Tools", new LayersGUI());
         ui->add("Tools", new PickerGUI());
+        ui->add("Tools", new PrestigeAssetsGUI());
         ui->add("Tools", new RenderingGUI());
         ui->add("Tools", new ResourceLibraryGUI());
         ui->add("Tools", new SceneGraphGUI());
@@ -137,17 +142,24 @@ main(int argc, char** argv)
         // Put it on the front of the list so events don't filter through to other handlers.
         viewer.getEventHandlers().push_front(ui);
 
-        // Install a select-extent tool that panels can access.
-        auto selectTool = new Contrib::SelectExtentTool(MapNode::get(node));
-        selectTool->getStyle().getOrCreateSymbol<LineSymbol>()->stroke()->color() = Color::Red;
-        selectTool->setModKeyMask(osgGA::GUIEventAdapter::MODKEY_SHIFT);
-        selectTool->onSelect([ui](const osgEarth::GeoExtent& extent)
-            {
-                ui->setSelectedExtent(extent);
-            });
+        auto mapNode = MapNode::get(node);
+        if (mapNode)
+        {
+            // Install a select-extent tool that panels can access.
+            auto selectTool = new Contrib::SelectExtentTool(mapNode);
+            selectTool->getStyle().getOrCreateSymbol<LineSymbol>()->stroke()->color() = Color::Red;
+            selectTool->setModKeyMask(osgGA::GUIEventAdapter::MODKEY_SHIFT);
+            selectTool->onSelect([ui](const osgEarth::GeoExtent& extent)
+                {
+                    ui->setSelectedExtent(extent);
+                });
 
-        viewer.getEventHandlers().push_front(selectTool);
-
+            viewer.getEventHandlers().push_front(selectTool);
+        }
+        else
+        {
+            viewer.setCameraManipulator(new osgGA::TrackballManipulator());
+        }
         viewer.setSceneData(node);
         return viewer.run();
     }

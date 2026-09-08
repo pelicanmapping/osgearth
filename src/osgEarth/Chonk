@@ -18,6 +18,9 @@
 // Usage hint to signal which textures are external materials. Currently only two slots are supported [0, 1]
 #define CHONK_HINT_EXTENDED_MATERIAL_SLOT "osgEarth.Chonk.ExtendedMaterial.Slot"
 
+// Geometry colors are linear multipliers; encode the modulated albedo to sRGB.
+#define CHONK_HINT_LINEAR_COLOR "osgEarth.Chonk.LinearColor"
+
 namespace osgEarth
 {
     class OSGEARTH_EXPORT ChonkMaterial
@@ -92,6 +95,7 @@ namespace osgEarth
             osg::Vec3f normal;
             char normal_technique = (char)0;
             osg::Vec4ub color;
+            GLubyte color_is_linear = 0;
             osg::Vec2f uv;
             osg::Vec3f flex;
 

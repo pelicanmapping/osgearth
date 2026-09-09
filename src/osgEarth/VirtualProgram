@@ -66,7 +66,7 @@ namespace osgEarth
             void releaseGLObjects(osg::State* state) const;
 
             //! Link a program, attempting to read/write its binary from the cache
-            //! if one is specified
+            //! if one is specified. Acquires the repository lock internally.
             void linkProgram(
                 const Key&,
                 osg::Program*, 

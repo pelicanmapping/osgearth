@@ -25,6 +25,11 @@ void oe_phong_vertex(inout vec4 VertexVIEW)
 
 #pragma import_defines(OE_LIGHTING)
 #pragma import_defines(OE_NUM_LIGHTS)
+#pragma import_defines(OE_SHADOWING)
+
+#ifdef OE_SHADOWING
+float oe_shadow_visibility;
+#endif
 
 #ifdef OE_LIGHTING
 
@@ -124,9 +129,14 @@ void oe_phong_fragment(inout vec4 color)
                 osg_LightSource[i].ambient.rgb;
 
             float NdotL = max(dot(N,L), 0.0); 
+            float visibility = 1.0;
+#ifdef OE_SHADOWING
+            if (i == 0) visibility = oe_shadow_visibility;
+#endif
 
             vec3 diffuseReflection =
                 attenuation
+                * visibility
                 * osg_LightSource[i].diffuse.rgb
                 * NdotL;
                 
@@ -138,6 +148,7 @@ void oe_phong_fragment(inout vec4 color)
 
                 specularReflection =
                     attenuation
+                    * visibility
                     * osg_LightSource[i].specular.rgb
                     * surfaceSpecularity
                     * pow(HdotV, shine);

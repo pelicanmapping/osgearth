@@ -99,7 +99,10 @@ namespace osgEarth
             if (menu.empty())
                 add(panel);
             else
+            {
+                panel->_dirtySettings = &_dirtySettings;
                 _menu[menu].push_back(GUIPtr(panel));
+            }
         }
 
         void addSeparator(const std::string& menu)

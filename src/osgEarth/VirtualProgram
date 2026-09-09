@@ -12,6 +12,8 @@
 #include <osg/Program>
 #include <osg/StateAttribute>
 #include <osg/buffered_value>
+#include <osg/observer_ptr>
+#include <atomic>
 #include <string>
 #include <map>
 #include <unordered_set>
@@ -19,14 +21,20 @@
 namespace osgEarth
 {
     class VirtualProgram;
+    struct VirtualProgramAccess;
 
     namespace Util
     {
         class OSGEARTH_EXPORT ProgramRepo : public Threading::Mutexed<osg::Referenced>
         {
         public:
-            // Program key (must be sorted set)
-            using Key = std::set<unsigned>;
+            // Internal runtime key (not a source/ABI-compatible std::set).
+            // Ordered, unambiguous composition descriptor. Hash collisions are
+            // resolved by comparing the complete key. Not a persistent disk key.
+            using Key = std::vector<std::uint64_t>;
+            struct OSGEARTH_EXPORT KeyHash {
+                std::size_t operator()(const Key& key) const;
+            };
 
             // Referenced, b/c more than one ProgramKey can point to the same Entry
             // (shared program)
@@ -36,8 +44,12 @@ namespace osgEarth
                 osg::ref_ptr<osg::Program> _program;
                 unsigned _frameLastUsed;
                 std::unordered_set<UID> _users;
+                std::vector<Key> _keys;
             };
-            using ProgramMap = std::map<Key, Entry::Ptr>;
+            using ProgramMap = std::unordered_map<Key, Entry::Ptr, KeyHash>;
+
+            // The caller holds the repository lock for use/add/release/prune
+            // and GL lifecycle operations. Cached programs are immutable.
 
             //! Search for a program matching the key and return it, adding the user
             //! to its users list and updating the frame number.
@@ -45,6 +57,13 @@ namespace osgEarth
 
             //! Insert a new program into the repo
             void add(const Key& key, osg::ref_ptr<osg::Program>& inOut, unsigned frameNumber, UID user);
+
+            //! Debug editor: replace a cached program with a copy containing the
+            //! edited shader. Applies to all aliases of this composition; other
+            //! compositions and registered shader sources remain unchanged.
+            //! Acquires the repository lock internally. Returns null if stale.
+            osg::ref_ptr<osg::Program> editShader(
+                osg::Program* program, unsigned shaderIndex, const std::string& source);
 
             //! Release anything used by this user
             void release(UID user, osg::State* state);
@@ -78,11 +97,12 @@ namespace osgEarth
             ~ProgramRepo();
 
             ProgramMap copy() const {
-                lock();
-                auto result = _db;
-                unlock();
-                return result;
+                std::lock_guard<const ProgramRepo> guard(*this);
+                return _db;
             }
+
+            // Invalidates draw-local ownership and GL object caches on release.
+            std::uint64_t getGeneration() const { return _generation.load(std::memory_order_acquire); }
 
             //! Repository for simple, reusable VP objects.
             osg::ref_ptr<VirtualProgram> getOrCreateVirtualProgram(
@@ -90,7 +110,15 @@ namespace osgEarth
                 std::function<VirtualProgram*()> create);
 
         private:
+            struct ProgramLess {
+                bool operator()(const osg::ref_ptr<osg::Program>& lhs,
+                    const osg::ref_ptr<osg::Program>& rhs) const;
+            };
+            void touch(const Entry::Ptr& entry, unsigned frameNumber, UID user);
             mutable ProgramMap _db;
+            mutable std::map<osg::ref_ptr<osg::Program>, Entry::Ptr, ProgramLess> _programs;
+            mutable std::unordered_map<UID, std::unordered_set<Entry::Ptr>> _entriesByUser;
+            mutable std::atomic<std::uint64_t> _generation{1};
             bool _releaseUnusedPrograms;
             std::string _programBinaryCacheFolder;
             std::unordered_map<std::string, osg::ref_ptr<VirtualProgram>> _virtualProgramLUT;
@@ -106,6 +134,13 @@ namespace osgEarth
      * VirtualProgram enables GLSL shader composition within osgEarth. It automatically
      * assembles shader functions into a full shader program at run time. You can add
      * or remove functions (injection points) at any time.
+     *
+     * Shaders registered with setShader() or setFunction() are treated as immutable
+     * for fast program-cache reuse. If you later change an underlying osg::Shader
+     * through a retained pointer (including one obtained from getPolyShader()),
+     * you MUST call dirty() after the edit and before rendering again. This applies
+     * to source, defines, requirements, code injections, and shader binary data.
+     * setShader() and setFunction() handle invalidation automatically.
      *
      * Read about shader composition:
      * http://docs.osgearth.org/en/latest/developer/shader_composition.html
@@ -237,11 +272,13 @@ namespace osgEarth
             const std::string& getShaderSource() const { return _source; }
 
             /** Given a mask of all available stages, return the shader that will run
-                this polyshader in the appropriate stage. */
+                this polyshader in the appropriate stage. Call VirtualProgram::dirty()
+                after modifying the returned shader. */
             osg::Shader* getShader(unsigned mask) const;
 
-            /** The shader in its named stage. */
-            osg::Shader* getNominalShader() const { return _nominalShader.get(); }
+            /** The shader in its named stage. Call VirtualProgram::dirty() after
+                modifying the returned shader. */
+            osg::Shader* getNominalShader() const;
 
             //! Is this component a fragment or output shader?
             bool isFragmentStage() const { return _nominalShader->getType() == osg::Shader::FRAGMENT; }
@@ -249,8 +286,11 @@ namespace osgEarth
             /** Generates the shaders. */
             void prepare();
 
-            //! Unique hash for this object
+            //! Legacy source hash; do not use as a unique shader identity.
             unsigned getHash();
+
+            //! Process-local identity, changed whenever the prepared shader changes.
+            std::uint64_t getKeyID() const { return _keyID; }
 
             /** Called from the draw context to resize shader buffers as necessary (OSG) */
             virtual void resizeGLObjectBuffers(unsigned maxSize);
@@ -271,6 +311,7 @@ namespace osgEarth
             std::string _source;
             VirtualProgram::FunctionLocation _location;
             optional<std::uint64_t> _hash;
+            mutable std::uint64_t _keyID;
 
             // The shader built for the nominal program stage (nominalType)
             osg::ref_ptr<osg::Shader> _nominalShader;
@@ -280,6 +321,14 @@ namespace osgEarth
             osg::ref_ptr<osg::Shader> _tessevalShader;
 
             bool _dirty;
+
+        private:
+            friend struct VirtualProgramAccess;
+            struct ShaderSnapshot;
+            mutable std::shared_ptr<ShaderSnapshot> _shaderSnapshot;
+            mutable std::mutex _snapshotMutex;
+            void refreshShaderSnapshot() const;
+            osg::Shader* selectShader(unsigned mask) const;
         };
 
     public:
@@ -324,6 +373,8 @@ namespace osgEarth
     public:
         /**
          * Adds a custom shader function to the program.
+         * Registered shaders are treated as immutable. If you modify an underlying
+         * osg::Shader obtained from getPolyShader(), call dirty() after the edit.
          *
          * Call this method (rather than setShader directly) to inject "user" functions into the
          * shader program.
@@ -401,6 +452,8 @@ namespace osgEarth
 
         /** 
          * Adds a shader to this VP's shader table.
+         * The shader is treated as immutable after registration. Call dirty() after
+         * changing its source or other shader properties through a retained pointer.
          */
         osg::Shader* setShader( 
             const std::string&                 shaderID, 
@@ -410,6 +463,18 @@ namespace osgEarth
         osg::Shader* setShader(
             osg::Shader*                       shader,
             osg::StateAttribute::OverrideValue ov         =osg::StateAttribute::ON );
+
+        /**
+         * Notifies the program cache of edits to registered osg::Shader objects.
+         * Call after editing a retained shader pointer and before the next draw.
+         * This also invalidates other VirtualPrograms that share the edited shader;
+         * unrelated compositions may be revalidated conservatively.
+         * Calls to setShader() and setFunction() already invalidate automatically.
+         * As with shader edits, synchronize this call with rendering.
+         * This does not regenerate PolyShader stage variants: use setFunction()
+         * to replace a function's source in all of its stages.
+         */
+        void dirty();
 
         /** Removes a shader from the local VP. */
         void removeShader( const std::string& shaderID );
@@ -443,11 +508,11 @@ namespace osgEarth
         void setAcceptCallbacksVaryPerFrame(bool acceptCallbacksVaryPerFrame);
 
         /** Inheritance mask */
-        void setMask(unsigned mask) { _mask = mask; }
+        void setMask(unsigned mask);
         unsigned getMask() const { return _mask; }
 
         /** Sets whether this VP is "abstract", i.e. pure virtual, and cannot be compiled on its own */
-        void setIsAbstract(bool value) { _isAbstract = value; }
+        void setIsAbstract(bool value);
         bool getIsAbstract() const { return _isAbstract; }
 
     public: // StateAttribute
@@ -475,7 +540,7 @@ namespace osgEarth
             bool operator < (const ShaderEntry& rhs) const;
         };
 
-        using ShaderID = unsigned;
+        using ShaderID = std::uint64_t;
         // vector_map benchmarks much faster than std::map or std::unordered_map in this use case
         using ShaderMap = vector_map<ShaderID, ShaderEntry>;
         using ExtensionsSet = vector_set<std::string>;
@@ -529,6 +594,8 @@ namespace osgEarth
         // holds the injection points the user has added to this VP.
         // _dataModelMutex protects access to this member.
         FunctionLocationMap _functions;
+        // Exact function schedule, encoded on edits instead of each draw.
+        ProgramRepo::Key _functionKey;
 
         // whether this VP inherits its state
         bool _inherit;
@@ -541,16 +608,12 @@ namespace osgEarth
 
         ExtensionsSet _globalExtensions;
 
-        // per-context cached shader map for thread-safe reuse without constant reallocation.
-        struct ApplyVars
-        {
-            ShaderMap accumShaderMap;
-            ProgramRepo::Key programKey;
-            AttribBindingList accumAttribBindings;
-            AttribAliasMap accumAttribAliases;
-            ExtensionsSet accumExtensions;
-        };
-        mutable osg::buffered_object<ApplyVars> _apply;
+        // Per-State storage: OSG can assign the same context ID to independent
+        // render threads whose contexts share GL resources. Heap entries remain
+        // stable while other live States register with the same VP.
+        struct ApplyVars;
+        mutable std::mutex _applyMutex;
+        mutable std::unordered_map<const osg::State*, std::unique_ptr<ApplyVars>> _apply;
 
         // protects access to the data members, which may be accessed by other VPs in the state stack.
         mutable std::mutex _dataModelMutex;
@@ -587,7 +650,14 @@ namespace osgEarth
             AttribBindingList& accumAttribBindings,
             AttribAliasMap&    accumAttribAliases,
             ExtensionsSet&     accumExtensions,
-            bool&              acceptCallbacksPresent);
+            bool&              acceptCallbacksPresent,
+            const VirtualProgram* exclude = nullptr,
+            ProgramRepo::Key* key = nullptr);
+
+        // Caller holds _dataModelMutex.
+        void accumulateLocalShaders(ShaderMap& accumMap, const osg::State& state,
+            ProgramRepo::Key* key = nullptr) const;
+        void updateFunctionKey(); // caller holds _dataModelMutex
 
         bool checkSharing();
 

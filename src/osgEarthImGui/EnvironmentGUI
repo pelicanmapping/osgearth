@@ -87,10 +87,10 @@ namespace osgEarth
         bool _showDetails = false;
         float _hour;
         int _day, _month, _year;
-        float _exposure = 3.5f;
+        float _exposure = 3.3f;
         float _contrast = 1.0f;
         float _ambient = 0.033f;
-        float _max_ambient_intensity = 0.75;
+        float _max_ambient_intensity = 0.15f;
         bool _first = true;
         bool _shadows = false;
         float _haze_cutoff = 0.0f, _haze_strength = 16.0f;
@@ -110,6 +110,7 @@ namespace osgEarth
             conf.get("Exposure", _exposure);
             conf.get("Contrast", _contrast);
             conf.get("Ambient", _ambient);
+            conf.get("AmbientMax", _max_ambient_intensity);
             conf.get("HazeCutoff", _haze_cutoff);
             conf.get("HazeStrength", _haze_strength);
             conf.get("WindPower", _wind_power);
@@ -120,6 +121,7 @@ namespace osgEarth
             conf.set("Exposure", _exposure);
             conf.set("Contrast", _contrast);
             conf.set("Ambient", _ambient);
+            conf.set("AmbientMax", _max_ambient_intensity);
             conf.set("HazeCutoff", _haze_cutoff);
             conf.set("HazeStrength", _haze_strength);
             conf.set("WindPower", _wind_power);

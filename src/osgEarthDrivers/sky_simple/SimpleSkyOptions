@@ -27,7 +27,7 @@ namespace osgEarth {
                 _allowWireframe(false),
                 _starSize(14.0f),
                 _moonScale(2.0f),
-                _maxAmbientIntensity(0.75f),
+                _maxAmbientIntensity(0.15f),
                 _moonImageURI("moon_1024x512.jpg"),
                 _sunVisible(true),
                 _moonVisible(true),
@@ -58,7 +58,7 @@ namespace osgEarth {
             optional<float>& daytimeAmbientBoost() { return _daytimeAmbientBoost; }
             const optional<float>& daytimeAmbientBoost() const { return _daytimeAmbientBoost; }
 
-            //! Maximum ambient value at high noon. Default=0.75
+            //! Maximum daytime ambient intensity. Default=0.15
             optional<float>& maxAmbientIntensity() { return _maxAmbientIntensity; }
             const optional<float>& maxAmbientIntensity() const { return _maxAmbientIntensity; }
 

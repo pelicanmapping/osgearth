@@ -212,7 +212,8 @@ SimpleSkyNode::construct()
 
     _light = new LightGL3(0);
     _light->setPosition(osg::Vec4f(0.0f, 0.0f, 1.0f, 0.0f));
-    _light->setAmbient(osg::Vec4f(1.0f, 1.0f, 1.0f, 1.0f));
+    float ambient = osg::clampBetween(_options.ambient().get(), 0.0f, 1.0f);
+    _light->setAmbient(osg::Vec4f(ambient, ambient, ambient, 1.0f));
     _light->setDiffuse(osg::Vec4f(1.0f, 1.0f, 1.0f, 1.0f));
     _light->setSpecular(osg::Vec4f(1.0f, 1.0f, 1.0f, 1.0f)); // does nothing in PBR mode
 
@@ -222,12 +223,6 @@ SimpleSkyNode::construct()
     lightSource->setCullingActive(false);
     _cullContainer->addChild(lightSource);
     lightSource->addCullCallback(new LightSourceGL3UniformGenerator());
-
-    if (_options.ambient().isSet())
-    {
-        float a = osg::clampBetween(_options.ambient().get(), 0.0f, 1.0f);
-        _light->setAmbient(osg::Vec4(a, a, a, 1.0f));
-    }
 
     // only supports geocentric for now.
     if (getReferencePoint().isValid())

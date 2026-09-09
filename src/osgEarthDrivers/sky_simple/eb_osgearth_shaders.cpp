@@ -10,7 +10,7 @@ header = R"(
 
 pbr = R"(
 
-uniform float oe_sky_maxAmbientIntensity = 0.75;
+uniform float oe_sky_maxAmbientIntensity = 0.15;
 
 // https://learnopengl.com/PBR/Lighting
 
@@ -174,7 +174,7 @@ in vec3 atmos_ambient;
 void atmos_eb_ground_render_frag(inout vec4 COLOR)
 {    
 #ifdef OE_LIGHTING
-    vec3 N = vp_Normal; //gl_FrontFacing ? vp_Normal : -vp_Normal;
+    vec3 N = normalize(vp_Normal);
 	vec3 sky_irradiance;
 	vec3 sun_irradiance = GetSunAndSkyIrradiance(atmos_center_to_vert, N, atmos_light_dir, sky_irradiance);
 	vec3 radiance = (1.0 / PI) * (sun_irradiance + sky_irradiance);
@@ -294,7 +294,7 @@ const vec3 white_point = vec3(1,1,1);
 void atmos_eb_ground_render_frag(inout vec4 COLOR)
 {
 #ifdef OE_LIGHTING
-    vec3 N = vp_Normal; //gl_FrontFacing ? vp_Normal : -vp_Normal;
+    vec3 N = normalize(vp_Normal);
 	vec3 sky_irradiance;
 	vec3 sun_irradiance = GetSunAndSkyIrradiance(atmos_center_to_vert, N, atmos_light_dir, sky_irradiance);
     vec3 radiance = (1.0 / PI) * (sun_irradiance + sky_irradiance);

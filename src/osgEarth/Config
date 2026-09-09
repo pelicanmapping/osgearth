@@ -12,6 +12,7 @@
 #include <vector>
 #include <istream>
 #include <functional>
+#include <string>
 
 namespace osgDB
 {

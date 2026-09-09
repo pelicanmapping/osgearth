@@ -22,6 +22,8 @@ namespace osgEarth {
             SimpleSkyOptions(const ConfigOptions& options = ConfigOptions()) :
                 SkyOptions(options),
                 _atmosphericLighting(true),
+                _environmentLighting(true),
+                _groundReflectance(0.15f),
                 _exposure(3.3f),
                 _daytimeAmbientBoost(5.0f),
                 _allowWireframe(false),
@@ -46,6 +48,14 @@ namespace osgEarth {
             /** Use advanced atmospheric lighting on the terrain (instead of simple shading) */
             optional<bool>& atmosphericLighting() { return _atmosphericLighting; }
             const optional<bool>& atmosphericLighting() const { return _atmosphericLighting; }
+
+            //! Add diffuse and specular sky environment lighting.
+            optional<bool>& environmentLighting() { return _environmentLighting; }
+            const optional<bool>& environmentLighting() const { return _environmentLighting; }
+
+            //! Mean ground reflectance for Bruneton indirect lighting; linear [0,1].
+            optional<float>& groundReflectance() { return _groundReflectance; }
+            const optional<float>& groundReflectance() const { return _groundReflectance; }
 
             /** Exposure factor for simulated HDR ground lighting. Default is in CTOR */
             optional<float>& exposure() { return _exposure; }
@@ -113,6 +123,8 @@ namespace osgEarth {
             Config getConfig() const {
                 Config conf = SkyOptions::getConfig();
                 conf.set("atmospheric_lighting", _atmosphericLighting);
+                conf.set("environment_lighting", _environmentLighting);
+                conf.set("ground_reflectance", _groundReflectance);
                 conf.set("exposure", _exposure);
                 conf.set("daytime_ambient_boost", _daytimeAmbientBoost);
                 conf.set("max_ambient_intensity", _maxAmbientIntensity);
@@ -140,6 +152,8 @@ namespace osgEarth {
         private:
             void fromConfig(const Config& conf) {
                 conf.get("atmospheric_lighting", _atmosphericLighting);
+                conf.get("environment_lighting", _environmentLighting);
+                conf.get("ground_reflectance", _groundReflectance);
                 conf.get("exposure", _exposure);
                 conf.get("daytime_ambient_boost", _daytimeAmbientBoost);
                 conf.get("max_ambient_intensity", _maxAmbientIntensity);
@@ -158,6 +172,8 @@ namespace osgEarth {
             }
 
             optional<bool>        _atmosphericLighting;
+            optional<bool>        _environmentLighting;
+            optional<float>       _groundReflectance;
             optional<float>       _exposure;
             optional<float>       _daytimeAmbientBoost;
             optional<float>       _maxAmbientIntensity;

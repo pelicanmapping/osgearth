@@ -19,7 +19,7 @@ ComputeDrawable::ComputeDrawable(
     _bottom_radius(bottom_radius),
     _top_radius(top_radius),
 
-    _sun_angular_radius(0.01935f),
+    _sun_angular_radius(0.004675f), // Mean solar half-angle, about 0.268 degrees.
 
     // higher values make no visible difference
     _length_unit_in_meters(1.0f),
@@ -304,6 +304,8 @@ ComputeDrawable::populateRenderingStateSets(
 
         if (i == 0) // ground
         {
+            ss->setDefine("OE_SKY_REFLECTION_SAMPLES", _best_quality ? "16" : "8");
+
             std::string vert =
                 common +
                 (_best_quality ? shaders.ground_best_vert : shaders.ground_fast_vert);

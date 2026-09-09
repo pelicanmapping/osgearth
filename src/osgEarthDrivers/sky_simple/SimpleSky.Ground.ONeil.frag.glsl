@@ -5,6 +5,17 @@
 #pragma import_defines(OE_LIGHTING)
 #pragma import_defines(OE_NUM_LIGHTS)
 #pragma import_defines(OE_USE_PBR)
+#pragma import_defines(OE_SHADOWING)
+#pragma import_defines(OE_SKY_ENVIRONMENT)
+
+#ifdef OE_SHADOWING
+float oe_shadow_visibility;
+#endif
+
+#ifdef OE_SKY_ENVIRONMENT
+uniform float oe_sky_iblStrength;
+vec3 oe_sky_environment(vec3 N, vec3 V, vec3 albedo, float roughness, float metal, float ao);
+#endif
 
 uniform float oe_sky_exposure = 3.3; // HDR scene exposure (ground level)
 uniform float oe_sky_ambientBoostFactor; // ambient sunlight booster for daytime (material mode only)
@@ -132,6 +143,7 @@ void atmos_fragment_main_pbr(inout vec4 color)
 
     vec3 Lo = vec3(0.0);
     vec3 ambientLight = vec3(0.0);
+    vec3 ambientMinimum = vec3(0.0);
     // Approximate the visible sky hemisphere independently of the sun direction.
     float skyVisibility = clamp(0.5 + 0.5 * dot(N, U), 0.0, 1.0);
 
@@ -170,11 +182,15 @@ void atmos_fragment_main_pbr(inout vec4 color)
 
         float sunElevation = dot(U, L);
         float sunVisibility = i == 0 ? atmos_sunVisibility(sunElevation) : 1.0;
+#ifdef OE_SHADOWING
+        if (i == 0) sunVisibility *= oe_shadow_visibility;
+#endif
 
         // Direct light uses the actual surface normal, including normal maps.
         Lo += (kD * albedo / PI + specular) * radiance * NdotL * sunVisibility;
 
         vec3 lightAmbient = osg_LightSource[i].ambient.rgb;
+        ambientMinimum += lightAmbient;
         if (i == 0)
         {
             // Keep the night-time minimum, and fade toward the daytime sky
@@ -187,6 +203,14 @@ void atmos_fragment_main_pbr(inout vec4 color)
     }
 
     vec3 ambient = clamp(ambientLight, 0.0, 1.0) * albedo * oe_pbr.ao;
+
+#ifdef OE_SKY_ENVIRONMENT
+    vec3 environment = oe_sky_environment(N, V, albedo,
+        oe_pbr.roughness, oe_pbr.metal, oe_pbr.ao);
+    if (!osg_LightSource[0].enabled) environment = vec3(0.0);
+    ambient = mix(ambient, clamp(ambientMinimum, 0.0, 1.0) * albedo * oe_pbr.ao + environment,
+        clamp(oe_sky_iblStrength, 0.0, 1.0));
+#endif
 
     color.rgb = ambient + Lo;
 
@@ -287,6 +311,9 @@ void atmos_fragment_material(inout vec4 color)
 
             // Apply the same horizon visibility to diffuse and specular sunlight.
             float sunVisibility = i == 0 ? atmos_sunVisibility(dayTerm) : 1.0;
+#ifdef OE_SHADOWING
+            if (i == 0) sunVisibility *= oe_shadow_visibility;
+#endif
 
             vec3 diffuseReflection =
                 attenuation

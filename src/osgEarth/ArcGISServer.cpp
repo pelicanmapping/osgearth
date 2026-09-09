@@ -689,6 +689,10 @@ ArcGISServerElevationLayer::closeImplementation()
 GeoHeightField
 ArcGISServerElevationLayer::createHeightFieldImplementation(const TileKey& key, ProgressCallback* progress) const
 {
+    // Avoid accessing null _imageLayer in case layer was deleted
+    if (getStatus().isError() || !_imageLayer)
+      return GeoHeightField(getStatus());
+
     // Make an image, then convert it to a heightfield
     GeoImage image = _imageLayer->createImageImplementation(key, progress);
     if (image.valid())

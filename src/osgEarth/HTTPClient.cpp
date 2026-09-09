@@ -1037,17 +1037,13 @@ namespace
                 urlcomp.nScheme == INTERNET_SCHEME_HTTPS ? INTERNET_DEFAULT_HTTPS_PORT :
                 INTERNET_DEFAULT_HTTP_PORT;
 
-            char hostName[128];
-            char urlPath[256];
-            memset(urlPath, 0, sizeof(urlPath));
-            memset(hostName, 0, sizeof(hostName));
-            strncpy(hostName, urlcomp.lpszHostName, urlcomp.dwHostNameLength);
-            strncpy(urlPath, urlcomp.lpszUrlPath, urlcomp.dwUrlPathLength);
+            std::string hostName(urlcomp.lpszHostName, urlcomp.dwHostNameLength);
+            std::string urlPath(urlcomp.lpszUrlPath, urlcomp.dwUrlPathLength);
 
             OE_TEST
                 << "\n"
                 << "Host name = " << hostName << "\n"
-                << "Url path = " << urlcomp.lpszUrlPath << "\n"
+                << "Url path = " << urlPath << "\n"
                 << "Port = " << port << "\n";
 
             DWORD openFlags =
@@ -1067,7 +1063,7 @@ namespace
 
             HINTERNET hConnection = InternetConnect(
                 hInternet,
-                hostName,
+                hostName.c_str(),
                 port,
                 "", // username
                 "", // password
@@ -1089,7 +1085,7 @@ namespace
             HINTERNET hRequest = HttpOpenRequest(
                 hConnection,            // handle from InternetConnect
                 "GET",                  // verb
-                urlPath,                // path
+                urlPath.c_str(),        // path
                 NULL,                   // HTTP version (NULL = default)
                 NULL,                   // Referrer
                 NULL,                   // Accept types

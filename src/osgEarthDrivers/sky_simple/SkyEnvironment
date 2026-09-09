@@ -1,0 +1,35 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/TerrainResources>
+#include <osg/TextureCubeMap>
+#include <osg/Texture2D>
+#include <osg/View>
+#include <osg/Uniform>
+#include <chrono>
+
+namespace osgEarth { namespace SimpleSky {
+
+// A local, procedural sky probe. It contains sky and ground radiance, not
+// reflected scene geometry. All images and coefficients are in linear space.
+class SkyEnvironment : public osg::Referenced
+{
+public:
+    bool attach(osg::StateSet* stateset, TerrainResources* resources);
+    void update(osg::View* view, const osg::Vec3d& sunDirection);
+    bool isReady() const { return _initialized; }
+
+private:
+    TextureImageUnitReservation _environmentUnit, _brdfUnit;
+    osg::ref_ptr<osg::TextureCubeMap> _environment;
+    osg::ref_ptr<osg::Texture2D> _brdf;
+    osg::ref_ptr<osg::Uniform> _irradiance;
+    osg::Vec3d _lastUp, _lastSun;
+    bool _initialized = false;
+    std::chrono::steady_clock::time_point _lastUpdate;
+};
+
+} }

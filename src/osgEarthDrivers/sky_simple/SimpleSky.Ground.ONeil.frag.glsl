@@ -5,10 +5,21 @@
 #pragma import_defines(OE_LIGHTING)
 #pragma import_defines(OE_NUM_LIGHTS)
 #pragma import_defines(OE_USE_PBR)
+#pragma import_defines(OE_SHADOWING)
+#pragma import_defines(OE_SKY_ENVIRONMENT)
+
+#ifdef OE_SHADOWING
+float oe_shadow_visibility;
+#endif
+
+#ifdef OE_SKY_ENVIRONMENT
+uniform float oe_sky_iblStrength;
+vec3 oe_sky_environment(vec3 N, vec3 V, vec3 albedo, float roughness, float metal, float ao);
+#endif
 
 uniform float oe_sky_exposure = 3.3; // HDR scene exposure (ground level)
 uniform float oe_sky_ambientBoostFactor; // ambient sunlight booster for daytime (material mode only)
-uniform float oe_sky_maxAmbientIntensity = 0.75; // maximum daytime ambient intensity (PBR mode only)
+uniform float oe_sky_maxAmbientIntensity = 0.15; // maximum daytime ambient intensity (PBR mode only)
 
 in vec3 atmos_lightDir;    // light direction (view coords)
 in vec3 atmos_color;       // atmospheric lighting color
@@ -105,8 +116,13 @@ vec3 atmos_safeNormalize(vec3 value, vec3 fallback)
     return length2 > 1e-12 ? value * inversesqrt(length2) : fallback;
 }
 
-const float oe_wrap = 0.22;
-uniform float oe_normal_boost = 1.0;
+float atmos_sunVisibility(float sunElevation)
+{
+    // Fade across the horizon (about 0.6 degrees on either side). Above it,
+    // let NdotL control direct sunlight instead of dimming every surface by
+    // the sun's elevation. Below it, prevent light from shining through Earth.
+    return smoothstep(-0.01, 0.01, sunElevation);
+}
 
 #ifdef OE_USE_PBR
 void atmos_fragment_main_pbr(inout vec4 color)
@@ -126,7 +142,10 @@ void atmos_fragment_main_pbr(inout vec4 color)
     F0 = mix(F0, albedo, vec3(oe_pbr.metal));
 
     vec3 Lo = vec3(0.0);
-    float ai = 0.0; // ambient intensity (based on time of day)
+    vec3 ambientLight = vec3(0.0);
+    vec3 ambientMinimum = vec3(0.0);
+    // Approximate the visible sky hemisphere independently of the sun direction.
+    float skyVisibility = clamp(0.5 + 0.5 * dot(N, U), 0.0, 1.0);
 
     for (int i = 0; i < OE_NUM_LIGHTS; ++i)
     {
@@ -145,16 +164,12 @@ void atmos_fragment_main_pbr(inout vec4 color)
 
         float NdotL = max(dot(N, L), 0.0);
 
-        // wrap diffuse:
-        // https://developer.nvidia.com/gpugems/gpugems/part-iii-materials/chapter-16-real-time-approximations-subsurface-scattering
-        float NdotL_wrap = max(0.0, (NdotL + oe_wrap) / (1.0 + oe_wrap));
-
         float NdotV = max(0.0, dot(N, V));
 
         // cook-torrance BRDF:
         float roughness = clamp(oe_pbr.roughness, 0.0, 1.0);
         float NDF = DistributionGGX(N, H, roughness);
-        float G = GeometrySmith(NdotV, NdotL_wrap, roughness);
+        float G = GeometrySmith(NdotV, NdotL, roughness);
         vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
 
         vec3 kS = F;
@@ -162,20 +177,40 @@ void atmos_fragment_main_pbr(inout vec4 color)
         kD *= 1.0 - oe_pbr.metal;
 
         vec3 numerator = NDF * G * F;
-        float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL_wrap;
+        float denominator = 4.0 * NdotV * NdotL;
         vec3 specular = NdotL > 0.0 ? numerator / max(denominator, 0.001) : vec3(0.0);
 
-        // daytime metric
-        float day = i == 0 ? max(0.0, dot(U, L)) : 1.0;
+        float sunElevation = dot(U, L);
+        float sunVisibility = i == 0 ? atmos_sunVisibility(sunElevation) : 1.0;
+#ifdef OE_SHADOWING
+        if (i == 0) sunVisibility *= oe_shadow_visibility;
+#endif
 
-        // color contribution
-        Lo += (kD * albedo / PI + specular) * radiance * NdotL_wrap * day;
+        // Direct light uses the actual surface normal, including normal maps.
+        Lo += (kD * albedo / PI + specular) * radiance * NdotL * sunVisibility;
 
-        // ambient intesntity contribution
-        ai = max(ai, NdotL_wrap * oe_sky_maxAmbientIntensity) * day;
+        vec3 lightAmbient = osg_LightSource[i].ambient.rgb;
+        ambientMinimum += lightAmbient;
+        if (i == 0)
+        {
+            // Keep the night-time minimum, and fade toward the daytime sky
+            // fill. Do not add another NdotL-based light on top of the BRDF.
+            vec3 skyAmbient = vec3(oe_sky_maxAmbientIntensity * skyVisibility);
+            lightAmbient = mix(lightAmbient, max(lightAmbient, skyAmbient),
+                clamp(sunElevation, 0.0, 1.0));
+        }
+        ambientLight += lightAmbient;
     }
 
-    vec3 ambient = clamp(osg_LightSource[0].ambient.rgb + vec3(ai), 0.0, 1.0) * albedo * oe_pbr.ao;
+    vec3 ambient = clamp(ambientLight, 0.0, 1.0) * albedo * oe_pbr.ao;
+
+#ifdef OE_SKY_ENVIRONMENT
+    vec3 environment = oe_sky_environment(N, V, albedo,
+        oe_pbr.roughness, oe_pbr.metal, oe_pbr.ao);
+    if (!osg_LightSource[0].enabled) environment = vec3(0.0);
+    ambient = mix(ambient, clamp(ambientMinimum, 0.0, 1.0) * albedo * oe_pbr.ao + environment,
+        clamp(oe_sky_iblStrength, 0.0, 1.0));
+#endif
 
     color.rgb = ambient + Lo;
 
@@ -274,14 +309,15 @@ void atmos_fragment_material(inout vec4 color)
 
             float NdotL = max(dot(N,L), 0.0);
 
-            // this term, applied to light 0 (the sun), attenuates the diffuse light
-            // during the nighttime, so that geometry doesn't get lit based on its
-            // normals during the night.
-            float diffuseAttenuation = clamp(dayTerm+0.35, 0.0, 1.0);
+            // Apply the same horizon visibility to diffuse and specular sunlight.
+            float sunVisibility = i == 0 ? atmos_sunVisibility(dayTerm) : 1.0;
+#ifdef OE_SHADOWING
+            if (i == 0) sunVisibility *= oe_shadow_visibility;
+#endif
 
             vec3 diffuseReflection =
                 attenuation
-                * diffuseAttenuation
+                * sunVisibility
                 * osg_LightSource[i].diffuse.rgb
                 * NdotL;
 
@@ -298,6 +334,7 @@ void atmos_fragment_material(inout vec4 color)
                 specularReflection =
                       specAttenuation
                     * attenuation
+                    * sunVisibility
                     * osg_LightSource[i].specular.rgb
                     * surfaceSpecularity.rgb
                     * pow(HdotV, shine);

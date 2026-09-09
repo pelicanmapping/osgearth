@@ -286,6 +286,21 @@ ProgramRepo::linkProgram(
 {
     OE_PROFILING_ZONE_NAMED("link");
 
+    // The Program is shared by define variants and graphics contexts. Serialize
+    // linking so another context cannot replace its binary while it is in use.
+    std::lock_guard<ProgramRepo> lock(*this);
+
+    // A binary belongs only to this link attempt. Start clean for cache misses
+    // (including failed file opens or disabled caching), and detach it on exit
+    // so another define variant cannot reuse it.
+    struct ClearProgramBinary
+    {
+        osg::Program* program;
+        ~ClearProgramBinary() { program->setProgramBinary(nullptr); }
+    } clearProgramBinary{ program };
+
+    program->setProgramBinary(nullptr);
+
     if (isProgramBinaryCachingActive())
     {
         bool readFromCache = false;

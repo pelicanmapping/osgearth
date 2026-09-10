@@ -148,9 +148,10 @@ void cull()
     input_instances[i].visibility[lod] = 0.0;
 
     // bail if our chonk does not have this LOD
-    uint v = input_instances[i].first_lod_cmd_index + lod;
-    if (lod >= chonks[v].num_lods)
+    uint first = input_instances[i].first_lod_cmd_index;
+    if (lod >= chonks[first].num_lods)
         return;
+    uint v = first + lod;
 
     // intialize:
     float fade = 1.0;
@@ -160,8 +161,8 @@ void cull()
     vec4 center = xform * vec4(chonks[v].bs.xyz, 1);
     vec4 center_view = gl_ModelViewMatrix * center;
 
-    float max_scale = max(xform[0][0], max(xform[1][1], xform[2][2]));
-    float r = chonks[v].bs.w * max_scale;
+    // The CPU computes a conservative transformed radius once per instance.
+    float r = input_instances[i].radius;
 
 
 
@@ -182,7 +183,7 @@ void cull()
     // Trivially reject low-LOD instances that intersect the near clip plane:
     if ((lod > 0) && (proj[3][3] < 0.01)) // is perspective camera
     {
-        float near = proj[2][3] / (proj[2][2] - 1.0);
+        float near = proj[3][2] / (proj[2][2] - 1.0);
         if (-(center_view.z + r) <= near)
         {
             REJECT(REASON_NEARCLIP);
@@ -197,7 +198,15 @@ void cull()
 
     // Compute the minimum bounding box in clip space for this instance:
     vec4 LL, UR;
-    compute_clip_mbb(center_view, r, proj, LL, UR);
+    if (proj[3][3] < 0.01 && center_view.z + r >= 0.0)
+    {
+        // A bound crossing the eye plane cannot be bounded by projecting
+        // its corners (some homogeneous W values change sign). Keep it.
+        LL = vec4(-1e6);
+        UR = vec4(1e6);
+    }
+    else
+        compute_clip_mbb(center_view, r, proj, LL, UR);
 
     // Test against the view frustum:
     bool outsideFrustum =
@@ -278,15 +287,7 @@ void cull()
     // Send along the other values:
     input_instances[i].alpha_cutoff = chonks[v].alpha_cutoff;
 
-    // Send along the scaled radius of this instance
-    input_instances[i].radius = r;
-
-    // Bump all baseInstances following this one:
-    const uint cmd_count = chonks[v].total_num_commands;
-    for (uint i = v + 1; i < cmd_count; ++i)
-    {
-        atomicAdd(commands[i].cmd.baseInstance, 1);
-    }
+    // baseInstance is a fixed range assigned to this batch/LOD by the CPU.
 }
 
 // Copies the visible instances to a compacted output buffer.

@@ -84,5 +84,6 @@ namespace osgEarth
     private:
         osg::ref_ptr<const Profile> _profile;
         osg::ref_ptr<osgDB::Options> _readOptions;
+        std::shared_ptr<ChonkFactory> _detailChonks;
     };
 }

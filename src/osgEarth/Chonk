@@ -38,6 +38,10 @@ namespace osgEarth
         int pbr_index = -1;
         int material1_index = -1;
         int material2_index = -1;
+        int occlusion_index = -1;
+        // glTF: bit 0 selects the map convention; bit 1 enables PBR factors.
+        GLubyte gltf_material = 0;
+        osg::Vec4f pbr_factors = osg::Vec4f(1, 1, 1, 1);
 
         // store refs to the original textures when the
         // factory objects's texture arena is using auto-release.
@@ -47,6 +51,7 @@ namespace osgEarth
         Texture::Ptr pbr_tex;
         Texture::Ptr material1_tex;
         Texture::Ptr material2_tex;
+        Texture::Ptr occlusion_tex;
 
     private:
         //! hidden to force use of create()
@@ -105,6 +110,9 @@ namespace osgEarth
             GLshort normalmap_index = -1;
             GLshort pbr_index = -1;
             osg::Vec2s extended_material_index = osg::Vec2s(-1, -1);
+            GLshort occlusion_index = -1;
+            GLubyte gltf_material = 0;
+            osg::Vec4f pbr_factors = osg::Vec4f(1, 1, 1, 1);
         };
 
         static GLubyte NORMAL_TECHNIQUE_DEFAULT;
@@ -186,6 +194,19 @@ namespace osgEarth
         //! for preventint duplicate textures in the arena.
         void setGetOrCreateFunction(GetOrCreateFunction);
 
+        //! Read-only conversion of a static asset, shared across cells. The
+        //! cache is weak and keyed by the source graph and pixel limits.
+        //! Unsupported scene/state semantics return an empty pointer.
+        Chonk::Ptr getOrCreateChonk(osg::Node* node,
+            float far_pixel_scale = 0.0f, float near_pixel_scale = FLT_MAX);
+
+        //! Replace compatible external instance batches with one ChonkDrawable.
+        //! Retains ordinary/unsupported content and tracks asset reload/unload
+        //! on update traversal. The shared factory must use the texture arena
+        //! installed above the returned node. Paging/geo transforms stay outside.
+        static osg::ref_ptr<osg::Node> convertExternalInstances(
+            osg::Node* node, std::shared_ptr<ChonkFactory> factory);
+
         //! For the given node, this method populates the provided Chonk wit
         //! its geometry. If the factory finds any InstancedGeometry's along
         //! the way it will create a Chonk for each one in out_instances.
@@ -212,6 +233,13 @@ namespace osgEarth
     private:
         mutable std::vector<Texture::WeakPtr> _texcache;
         mutable std::mutex _texcache_mutex;
+        struct CachedChonk {
+            osg::observer_ptr<osg::Node> source;
+            Chonk::WeakPtr chonk;
+            float farScale, nearScale;
+        };
+        std::vector<CachedChonk> _chonkCache;
+        std::mutex _chonkCacheMutex;
     };
 
     /**
@@ -280,6 +308,10 @@ namespace osgEarth
         bool empty() const {
             return _batches.empty();
         }
+
+        //! Logical counts, excluding GPU workgroup padding and LOD duplication.
+        std::size_t getNumInstances() const;
+        std::size_t getNumBatches() const;
 
     public:
 

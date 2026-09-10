@@ -62,9 +62,9 @@ const CesiumAsync::HttpHeaders& AssetResponse::headers() const
     return _headers;
 }
 
-gsl::span<const std::byte> AssetResponse::data() const
+std::span<const std::byte> AssetResponse::data() const
 {
-    return gsl::span<const std::byte>(_result.data(), _result.size());
+    return std::span<const std::byte>(_result.data(), _result.size());
 }
 
 /**********************************************/
@@ -131,7 +131,7 @@ AssetAccessor::request(
     const std::string& verb,
     const std::string& url,
     const std::vector<CesiumAsync::IAssetAccessor::THeader>& headers,
-    const gsl::span<const std::byte>& contentPayload)
+    const std::span<const std::byte>& contentPayload)
 {
     auto request = std::make_shared<AssetRequest>(verb, url, headers);
     return asyncSystem.createFuture<std::shared_ptr<CesiumAsync::IAssetRequest>>(

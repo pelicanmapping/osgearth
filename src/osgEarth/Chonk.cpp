@@ -736,7 +736,7 @@ namespace
                     {
                         const auto& name = shader.second._shader->getName();
                         if (name != "oe_gltf_color_fs" && name != "oe_gltf_pbr_vs" && name != "oe_gltf_pbr_fs" &&
-                            name != "oe_sg_vert_model" && name != "oe_sg_frag")
+                            name != "oe_sg_vert_model" && name != "oe_sg_vert_view" && name != "oe_sg_frag")
                             valid = false;
                     }
                 }

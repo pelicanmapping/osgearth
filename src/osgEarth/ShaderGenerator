@@ -16,6 +16,10 @@
 #include <sstream>
 #include <set>
 
+// Linear vertex colors/factors are encoded to sRGB after texture modulation.
+// Keep the historic hint name for compatibility with Chonk geometry.
+#define SHADERGEN_HINT_LINEAR_COLOR "osgEarth.Chonk.LinearColor"
+
 // forward declarations
 namespace osg
 {

@@ -10,6 +10,7 @@ set(TARGET_SRC
     FeatureTests.cpp
     ImageUtilsTests.cpp
     PathTests.cpp
+    PBRMaterialTests.cpp
     ImageLayerTests.cpp
     SpatialReferenceTests.cpp
     StringUtilsTests.cpp

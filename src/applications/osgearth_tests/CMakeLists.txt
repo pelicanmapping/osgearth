@@ -23,6 +23,11 @@ add_osgearth_app(
     LIBRARIES ${OPENGL_LIBRARIES}
     FOLDER Tests)
 
+if(TARGET osgdb_osgearth_sky_simple)
+    target_sources(osgearth_tests PRIVATE SkyEnvironmentTests.cpp)
+    add_dependencies(osgearth_tests osgdb_osgearth_sky_simple)
+endif()
+
 if(OSGEARTH_BUILD_IMGUI_NODEKIT)
     target_sources(osgearth_tests PRIVATE ImGuiTests.cpp)
     target_link_libraries(osgearth_tests PRIVATE osgEarthImGui)

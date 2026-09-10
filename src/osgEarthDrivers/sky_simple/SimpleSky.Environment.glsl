@@ -2,10 +2,9 @@
 #pragma vp_location fragment_lighting
 #pragma vp_order 0.75
 
-uniform samplerCube oe_sky_environmentTex;
+uniform sampler3D oe_sky_environmentTex;
 uniform sampler2D oe_sky_brdfTex;
 uniform vec3 oe_sky_irradiance[9];
-uniform float oe_sky_environmentMaxLOD;
 uniform mat4 osg_ViewMatrixInverse;
 
 // Reference radiance for the probe. Legacy ambient controls must not mute
@@ -13,6 +12,21 @@ uniform mat4 osg_ViewMatrixInverse;
 const float oe_sky_environmentIntensity = 0.15;
 
 void oe_sky_environment_init(inout vec4 color) { }
+
+vec3 oe_sky_environmentRadiance(vec3 d, float roughness)
+{
+    const float pi=3.14159265359;
+    vec3 size=vec3(textureSize(oe_sky_environmentTex,0));
+    // atan(0,0) is undefined; the pole rows are constant in longitude.
+    float longitude=dot(d.xy,d.xy)>0.0 ? atan(d.y,d.x)/(2.0*pi) : 0.0;
+    float latitude=acos(clamp(d.z,-1.0,1.0))/pi;
+    // Latitude includes both poles, and roughness includes both endpoints.
+    // Map those endpoints to texel centers instead of texture boundaries.
+    vec3 uvw=vec3(longitude,
+        (latitude*(size.y-1.0)+0.5)/size.y,
+        (clamp(roughness,0.0,1.0)*(size.z-1.0)+0.5)/size.z);
+    return texture(oe_sky_environmentTex,uvw).rgb;
+}
 
 vec3 oe_sky_diffuseIrradiance(vec3 n)
 {
@@ -40,7 +54,7 @@ vec3 oe_sky_environment(vec3 N, vec3 V, vec3 albedo, float roughness, float meta
     vec3 kd=(1.0-fresnel)*(1.0-metal);
     vec3 diffuse=kd*albedo*oe_sky_diffuseIrradiance(worldN);
     vec2 brdf=texture(oe_sky_brdfTex,vec2(nv,roughness)).rg;
-    vec3 radiance=textureLod(oe_sky_environmentTex,worldR,roughness*oe_sky_environmentMaxLOD).rgb;
+    vec3 radiance=oe_sky_environmentRadiance(worldR,roughness);
     vec3 specular=radiance*(f0*brdf.x+brdf.y);
     return (diffuse+specular)*clamp(ao,0.0,1.0)*oe_sky_environmentIntensity;
 }

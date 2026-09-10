@@ -5,8 +5,8 @@
 #pragma once
 
 #include <osgEarth/TerrainResources>
-#include <osg/TextureCubeMap>
 #include <osg/Texture2D>
+#include <osg/Texture3D>
 #include <osg/View>
 #include <osg/Uniform>
 #include <chrono>
@@ -15,6 +15,7 @@ namespace osgEarth { namespace SimpleSky {
 
 // A local, procedural sky probe. It contains sky and ground radiance, not
 // reflected scene geometry. All images and coefficients are in linear space.
+// Specular radiance uses a 3D texture: longitude, colatitude, roughness.
 class SkyEnvironment : public osg::Referenced
 {
 public:
@@ -24,7 +25,7 @@ public:
 
 private:
     TextureImageUnitReservation _environmentUnit, _brdfUnit;
-    osg::ref_ptr<osg::TextureCubeMap> _environment;
+    osg::ref_ptr<osg::Texture3D> _environment;
     osg::ref_ptr<osg::Texture2D> _brdf;
     osg::ref_ptr<osg::Uniform> _irradiance;
     osg::Vec3d _lastUp, _lastSun;

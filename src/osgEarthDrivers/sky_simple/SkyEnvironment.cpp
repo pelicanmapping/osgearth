@@ -5,8 +5,6 @@
 #include "SkyEnvironment"
 #include "SimpleSkyShaders"
 #include <osgEarth/VirtualProgram>
-#include <osgEarth/Capabilities>
-#include <osgEarth/Registry>
 #include <osg/Camera>
 #include <osg/GLDefines>
 #include <cmath>
@@ -18,7 +16,7 @@ using namespace osgEarth::SimpleSky;
 namespace
 {
     constexpr float PI = 3.14159265359f;
-    constexpr unsigned SIZE = 32, LEVELS = 6, SAMPLES = 64;
+    constexpr unsigned WIDTH = 64, HEIGHT = 33, LEVELS = 6, SAMPLES = 64;
 
     float saturate(float x) { return osg::clampBetween(x, 0.0f, 1.0f); }
     float smooth(float a, float b, float x)
@@ -50,22 +48,6 @@ namespace
         t.normalize();
         osg::Vec3 b = n ^ t;
         return t*(r*std::cos(phi)) + b*(r*std::sin(phi)) + n*z;
-    }
-
-    osg::Vec3 cubeDirection(unsigned face, float u, float v)
-    {
-        osg::Vec3 d;
-        switch (face)
-        {
-        case 0: d.set(1,-v,-u); break;
-        case 1: d.set(-1,-v,u); break;
-        case 2: d.set(u,1,v); break;
-        case 3: d.set(u,-1,-v); break;
-        case 4: d.set(u,-v,1); break;
-        default: d.set(-u,-v,-1); break;
-        }
-        d.normalize();
-        return d;
     }
 
     // Clear-sky approximation with a broad scattering halo. The solar disk
@@ -141,25 +123,22 @@ bool SkyEnvironment::attach(osg::StateSet* ss, TerrainResources* resources)
         _environmentUnit.release(); _brdfUnit.release();
         return false;
     }
-    _environment=new osg::TextureCubeMap;
+    _environment=new osg::Texture3D;
     _environment->setInternalFormat(GL_RGB16F_ARB);
-    _environment->setFilter(osg::Texture::MIN_FILTER,osg::Texture::LINEAR_MIPMAP_LINEAR);
+    _environment->setFilter(osg::Texture::MIN_FILTER,osg::Texture::LINEAR);
     _environment->setFilter(osg::Texture::MAG_FILTER,osg::Texture::LINEAR);
-    for (auto wrap : {osg::Texture::WRAP_S,osg::Texture::WRAP_T,osg::Texture::WRAP_R})
+    _environment->setWrap(osg::Texture::WRAP_S,osg::Texture::REPEAT);
+    for (auto wrap : {osg::Texture::WRAP_T,osg::Texture::WRAP_R})
         _environment->setWrap(wrap,osg::Texture::CLAMP_TO_EDGE);
     _environment->setUseHardwareMipMapGeneration(false);
-    // Interpolate across cube faces, including the coarsest roughness mips.
-    // GLES already requires seamless cube filtering and has no enable token.
-    const auto& caps = Registry::capabilities();
-    if (!caps.isGLES() && caps.getGLSLVersion() >= 1.50f)
-        ss->setMode(GL_TEXTURE_CUBE_MAP_SEAMLESS, osg::StateAttribute::ON);
+    _environment->setResizeNonPowerOfTwoHint(false);
+    _environment->setUnRefImageDataAfterApply(false);
     _brdf=makeBRDF();
     _irradiance=new osg::Uniform(osg::Uniform::FLOAT_VEC3,"oe_sky_irradiance",9);
     ss->setTextureAttributeAndModes(_environmentUnit.unit(),_environment,osg::StateAttribute::ON);
     ss->setTextureAttributeAndModes(_brdfUnit.unit(),_brdf,osg::StateAttribute::ON);
     ss->addUniform(new osg::Uniform("oe_sky_environmentTex",_environmentUnit.unit()));
     ss->addUniform(new osg::Uniform("oe_sky_brdfTex",_brdfUnit.unit()));
-    ss->addUniform(new osg::Uniform("oe_sky_environmentMaxLOD",float(LEVELS-1)));
     ss->addUniform(_irradiance);
     Shaders shaders;
     shaders.load(VirtualProgram::getOrCreate(ss),shaders.Environment);
@@ -198,45 +177,38 @@ void SkyEnvironment::update(osg::View* view, const osg::Vec3d& sunDirection)
         _irradiance->setElement(j,coefficients[j]*convolution);
     }
 
-    for (unsigned face=0; face<6; ++face)
+    osg::ref_ptr<osg::Image> image = new osg::Image;
+    // Longitude, colatitude, and perceptual roughness form the three axes.
+    // Explicit pole rows make the result independent of longitude at a pole.
+    image->allocateImage(WIDTH,HEIGHT,LEVELS,GL_RGB,GL_FLOAT);
+    image->setInternalTextureFormat(GL_RGB16F_ARB);
+    for (unsigned level=0; level<LEVELS; ++level)
     {
-        osg::Image::MipmapDataType offsets;
-        unsigned count=0;
-        for (unsigned level=0; level<LEVELS; ++level)
+        float roughness=float(level)/(LEVELS-1);
+        for (unsigned y=0; y<HEIGHT; ++y)
+        for (unsigned x=0; x<WIDTH; ++x)
         {
-            if (level) offsets.push_back(count*sizeof(float));
-            unsigned size=SIZE>>level; count+=size*size*3;
-        }
-        auto bytes=new unsigned char[count*sizeof(float)];
-        float* pixel=reinterpret_cast<float*>(bytes);
-        for (unsigned level=0; level<LEVELS; ++level)
-        {
-            unsigned size=SIZE>>level;
-            float roughness=float(level)/(LEVELS-1);
-            for (unsigned y=0; y<size; ++y)
-            for (unsigned x=0; x<size; ++x)
+            float theta=PI*float(y)/(HEIGHT-1), phi=2*PI*(x+0.5f)/WIDTH;
+            osg::Vec3 n(std::sin(theta)*std::cos(phi),std::sin(theta)*std::sin(phi),std::cos(theta));
+            if (y==0) n.set(0,0,1);
+            else if (y==HEIGHT-1) n.set(0,0,-1);
+            osg::Vec3 color;
+            float weight=0;
+            if (level==0) color=skyRadiance(n,u,s);
+            else
             {
-                osg::Vec3 n=cubeDirection(face,2*(x+0.5f)/size-1,2*(y+0.5f)/size-1);
-                osg::Vec3 color;
-                float weight=0;
-                if (level==0) color=skyRadiance(n,u,s);
-                else
+                for (unsigned i=0; i<SAMPLES; ++i)
                 {
-                    for (unsigned i=0; i<SAMPLES; ++i)
-                    {
-                        osg::Vec3 h=sampleGGX(i,roughness,n), l=h*(2*(n*h))-n;
-                        float nl=std::max(n*l,0.0f);
-                        color+=skyRadiance(l,u,s)*nl; weight+=nl;
-                    }
-                    color/=std::max(weight,1e-6f);
+                    osg::Vec3 h=sampleGGX(i,roughness,n), l=h*(2*(n*h))-n;
+                    float nl=std::max(n*l,0.0f);
+                    color+=skyRadiance(l,u,s)*nl; weight+=nl;
                 }
-                *pixel++=color.x(); *pixel++=color.y(); *pixel++=color.z();
+                color/=std::max(weight,1e-6f);
             }
+            auto pixel=reinterpret_cast<float*>(image->data(x,y,level));
+            pixel[0]=color.x(); pixel[1]=color.y(); pixel[2]=color.z();
         }
-        osg::ref_ptr<osg::Image> image=new osg::Image;
-        image->setImage(SIZE,SIZE,1,GL_RGB16F_ARB,GL_RGB,GL_FLOAT,bytes,osg::Image::USE_NEW_DELETE);
-        image->setMipmapLevels(offsets);
-        _environment->setImage(face,image);
     }
+    _environment->setImage(image);
     _initialized=true;
 }

@@ -38,10 +38,6 @@ namespace osgEarth
         int pbr_index = -1;
         int material1_index = -1;
         int material2_index = -1;
-        int occlusion_index = -1;
-        // glTF: bit 0 selects the map convention; bit 1 enables PBR factors.
-        GLubyte gltf_material = 0;
-        osg::Vec4f pbr_factors = osg::Vec4f(1, 1, 1, 1);
 
         // store refs to the original textures when the
         // factory objects's texture arena is using auto-release.
@@ -51,7 +47,6 @@ namespace osgEarth
         Texture::Ptr pbr_tex;
         Texture::Ptr material1_tex;
         Texture::Ptr material2_tex;
-        Texture::Ptr occlusion_tex;
 
     private:
         //! hidden to force use of create()
@@ -110,9 +105,6 @@ namespace osgEarth
             GLshort normalmap_index = -1;
             GLshort pbr_index = -1;
             osg::Vec2s extended_material_index = osg::Vec2s(-1, -1);
-            GLshort occlusion_index = -1;
-            GLubyte gltf_material = 0;
-            osg::Vec4f pbr_factors = osg::Vec4f(1, 1, 1, 1);
         };
 
         static GLubyte NORMAL_TECHNIQUE_DEFAULT;

@@ -140,17 +140,13 @@ namespace
             Texture::Ptr normal_tex,
             Texture::Ptr pbr_tex,
             Texture::Ptr mat1_tex,
-            Texture::Ptr mat2_tex,
-            Texture::Ptr occlusion_tex = nullptr,
-            GLubyte gltf_material = 0,
-            const osg::Vec4f& pbr_factors = osg::Vec4f(1, 1, 1, 1))
+            Texture::Ptr mat2_tex)
         {
             int albedo_index = _textures->find(albedo_tex);
             int normal_index = _textures->find(normal_tex);
             int pbr_index = _textures->find(pbr_tex);
             int mat1_index = _textures->find(mat1_tex);
             int mat2_index = _textures->find(mat2_tex);
-            int occlusion_index = _textures->find(occlusion_tex);
 
             for (auto& m : _materialCache)
             {
@@ -158,10 +154,7 @@ namespace
                     m->normal_index == normal_index &&
                     m->pbr_index == pbr_index &&
                     m->material1_index == mat1_index &&
-                    m->material2_index == mat2_index &&
-                    m->occlusion_index == occlusion_index &&
-                    m->gltf_material == gltf_material &&
-                    m->pbr_factors == pbr_factors)
+                    m->material2_index == mat2_index)
                 {
                     return m;
                 }
@@ -173,9 +166,6 @@ namespace
             material->pbr_index = pbr_index;
             material->material1_index = mat1_index;
             material->material2_index = mat2_index;
-            material->occlusion_index = occlusion_index;
-            material->gltf_material = gltf_material;
-            material->pbr_factors = pbr_factors;
 
             // If our arena is in auto-release mode, we need to 
             // store a pointer to each texture we use so they do not
@@ -187,7 +177,6 @@ namespace
                 material->pbr_tex = pbr_tex;
                 material->material1_tex = mat1_tex;
                 material->material2_tex = mat2_tex;
-                material->occlusion_tex = occlusion_tex;
             }
 
             _materialCache.push_back(material);
@@ -303,16 +292,6 @@ namespace
             {
                 Texture::Ptr albedo_tex, normal_tex, pbr_tex;
                 Texture::Ptr material_tex1, material_tex2;
-                Texture::Ptr occlusion_tex;
-                GLubyte gltf_material = 0;
-                osg::Vec4f factors(1, 1, 1, 1), flags;
-                auto* gltfFlags = stateset->getUniform("oe_gltf_pbr_flags");
-                auto* gltfFactors = stateset->getUniform("oe_gltf_pbr_factors");
-                if (gltfFlags && gltfFactors && gltfFlags->get(flags) && gltfFactors->get(factors))
-                {
-                    gltf_material = 1u | (flags.w() > 0.5f ? 2u : 0u);
-                    occlusion_tex = addTexture(3u, stateset);
-                }
 
                 auto combo = dynamic_cast<PBRTexture*>(stateset->getTextureAttribute(ALBEDO_UNIT, osg::StateAttribute::TEXTURE));
                 if (combo)
@@ -331,11 +310,10 @@ namespace
                 material_tex1 = findExternalTexture(MAT1_SLOT, stateset);
                 material_tex2 = findExternalTexture(MAT2_SLOT, stateset);
 
-                if (albedo_tex || normal_tex || pbr_tex || gltf_material)
+                if (albedo_tex || normal_tex || pbr_tex)
                 {
                     ChonkMaterial::Ptr material = reuseOrCreateMaterial(
-                        albedo_tex, normal_tex, pbr_tex, material_tex1, material_tex2,
-                        occlusion_tex, gltf_material, factors);
+                        albedo_tex, normal_tex, pbr_tex, material_tex1, material_tex2);
                     _materialStack.push(material);
                     pushed = true;
                 }
@@ -494,9 +472,6 @@ namespace
                     v.albedo_index = material ? material->albedo_index : -1;
                     v.normalmap_index = material ? material->normal_index : -1;
                     v.pbr_index = material ? material->pbr_index : -1;
-                    v.occlusion_index = material ? material->occlusion_index : -1;
-                    v.gltf_material = material ? material->gltf_material : 0;
-                    if (material) v.pbr_factors = material->pbr_factors;
 
                     // prioritize material textures over vertex material ids.
                     v.extended_material_index = material ? osg::Vec2s(material->material1_index, material->material2_index) : osg::Vec2s(-1, -1);
@@ -724,19 +699,18 @@ namespace
                 auto* attr = entry.second.first.get();
                 if (auto* vp = dynamic_cast<VirtualProgram*>(attr))
                 {
-                    // The reader's color/PBR shaders and generated texture
-                    // modulation are represented by Chonk's material fields.
+                    // ShaderGenerator's color and PBR functions are
+                    // represented by Chonk's material fields.
                     // Other shader effects stay on the ordinary path.
-                    bool gltf = false;
-                    node.getUserValue(CHONK_HINT_LINEAR_COLOR, gltf);
-                    if (!gltf) valid = false;
+                    bool linearColor = false;
+                    node.getUserValue(CHONK_HINT_LINEAR_COLOR, linearColor);
+                    if (!linearColor) valid = false;
                     VirtualProgram::ShaderMap shaders;
                     vp->getShaderMap(shaders);
                     for (const auto& shader : shaders)
                     {
                         const auto& name = shader.second._shader->getName();
-                        if (name != "oe_gltf_color_fs" && name != "oe_gltf_pbr_vs" && name != "oe_gltf_pbr_fs" &&
-                            name != "oe_sg_vert_model" && name != "oe_sg_vert_view" && name != "oe_sg_frag")
+                        if (name != "oe_sg_vert_model" && name != "oe_sg_vert_view" && name != "oe_sg_frag")
                             valid = false;
                     }
                 }
@@ -1437,10 +1411,7 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
         {1, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, normalmap_index)},
         {1, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, pbr_index)},
         {2, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, extended_material_index)},
-        {1, GL_UNSIGNED_BYTE, GL_FALSE, offsetof(Chonk::VertexGPU, color_is_linear)},
-        {1, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, occlusion_index)},
-        {1, GL_UNSIGNED_BYTE, GL_FALSE, offsetof(Chonk::VertexGPU, gltf_material)},
-        {4, GL_FLOAT,         GL_FALSE, offsetof(Chonk::VertexGPU, pbr_factors)}
+        {1, GL_UNSIGNED_BYTE, GL_FALSE, offsetof(Chonk::VertexGPU, color_is_linear)}
     };
 
     // configure the format of each vertex attribute in our structure.

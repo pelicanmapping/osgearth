@@ -4,7 +4,6 @@
  */
 #include <osgEarth/catch.hpp>
 #include "ChonkTestUtils.h"
-#include <osg/Texture2D>
 #include <future>
 #include <set>
 
@@ -69,34 +68,6 @@ TEST_CASE("Chonk radius contains rotated scaled and sheared instances", "[chonk]
             REQUIRE((point - center).length() <= drawable->radius() + 1e-5f);
         }
     }
-}
-
-TEST_CASE("Chonk retains glTF material factors and map conventions", "[chonk]")
-{
-    auto geometry = ChonkTest::mesh();
-    auto* ss = geometry->getOrCreateStateSet();
-    ss->addUniform(new osg::Uniform("oe_gltf_pbr_flags", osg::Vec4(1,1,1,1)));
-    ss->addUniform(new osg::Uniform("oe_gltf_pbr_factors", osg::Vec4(.7f,.8f,.3f,.65f)));
-    osg::ref_ptr<osg::Image> image = new osg::Image();
-    image->allocateImage(1,1,1,GL_RGBA,GL_UNSIGNED_BYTE);
-    std::fill(image->data(), image->data()+4, 128);
-    for (unsigned unit = 0; unit < 4; ++unit)
-    {
-        auto texture = new osg::Texture2D(image);
-        texture->setInternalFormat(unit == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8);
-        ss->setTextureAttribute(unit, texture);
-    }
-    osg::ref_ptr<TextureArena> arena = new TextureArena();
-    arena->setAutoRelease(true);
-    ChonkFactory factory(arena);
-    auto chonk = factory.getOrCreateChonk(geometry);
-    REQUIRE(chonk);
-    const auto& v = chonk->_vbo_store.front();
-    REQUIRE(v.gltf_material == 3);
-    REQUIRE(v.pbr_factors == osg::Vec4(.7f,.8f,.3f,.65f));
-    REQUIRE(v.occlusion_index >= 0);
-    REQUIRE(v.albedo_index != v.pbr_index); // same image, different color space
-    REQUIRE(chonk->_materials.front()->occlusion_tex);
 }
 
 TEST_CASE("Chonk cell conversion preserves placements and asset reloads", "[chonk]")

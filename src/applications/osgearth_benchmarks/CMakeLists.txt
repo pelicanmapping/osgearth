@@ -12,3 +12,8 @@ add_osgearth_app(
     SOURCES ${TARGET_SRC}
     LIBRARIES benchmark::benchmark benchmark::benchmark_main ${OPENGL_LIBRARIES}
     FOLDER Tests)
+
+if(TARGET osgdb_osgearth_sky_simple)
+    target_sources(osgearth_benchmarks PRIVATE SkyBenchmarks.cpp)
+    add_dependencies(osgearth_benchmarks osgdb_osgearth_sky_simple)
+endif()

@@ -40,6 +40,9 @@ layout(location = 7) in int normalmap_index;
 layout(location = 8) in int pbr_index;
 layout(location = 9) in ivec2 extended_materials;
 layout(location = 10) in uint color_is_linear;
+layout(location = 11) in int occlusion_index;
+layout(location = 12) in uint gltf_material;
+layout(location = 13) in vec4 pbr_factors;
 
 #define NT_DEFAULT 0
 #define NT_ZAXIS 1
@@ -63,6 +66,9 @@ flat out uint64_t oe_albedo_tex;
 flat out uint64_t oe_normal_tex;
 flat out uint64_t oe_pbr_tex;
 flat out ivec2 oe_extended_materials;
+flat out uint64_t oe_occlusion_tex;
+flat out uint oe_gltf_material;
+flat out vec4 oe_pbr_factors;
 
 void oe_chonk_default_vertex_model(inout vec4 vertex)
 {
@@ -74,13 +80,16 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
     vp_Color = color;
     oe_color_is_linear = color_is_linear;
     xform3 = mat3(chonkInstances[i].xform);
-    vp_Normal = xform3 * normal;
+    vp_Normal = transpose(inverse(xform3)) * normal;
     oe_normal_technique = normal_technique;
     oe_tex_uv = uv;
     oe_alpha_cutoff = chonkInstances[i].alpha_cutoff;
     oe_fade = chonkInstances[i].visibility[chonk_lod];
     oe_albedo_tex = albedo_index >= 0 ? chonkTextures[albedo_index] : 0;
     oe_extended_materials = extended_materials;
+    oe_gltf_material = gltf_material;
+    oe_pbr_factors = pbr_factors;
+    oe_occlusion_tex = 0;
 
 #if defined(OE_IS_SHADOW_CAMERA) || defined(OE_IS_DEPTH_CAMERA)
     oe_fade = 1.0;
@@ -111,6 +120,8 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
     {
         oe_pbr_tex = chonkTextures[pbr_index];
     }
+    if (occlusion_index >= 0 && chonk_lod <= OE_CHONK_MAX_LOD_FOR_PBR_MAPS)
+        oe_occlusion_tex = chonkTextures[occlusion_index];
 }
 
 [break]
@@ -135,6 +146,9 @@ flat in uint64_t oe_albedo_tex;
 flat in uint64_t oe_normal_tex;
 flat in uint64_t oe_pbr_tex;
 flat in float oe_alpha_cutoff;
+flat in uint64_t oe_occlusion_tex;
+flat in uint oe_gltf_material;
+flat in vec4 oe_pbr_factors;
 
 flat in uint oe_normal_technique;
 flat in uint oe_color_is_linear;
@@ -164,7 +178,8 @@ mat3 make_tbn(vec3 N, vec3 p, vec2 uv)
     vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
 
     // construct a scale-invariant frame 
-    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+    float det = max(dot(T, T), dot(B, B));
+    float invmax = det > 0.0 ? inversesqrt(det) : 0.0;
     return mat3(T * invmax, B * invmax, N);
 }
 
@@ -274,6 +289,11 @@ void oe_chonk_default_fragment(inout vec4 color)
         {
             pixel_normal = normalize(n.xyz*2.0 - 1.0);
         }
+        if ((oe_gltf_material & 1u) != 0u)
+        {
+            pixel_normal.xy *= vec2(oe_pbr_factors.x, -oe_pbr_factors.x);
+            pixel_normal = normalize(pixel_normal);
+        }
     }
 
     //pixel_normal = vec3(0, 0, 1); // testing
@@ -284,7 +304,9 @@ void oe_chonk_default_fragment(inout vec4 color)
         oe_position_view,
         oe_tex_uv);
 
-    vp_Normal = TBN * pixel_normal;
+    // Without a normal map, preserve the geometric normal even if UVs
+    // are missing or degenerate.
+    vp_Normal = oe_normal_tex > 0 ? TBN * pixel_normal : normalize(normal_view);
 
     if (oe_normal_technique == NT_ZAXIS)
     {
@@ -294,7 +316,29 @@ void oe_chonk_default_fragment(inout vec4 color)
         vp_Normal = normalize(mix(world_up, face_up, 0.25));
     }
 
-    if (oe_pbr_tex > 0)
+    if ((oe_gltf_material & 1u) != 0u)
+    {
+        if ((oe_gltf_material & 2u) != 0u)
+        {
+            float roughness = oe_pbr_factors.y;
+            float metal = oe_pbr_factors.z;
+            if (oe_pbr_tex > 0)
+            {
+                vec4 mr = texture(sampler2D(oe_pbr_tex), oe_tex_uv);
+                roughness *= mr.g;
+                metal *= mr.b;
+            }
+            oe_pbr.displacement = 0.0;
+            oe_pbr.roughness *= roughness;
+            oe_pbr.metal = clamp(oe_pbr.metal + metal, 0.0, 1.0);
+        }
+        if (oe_occlusion_tex > 0)
+        {
+            float ao = texture(sampler2D(oe_occlusion_tex), oe_tex_uv).r;
+            oe_pbr.ao *= 1.0 + oe_pbr_factors.w * (ao - 1.0);
+        }
+    }
+    else if (oe_pbr_tex > 0)
     {
         // apply PBR maps:
         vec4 texel = texture(sampler2D(oe_pbr_tex), oe_tex_uv);

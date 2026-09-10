@@ -15,6 +15,11 @@
 #include "Notify"
 #include "ImageUtils"
 #include "Math"
+#include "ExternalNode"
+#include "InstancedExternalNode"
+#include <osg/MatrixTransform>
+#include <osg/CullFace>
+#include <osg/FrontFace>
 
 #include <osgUtil/Optimizer>
 
@@ -135,13 +140,17 @@ namespace
             Texture::Ptr normal_tex,
             Texture::Ptr pbr_tex,
             Texture::Ptr mat1_tex,
-            Texture::Ptr mat2_tex)
+            Texture::Ptr mat2_tex,
+            Texture::Ptr occlusion_tex = nullptr,
+            GLubyte gltf_material = 0,
+            const osg::Vec4f& pbr_factors = osg::Vec4f(1, 1, 1, 1))
         {
             int albedo_index = _textures->find(albedo_tex);
             int normal_index = _textures->find(normal_tex);
             int pbr_index = _textures->find(pbr_tex);
             int mat1_index = _textures->find(mat1_tex);
             int mat2_index = _textures->find(mat2_tex);
+            int occlusion_index = _textures->find(occlusion_tex);
 
             for (auto& m : _materialCache)
             {
@@ -149,7 +158,10 @@ namespace
                     m->normal_index == normal_index &&
                     m->pbr_index == pbr_index &&
                     m->material1_index == mat1_index &&
-                    m->material2_index == mat2_index )
+                    m->material2_index == mat2_index &&
+                    m->occlusion_index == occlusion_index &&
+                    m->gltf_material == gltf_material &&
+                    m->pbr_factors == pbr_factors)
                 {
                     return m;
                 }
@@ -161,6 +173,9 @@ namespace
             material->pbr_index = pbr_index;
             material->material1_index = mat1_index;
             material->material2_index = mat2_index;
+            material->occlusion_index = occlusion_index;
+            material->gltf_material = gltf_material;
+            material->pbr_factors = pbr_factors;
 
             // If our arena is in auto-release mode, we need to 
             // store a pointer to each texture we use so they do not
@@ -172,6 +187,7 @@ namespace
                 material->pbr_tex = pbr_tex;
                 material->material1_tex = mat1_tex;
                 material->material2_tex = mat2_tex;
+                material->occlusion_tex = occlusion_tex;
             }
 
             _materialCache.push_back(material);
@@ -287,6 +303,16 @@ namespace
             {
                 Texture::Ptr albedo_tex, normal_tex, pbr_tex;
                 Texture::Ptr material_tex1, material_tex2;
+                Texture::Ptr occlusion_tex;
+                GLubyte gltf_material = 0;
+                osg::Vec4f factors(1, 1, 1, 1), flags;
+                auto* gltfFlags = stateset->getUniform("oe_gltf_pbr_flags");
+                auto* gltfFactors = stateset->getUniform("oe_gltf_pbr_factors");
+                if (gltfFlags && gltfFactors && gltfFlags->get(flags) && gltfFactors->get(factors))
+                {
+                    gltf_material = 1u | (flags.w() > 0.5f ? 2u : 0u);
+                    occlusion_tex = addTexture(3u, stateset);
+                }
 
                 auto combo = dynamic_cast<PBRTexture*>(stateset->getTextureAttribute(ALBEDO_UNIT, osg::StateAttribute::TEXTURE));
                 if (combo)
@@ -305,10 +331,11 @@ namespace
                 material_tex1 = findExternalTexture(MAT1_SLOT, stateset);
                 material_tex2 = findExternalTexture(MAT2_SLOT, stateset);
 
-                if (albedo_tex || normal_tex)
+                if (albedo_tex || normal_tex || pbr_tex || gltf_material)
                 {
                     ChonkMaterial::Ptr material = reuseOrCreateMaterial(
-                        albedo_tex, normal_tex, pbr_tex, material_tex1, material_tex2);
+                        albedo_tex, normal_tex, pbr_tex, material_tex1, material_tex2,
+                        occlusion_tex, gltf_material, factors);
                     _materialStack.push(material);
                     pushed = true;
                 }
@@ -389,6 +416,7 @@ namespace
 
                 auto& material = _materialStack.top();
                 osg::Vec3f n;
+                const osg::Matrixd normalMatrix = osg::Matrixd::inverse(matrix);
 
                 for (unsigned i = 0; i < numVerts; ++i)
                 {
@@ -418,7 +446,10 @@ namespace
                     if (normals)
                     {
                         int k = normals->getBinding() == osg::Array::BIND_PER_VERTEX ? i : 0;
-                        v.normal = osg::Matrix::transform3x3((*normals)[k], matrix);
+                        // Column-vector overload is the inverse transpose in
+                        // OSG's row-vector convention.
+                        v.normal = osg::Matrixd::transform3x3(normalMatrix, osg::Vec3d((*normals)[k]));
+                        v.normal.normalize();
                     }
                     else
                     {
@@ -463,6 +494,9 @@ namespace
                     v.albedo_index = material ? material->albedo_index : -1;
                     v.normalmap_index = material ? material->normal_index : -1;
                     v.pbr_index = material ? material->pbr_index : -1;
+                    v.occlusion_index = material ? material->occlusion_index : -1;
+                    v.gltf_material = material ? material->gltf_material : 0;
+                    if (material) v.pbr_factors = material->pbr_factors;
 
                     // prioritize material textures over vertex material ids.
                     v.extended_material_index = material ? osg::Vec2s(material->material1_index, material->material2_index) : osg::Vec2s(-1, -1);
@@ -658,6 +692,237 @@ void
 ChonkFactory::setGetOrCreateFunction(GetOrCreateFunction value)
 {
     getOrCreateTexture = value;
+}
+
+namespace
+{
+    // Chonk records vertex/material data, not arbitrary OSG state. Only accept
+    // the static, opaque subset for which dropping the source state is safe.
+    struct ChonkEligibility : osg::NodeVisitor
+    {
+        bool valid = true;
+        ChonkEligibility() : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN) { }
+
+        void inspect(osg::Node& node)
+        {
+            if (node.getNodeMask() != ~0u || node.getUpdateCallback() ||
+                node.getEventCallback() || node.getCullCallback() ||
+                node.getDataVariance() == osg::Object::DYNAMIC)
+                valid = false;
+            auto* ss = node.getStateSet();
+            if (!ss) return;
+            if (ss->getDataVariance() == osg::Object::DYNAMIC ||
+                ss->requiresUpdateTraversal() || ss->requiresEventTraversal() ||
+                (ss->getMode(GL_BLEND) & osg::StateAttribute::ON) ||
+                ss->getRenderingHint() == osg::StateSet::TRANSPARENT_BIN)
+                valid = false;
+            auto cull = ss->getModeList().find(GL_CULL_FACE);
+            if (cull != ss->getModeList().end() && !(cull->second & osg::StateAttribute::ON))
+                valid = false;
+            for (const auto& entry : ss->getAttributeList())
+            {
+                auto* attr = entry.second.first.get();
+                if (auto* vp = dynamic_cast<VirtualProgram*>(attr))
+                {
+                    // The reader's color/PBR shaders and generated texture
+                    // modulation are represented by Chonk's material fields.
+                    // Other shader effects stay on the ordinary path.
+                    bool gltf = false;
+                    node.getUserValue(CHONK_HINT_LINEAR_COLOR, gltf);
+                    if (!gltf) valid = false;
+                    VirtualProgram::ShaderMap shaders;
+                    vp->getShaderMap(shaders);
+                    for (const auto& shader : shaders)
+                    {
+                        const auto& name = shader.second._shader->getName();
+                        if (name != "oe_gltf_color_fs" && name != "oe_gltf_pbr_vs" && name != "oe_gltf_pbr_fs" &&
+                            name != "oe_sg_vert_model" && name != "oe_sg_frag")
+                            valid = false;
+                    }
+                }
+                else if (auto* face = dynamic_cast<osg::FrontFace*>(attr))
+                {
+                    if (face->getMode() != osg::FrontFace::COUNTER_CLOCKWISE) valid = false;
+                }
+                else if (auto* face = dynamic_cast<osg::CullFace*>(attr))
+                {
+                    if (face->getMode() != osg::CullFace::BACK) valid = false;
+                }
+                else valid = false;
+            }
+        }
+
+        void apply(osg::Node& node) override
+        {
+            inspect(node);
+            if (typeid(node) != typeid(osg::Group) && typeid(node) != typeid(osg::Geode) &&
+                typeid(node) != typeid(osg::Node)) valid = false;
+            if (valid) traverse(node);
+        }
+
+        void apply(osg::Transform& node) override
+        {
+            inspect(node);
+            if (typeid(node) != typeid(osg::MatrixTransform) ||
+                node.getReferenceFrame() != osg::Transform::RELATIVE_RF) valid = false;
+            if (valid) traverse(node);
+        }
+
+        void apply(osg::Geometry& node) override
+        {
+            inspect(node);
+            if (typeid(node) != typeid(osg::Geometry) ||
+                !dynamic_cast<osg::Vec3Array*>(node.getVertexArray())) valid = false;
+            for (auto& primitive : node.getPrimitiveSetList())
+                if (primitive->getMode() != GL_TRIANGLES || primitive->getNumInstances() > 0)
+                    valid = false;
+        }
+    };
+
+    // The containing cell owns the source wrappers, so manager-wide reloads
+    // and unloads still reach this consumer. Only rendering children change.
+    class ExternalChonkGroup : public osg::Group
+    {
+    public:
+        ExternalChonkGroup(osg::Node* source, std::shared_ptr<ChonkFactory> factory) :
+            _source(source), _factory(std::move(factory))
+        {
+            setName(source->getName() + " Chonk instances");
+            setUpdateCallback(new LambdaCallback<>([this](osg::NodeVisitor&)
+                { refresh(); return true; }));
+            rebuild();
+        }
+
+    private:
+        struct Dependency {
+            osg::ref_ptr<InstancedExternalNode> node;
+            std::uint64_t revision;
+        };
+        osg::ref_ptr<osg::Node> _source;
+        std::shared_ptr<ChonkFactory> _factory;
+        std::vector<Dependency> _dependencies;
+
+        static bool positiveAffine(const osg::Matrixd& m)
+        {
+            const osg::Vec3d a(m(0,0), m(0,1), m(0,2));
+            const osg::Vec3d b(m(1,0), m(1,1), m(1,2));
+            const osg::Vec3d c(m(2,0), m(2,1), m(2,2));
+            // Keep mirrored/singular/projective placements on their original
+            // path, which preserves branch-local front-face state.
+            return std::isfinite((a ^ b) * c) && (a ^ b) * c > 1e-12 &&
+                m(0,3) == 0.0 && m(1,3) == 0.0 && m(2,3) == 0.0 && m(3,3) == 1.0;
+        }
+
+        osg::ref_ptr<osg::Node> convert(osg::Node* node,
+            const osg::Matrixd& parent, ChonkDrawable* drawable)
+        {
+            if (auto* external = dynamic_cast<InstancedExternalNode*>(node))
+            {
+                auto payload = external->getExternalNode();
+                _dependencies.push_back({external, external->getRenderRevision()});
+                if (!payload || !external->isUsingHardwareInstancing() || node->getNodeMask() != ~0u)
+                    return node;
+                for (const auto& matrix : external->getMatrices())
+                    if (!positiveAffine(osg::Matrixd(matrix) * parent)) return node;
+                auto chonk = _factory->getOrCreateChonk(payload.get());
+                if (!chonk) return node;
+                for (const auto& matrix : external->getMatrices())
+                    drawable->add(chonk, osg::Matrixf(osg::Matrixd(matrix) * parent));
+                return nullptr;
+            }
+
+            // Copy only structural nodes along converted paths. Ordinary
+            // geometry and specialized nodes retain their original semantics.
+            auto* group = node->asGroup();
+            if (!group || node->getNodeMask() != ~0u || node->getUpdateCallback() ||
+                node->getEventCallback() || node->getCullCallback() ||
+                (typeid(*node) != typeid(osg::Group) && typeid(*node) != typeid(osg::MatrixTransform)))
+                return node;
+            ChonkEligibility eligibility;
+            eligibility.inspect(*node);
+            if (!eligibility.valid) return node;
+            osg::Matrixd matrix = parent;
+            if (auto* mt = dynamic_cast<osg::MatrixTransform*>(node))
+            {
+                if (mt->getReferenceFrame() != osg::Transform::RELATIVE_RF) return node;
+                matrix = mt->getMatrix() * parent;
+            }
+            osg::ref_ptr<osg::Group> copy = dynamic_cast<osg::Group*>(node->clone(osg::CopyOp::SHALLOW_COPY));
+            copy->removeChildren(0, copy->getNumChildren());
+            for (unsigned i = 0; i < group->getNumChildren(); ++i)
+            {
+                auto child = convert(group->getChild(i), matrix, drawable);
+                if (child) copy->addChild(child);
+            }
+            return copy->getNumChildren() ? copy.get() : nullptr;
+        }
+
+        void rebuild()
+        {
+            _dependencies.clear();
+            osg::ref_ptr<ChonkDrawable> drawable = new ChonkDrawable();
+            drawable->setName(getName());
+            auto residual = convert(_source.get(), osg::Matrixd(), drawable.get());
+            // Do not change the shared Chonk render-bin StateSet.
+            osg::ref_ptr<osg::Group> rendered = new osg::Group();
+            rendered->getOrCreateStateSet()->setAttributeAndModes(new osg::CullFace(osg::CullFace::BACK));
+            rendered->getOrCreateStateSet()->setAttribute(new osg::FrontFace(osg::FrontFace::COUNTER_CLOCKWISE));
+            if (!drawable->empty()) rendered->addChild(drawable);
+            removeChildren(0, getNumChildren());
+            if (residual) addChild(residual);
+            if (!drawable->empty()) addChild(rendered);
+        }
+
+        void refresh()
+        {
+            bool changed = false;
+            for (auto& dependency : _dependencies)
+            {
+                dependency.node->refresh();
+                changed |= dependency.node->getRenderRevision() != dependency.revision;
+            }
+            if (changed) rebuild();
+        }
+    };
+}
+
+Chonk::Ptr
+ChonkFactory::getOrCreateChonk(osg::Node* node, float farScale, float nearScale)
+{
+    if (!node || !textures) return {};
+    std::lock_guard<std::mutex> lock(_chonkCacheMutex);
+    for (auto i = _chonkCache.begin(); i != _chonkCache.end(); )
+    {
+        auto cached = i->chonk.lock();
+        if (!cached || !i->source.valid()) i = _chonkCache.erase(i);
+        else
+        {
+            if (i->source.get() == node && i->farScale == farScale && i->nearScale == nearScale)
+                return cached;
+            ++i;
+        }
+    }
+    ChonkEligibility eligibility;
+    node->accept(eligibility);
+    if (!eligibility.valid) return {};
+    auto chonk = Chonk::create();
+    chonk->name() = node->getName();
+    // The manager owns node. Unlike load(Node*, Chonk*), this never runs an
+    // optimizer on the canonical graph or changes its primitive arrays.
+    Ripper ripper(chonk.get(), nullptr, textures.get(), getOrCreateTexture, farScale, nearScale);
+    node->accept(ripper);
+    if (chonk->_ebo_store.empty()) return {};
+    chonk->_lods.push_back({0u, chonk->_ebo_store.size(), farScale, nearScale});
+    chonk->getBound(); // publish an initialized immutable bound to paging threads
+    _chonkCache.push_back({node, chonk, farScale, nearScale});
+    return chonk;
+}
+
+osg::ref_ptr<osg::Node>
+ChonkFactory::convertExternalInstances(osg::Node* node, std::shared_ptr<ChonkFactory> factory)
+{
+    if (!node || !factory || !factory->textures) return node;
+    return new ExternalChonkGroup(node, std::move(factory));
 }
 
 bool
@@ -866,7 +1131,11 @@ ChonkDrawable::installRenderBin(ChonkDrawable* d)
 void
 ChonkDrawable::setUseGPUCulling(bool value)
 {
-    _gpucull = value;
+    if (_gpucull != value)
+    {
+        _gpucull = value;
+        dirtyGLObjects();
+    }
 }
 
 void
@@ -905,7 +1174,22 @@ ChonkDrawable::add(Chonk::Ptr chonk, const osg::Matrixf& xform, const osg::Vec2f
         instance.lod = 0;
         instance.visibility[0] = 0;
         instance.visibility[1] = 0;
-        instance.radius = 0.0f;
+        // A conservative spectral-norm bound: the largest absolute row sum
+        // of A*A^T bounds its largest eigenvalue. Exact for orthogonal TRS
+        // axes, and conservative for shear and reflections as well.
+        osg::Vec3d axes[3] = {
+            {xform(0,0), xform(0,1), xform(0,2)},
+            {xform(1,0), xform(1,1), xform(1,2)},
+            {xform(2,0), xform(2,1), xform(2,2)} };
+        double maxRow = 0.0;
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            double row = 0.0;
+            for (unsigned j = 0; j < 3; ++j)
+                row += std::abs(axes[i] * axes[j]);
+            maxRow = std::max(maxRow, row);
+        }
+        instance.radius = chonk->getBound().radius() * std::sqrt(maxRow);
         instance.alphaCutoff = 0.0f;
         instance.first_lod_cmd_index = 0;
 
@@ -917,6 +1201,20 @@ ChonkDrawable::add(Chonk::Ptr chonk, const osg::Matrixf& xform, const osg::Vec2f
         // flag the bounds for recompute
         dirtyBound();
     }
+}
+
+std::size_t ChonkDrawable::getNumInstances() const
+{
+    std::lock_guard<std::mutex> lock(_m);
+    std::size_t count = 0;
+    for (const auto& batch : _batches) count += batch.second.size();
+    return count;
+}
+
+std::size_t ChonkDrawable::getNumBatches() const
+{
+    std::lock_guard<std::mutex> lock(_m);
+    return _batches.size();
 }
 
 void
@@ -1119,7 +1417,7 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
     _vao = GLVAO::create(state);
 
     // start recording...
-    _vao->bind();
+    state.bindVertexArrayObject(_vao->name());
 
     // must call AFTER bind
     _vao->debugLabel("Chonk drawable", "VAO " + host->getName());
@@ -1128,7 +1426,7 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
     glEnableClientState_(GL_VERTEX_ATTRIB_ARRAY_UNIFIED_NV);
     glEnableClientState_(GL_ELEMENT_ARRAY_UNIFIED_NV);
 
-    const VADef formats[11] = {
+    const VADef formats[] = {
         {3, GL_FLOAT,         GL_FALSE, offsetof(Chonk::VertexGPU, position)},
         {3, GL_FLOAT,         GL_FALSE, offsetof(Chonk::VertexGPU, normal)},
         {1, GL_UNSIGNED_BYTE, GL_FALSE, offsetof(Chonk::VertexGPU, normal_technique)},
@@ -1139,11 +1437,14 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
         {1, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, normalmap_index)},
         {1, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, pbr_index)},
         {2, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, extended_material_index)},
-        {1, GL_UNSIGNED_BYTE, GL_FALSE, offsetof(Chonk::VertexGPU, color_is_linear)}
+        {1, GL_UNSIGNED_BYTE, GL_FALSE, offsetof(Chonk::VertexGPU, color_is_linear)},
+        {1, GL_SHORT,         GL_FALSE, offsetof(Chonk::VertexGPU, occlusion_index)},
+        {1, GL_UNSIGNED_BYTE, GL_FALSE, offsetof(Chonk::VertexGPU, gltf_material)},
+        {4, GL_FLOAT,         GL_FALSE, offsetof(Chonk::VertexGPU, pbr_factors)}
     };
 
     // configure the format of each vertex attribute in our structure.
-    for (unsigned location = 0; location < 11; ++location)
+    for (unsigned location = 0; location < sizeof(formats)/sizeof(formats[0]); ++location)
     {
         const VADef& d = formats[location];
         if ((d.type == GL_INT) ||
@@ -1168,7 +1469,7 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
     _ext->glBindVertexBuffer(0, 0, 0, sizeof(Chonk::VertexGPU));
 
     // Finish recording
-    _vao->unbind();
+    state.unbindVertexArrayObject();
 }
 
 #define NEXT_MULTIPLE(X, Y) (((X+Y-1)/Y)*Y)
@@ -1201,6 +1502,7 @@ ChonkDrawable::GLObjects::update(
     _all_instances.clear();
 
     std::size_t max_lod_count = 0;
+    unsigned outputOffset = 0u;
 
     for (auto& batch : batches)
     {
@@ -1215,6 +1517,13 @@ ChonkDrawable::GLObjects::update(
         for(unsigned i=0; i< lod_commands.size(); ++i)
         {
             _commands.emplace_back(lod_commands[i]);
+            // Each batch/LOD has room for every input instance. The compute
+            // shader compacts inside this range, avoiding an atomic update of
+            // every subsequent command for each visible instance.
+            _commands.back().cmd.baseInstance = _gpucull ? outputOffset : _all_instances.size();
+            if (!_gpucull)
+                _commands.back().cmd.instanceCount = i == 0 ? instances.size() : 0;
+            outputOffset += instances.size();
 
             if (_gpucull)
             {
@@ -1243,6 +1552,12 @@ ChonkDrawable::GLObjects::update(
         {
             _all_instances.push_back(instance);
             _all_instances.back().first_lod_cmd_index = first_lod_cmd_index;
+            if (!_gpucull)
+            {
+                _all_instances.back().lod = 0;
+                _all_instances.back().visibility[0] = 1.0f;
+                _all_instances.back().alphaCutoff = alphaCutoff;
+            }
         }
 
         // pad out the size of the instances array so it's a multiple of the
@@ -1346,7 +1661,6 @@ ChonkDrawable::GLObjects::cull(osg::State& state)
     for (auto& command : _commands)
     {
         command.cmd.instanceCount = 0;
-        command.cmd.baseInstance = 0;
     }
     _commandBuf->uploadData(_commands);
 
@@ -1503,7 +1817,7 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
     if (_first)
     {
         auto& gl = ChonkDrawable::GLObjects::get(drawable->_globjects, state);
-        gl._vao->bind();
+        state.bindVertexArrayObject(gl._vao->name());
         gl._vao->ext()->glMemoryBarrier(
             GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
     }
@@ -1513,7 +1827,8 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
     if (_last)
     {
         auto& gl = ChonkDrawable::GLObjects::get(drawable->_globjects, state);
-        gl._vao->unbind();
+        // Keep OSG's VAO cache in sync so conventional geometry can follow us.
+        state.unbindVertexArrayObject();
 
 #ifdef RESET_BUFFER_BASE_BINDINGS
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER,  0, 0);
@@ -1591,7 +1906,13 @@ ChonkFactory::GetOrCreateFunction ChonkFactory::getWeakTextureCacheFunction(
                 Texture::Ptr cache_entry = iter->lock();
                 if (cache_entry)
                 {
-                    if (ImageUtils::areEquivalent(image, cache_entry->osgTexture()->getImage(0)))
+                    auto* cached = cache_entry->osgTexture().get();
+                    if (osgTex->getInternalFormat() == cached->getInternalFormat() &&
+                        osgTex->getWrap(osg::Texture::WRAP_S) == cached->getWrap(osg::Texture::WRAP_S) &&
+                        osgTex->getWrap(osg::Texture::WRAP_T) == cached->getWrap(osg::Texture::WRAP_T) &&
+                        osgTex->getFilter(osg::Texture::MIN_FILTER) == cached->getFilter(osg::Texture::MIN_FILTER) &&
+                        osgTex->getFilter(osg::Texture::MAG_FILTER) == cached->getFilter(osg::Texture::MAG_FILTER) &&
+                        ImageUtils::areEquivalent(image, cached->getImage(0)))
                     {
                         isNew = false;
                         return cache_entry;

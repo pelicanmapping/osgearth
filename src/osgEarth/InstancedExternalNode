@@ -117,6 +117,10 @@ namespace osgEarth
          */
         void refresh();
 
+        //! Changes whenever the rendering snapshot is rebuilt, including
+        //! matrix edits and manager reload/unload. Read on the update thread.
+        std::uint64_t getRenderRevision() const { return _renderRevision; }
+
     protected:
         ~InstancedExternalNode() override;
 
@@ -131,6 +135,7 @@ namespace osgEarth
         osg::ref_ptr<ExternalNode> _source;
         std::uint64_t _observedRevision = 0u;
         bool _hasObservedRevision = false;
+        std::uint64_t _renderRevision = 0u;
         MatrixList _matrices;
         bool _usingHardwareInstancing = false;
         std::string _instancingError;

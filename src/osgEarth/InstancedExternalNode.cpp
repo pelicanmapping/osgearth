@@ -815,6 +815,7 @@ InstancedExternalNode::refresh()
 void
 InstancedExternalNode::rebuild(osg::Node* source)
 {
+    ++_renderRevision;
     osg::ref_ptr<osg::Group> replacement = new osg::Group();
     replacement->setName("osgEarth::InstancedExternalNode rendering graph");
     _usingHardwareInstancing = false;

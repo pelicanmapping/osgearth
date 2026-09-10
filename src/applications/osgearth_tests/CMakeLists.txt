@@ -1,6 +1,7 @@
 set(TARGET_SRC
     main.cpp
     CacheTests.cpp
+    ChonkTests.cpp
     ConfigTests.cpp
     CoverageTests.cpp
     EndianTests.cpp
@@ -18,4 +19,5 @@ set(TARGET_SRC
 add_osgearth_app(
     TARGET osgearth_tests
     SOURCES ${TARGET_SRC}
+    LIBRARIES ${OPENGL_LIBRARIES}
     FOLDER Tests)

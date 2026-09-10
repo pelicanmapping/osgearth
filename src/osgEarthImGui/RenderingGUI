@@ -324,16 +324,6 @@ namespace osgEarth
                 if (ImGui::RadioButton("Displacement (PBR)", &s_renderMode, m++)) {
                     setRenderMode(render_displacement, ri);
                 }
-                static float s_displacementScale = 0.01f;
-                if (ImGui::SliderFloat("Parallax strength", &s_displacementScale, 0.0f, 0.05f, "%.3f")) {
-                    stateset(ri)->getOrCreateUniform("oe_pbr_displacement_scale", osg::Uniform::FLOAT)->set(s_displacementScale);
-                }
-                static float s_parallaxDistance = 50.0f;
-                if (ImGui::SliderFloat("Parallax distance (m)", &s_parallaxDistance, 0.0f, 200.0f, "%.0f")) {
-                    stateset(ri)->getOrCreateUniform("oe_gltf_parallax_max_distance", osg::Uniform::FLOAT)->set(s_parallaxDistance);
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("glTF relief fades between 40%% and 100%% of this distance. Zero disables relief.");
                 if (ImGui::RadioButton("Draw ID", &s_renderMode, m++)) {
                     setRenderMode(render_draw_id, ri);
                 }

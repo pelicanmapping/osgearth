@@ -96,8 +96,6 @@
 #include <osgEarth/ExampleResources>
 #include <osgEarth/Export>
 #include <osgEarth/Expression>
-#include <osgEarth/ExternalNode>
-#include <osgEarth/InstancedExternalNode>
 #include <osgEarth/Extension>
 #include <osgEarth/ExtrudeGeometryFilter>
 #include <osgEarth/ExtrusionSymbol>
@@ -245,7 +243,6 @@
 #include <osgEarth/PowerlineLayer>
 #include <osgEarth/PrimitiveIntersector>
 #include <osgEarth/Profile>
-#include <osgEarth/PrestigeLayer>
 #include <osgEarth/Progress>
 #include <osgEarth/Query>
 #include <osgEarth/RTTPicker>

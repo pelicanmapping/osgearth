@@ -1096,10 +1096,11 @@ public:
             ALBEDO_UNIT = 0u,
             NORMAL_UNIT = 1u,
             METALLIC_ROUGHNESS_UNIT = 2u,
-            OCCLUSION_UNIT = 3u
+            OCCLUSION_UNIT = 3u,
+            HEIGHT_UNIT = 4u
         };
 
-        // Whether to load the normal, metallic-roughness and occlusion maps
+        // Whether to load the normal, metallic-roughness, occlusion and height maps
         // in addition to the base color. Disable with the "gltfSkipPBRTextures"
         // read option.
         bool loadPBRTextures = true;
@@ -1161,7 +1162,122 @@ void oe_gltf_pbr_vs(inout vec4 vertex_view)
 }
 
 [break]
+#pragma vp_function oe_gltf_parallax_fs, fragment_coloring, 0.4
+#pragma import_defines(OE_GLTF_HAS_HEIGHT_MAP)
+#pragma import_defines(OE_IS_SHADOW_CAMERA)
+#pragma import_defines(OE_IS_DEPTH_CAMERA)
+
+in vec3 vp_Normal;
+in vec3 oe_gltf_pbr_pos_view;
+in vec2 oe_gltf_pbr_uv;
+vec2 oe_gltf_material_uv;
+
+#ifdef OE_GLTF_HAS_HEIGHT_MAP
+uniform sampler2D oe_gltf_height_tex;
+uniform sampler2D oe_gltf_albedo_tex;
+uniform float oe_pbr_displacement_scale = 0.01;
+uniform float oe_gltf_parallax_max_distance = 50.0;
+uniform mat4 osg_ProjectionMatrix;
+float oe_gltf_relief_scale;
+float oe_gltf_height_lod;
+mat3 oe_gltf_pbr_tbn(vec3 N, vec3 p, vec2 uv);
+
+vec2 oe_gltf_parallax_uv(vec2 uv, vec3 viewTS, vec2 dx, vec2 dy)
+{
+    float facing = abs(viewTS.z);
+    // White is the top of the relief and midgray lies on the mesh plane.
+    // Start above that plane and trace into the heightfield along the view ray,
+    // accepting the first intersection (including raised edges).
+    vec2 ray = viewTS.xy / max(facing, 0.25) *
+        oe_gltf_relief_scale * smoothstep(0.05, 0.25, facing);
+
+    // Convert the UV ray to pixels. Subpixel offsets cannot show useful
+    // occlusion; fade those out before doing any height fetches.
+    float det = dx.x * dy.y - dx.y * dy.x;
+    if (abs(det) < 1e-20)
+        return uv;
+    vec2 rayPixels = vec2(dy.y * ray.x - dy.x * ray.y,
+        dx.x * ray.y - dx.y * ray.x) / det;
+    float pixels = length(rayPixels);
+    if (pixels <= 0.5)
+        return uv;
+    ray *= smoothstep(0.5, 1.0, pixels);
+
+    // Count texels at the filtered mip level, not the source resolution.
+    // Explicit LOD keeps the height search isotropic: anisotropic filtering
+    // can otherwise multiply the texture work at every step of the ray.
+    float texels = length(ray * vec2(textureSize(oe_gltf_height_tex, 0))) *
+        exp2(-oe_gltf_height_lod);
+    float layers = ceil(clamp(texels, 8.0, 64.0));
+    float stepDepth = 1.0 / layers;
+    vec2 topUV = uv + 0.5 * ray;
+    float depth = 0.0;
+    float surfaceDepth = 1.0 - textureLod(oe_gltf_height_tex, topUV, oe_gltf_height_lod).r;
+    if (surfaceDepth <= 0.0)
+        return topUV;
+
+    float previousDepth = 0.0;
+    float previousError = surfaceDepth;
+    float error = surfaceDepth;
+    for (int i = 0; i < 64; ++i)
+    {
+        previousDepth = depth;
+        previousError = error;
+        depth = min(depth + stepDepth, 1.0);
+        surfaceDepth = 1.0 - textureLod(oe_gltf_height_tex, topUV - ray * depth, oe_gltf_height_lod).r;
+        error = surfaceDepth - depth;
+        if (error <= 0.0)
+            break;
+    }
+
+    // Interpolate the two samples bracketing the first intersection. This
+    // avoids five additional height fetches for binary refinement.
+    float weight = previousError / max(previousError - error, 1e-6);
+    return topUV - ray * mix(previousDepth, depth, clamp(weight, 0.0, 1.0));
+}
+#endif
+
+void oe_gltf_parallax_fs(inout vec4 color)
+{
+    oe_gltf_material_uv = oe_gltf_pbr_uv;
+#ifdef OE_GLTF_HAS_HEIGHT_MAP
+    vec2 dx = dFdx(oe_gltf_pbr_uv);
+    vec2 dy = dFdy(oe_gltf_pbr_uv);
+    oe_gltf_relief_scale = 0.0;
+#if !defined(OE_IS_SHADOW_CAMERA) && !defined(OE_IS_DEPTH_CAMERA)
+    // Use interpolated position, not interpolated vertex distances: large
+    // wall triangles may be close even when all their vertices are far away.
+    float distance2 = dot(oe_gltf_pbr_pos_view, oe_gltf_pbr_pos_view);
+    float limit2 = max(oe_gltf_parallax_max_distance * oe_gltf_parallax_max_distance, 1e-6);
+    oe_gltf_relief_scale = oe_gltf_parallax_max_distance > 0.0 ?
+        max(oe_pbr_displacement_scale, 0.0) *
+        (1.0 - smoothstep(0.16 * limit2, limit2, distance2)) : 0.0;
+
+    // Evaluate derivatives before the distance branch. They are undefined
+    // in nonuniform control flow, including at the edge of the distance fade.
+    vec3 N = normalize(vp_Normal);
+    mat3 tbn = oe_gltf_pbr_tbn(N, oe_gltf_pbr_pos_view, oe_gltf_pbr_uv);
+    if (oe_gltf_relief_scale > 0.0)
+    {
+        vec2 size = vec2(textureSize(oe_gltf_height_tex, 0));
+        vec2 tx = dx * size, ty = dy * size;
+        oe_gltf_height_lod = 0.5 * log2(max(1.0, max(dot(tx, tx), dot(ty, ty))));
+        // Orthographic rays are parallel to the view axis.
+        vec3 V = osg_ProjectionMatrix[3][3] == 0.0 ?
+            normalize(-oe_gltf_pbr_pos_view) : vec3(0.0, 0.0, 1.0);
+        oe_gltf_material_uv = oe_gltf_parallax_uv(oe_gltf_pbr_uv,
+            transpose(tbn) * V, dx, dy);
+    }
+#endif
+    // Height-enabled albedo bypasses ShaderGenerator so all maps sample the
+    // same offset UV. Keep alpha sampling in shadow/depth passes as well.
+    color *= textureGrad(oe_gltf_albedo_tex, oe_gltf_material_uv, dx, dy);
+#endif
+}
+
+[break]
 #pragma vp_function oe_gltf_pbr_fs, fragment_coloring, 0.6
+#pragma import_defines(OE_GLTF_HAS_HEIGHT_MAP)
 #pragma import_defines(OE_IS_SHADOW_CAMERA)
 #pragma import_defines(OE_IS_DEPTH_CAMERA)
 
@@ -1170,10 +1286,16 @@ struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;
 in vec3 vp_Normal;
 in vec3 oe_gltf_pbr_pos_view;
 in vec2 oe_gltf_pbr_uv;
+vec2 oe_gltf_material_uv;
 
 uniform sampler2D oe_gltf_normal_tex;
 uniform sampler2D oe_gltf_metallic_roughness_tex;
 uniform sampler2D oe_gltf_occlusion_tex;
+#ifdef OE_GLTF_HAS_HEIGHT_MAP
+uniform sampler2D oe_gltf_height_tex;
+float oe_gltf_relief_scale;
+float oe_gltf_height_lod;
+#endif
 
 uniform vec4 oe_gltf_pbr_flags;
 uniform vec4 oe_gltf_pbr_factors; // normal scale, roughness, metallic, AO strength
@@ -1201,17 +1323,41 @@ void oe_gltf_pbr_fs(inout vec4 color)
     return;
 #endif
 
+    vec3 N = normalize(vp_Normal);
+    mat3 tbn = oe_gltf_pbr_tbn(N, oe_gltf_pbr_pos_view, oe_gltf_pbr_uv);
+    vec2 dx = dFdx(oe_gltf_pbr_uv);
+    vec2 dy = dFdy(oe_gltf_pbr_uv);
     if (oe_gltf_pbr_flags.x > 0.5)
     {
-        vec3 N = normalize(vp_Normal);
-        vec3 n = texture(oe_gltf_normal_tex, oe_gltf_pbr_uv).xyz * 2.0 - 1.0;
+        vec3 n = textureGrad(oe_gltf_normal_tex, oe_gltf_material_uv,
+            dx, dy).xyz * 2.0 - 1.0;
         n.xy *= vec2(oe_gltf_pbr_factors.x, -oe_gltf_pbr_factors.x);
-        float nlen = length(n);
-        n = nlen > 0.0 ? n / nlen : vec3(0.0, 0.0, 1.0);
-        vec3 pn = oe_gltf_pbr_tbn(N, oe_gltf_pbr_pos_view, oe_gltf_pbr_uv) * n;
-        float len = length(pn);
-        vp_Normal = len > 0.0 ? pn / len : N;
+        vec3 pn = tbn * n;
+        vp_Normal = dot(pn, pn) > 0.0 ? normalize(pn) : N;
     }
+
+#ifdef OE_GLTF_HAS_HEIGHT_MAP
+    if (oe_gltf_relief_scale > 0.0)
+    {
+        // Differentiate the filtered heightfield at the ray hit. The original
+        // normal map describes its author's relief scale, which can be much
+        // shallower than our parallax depth. Use the same cotangent metric as
+        // the ray so the visible sides receive the corresponding lighting.
+        vec2 delta = max(vec2(exp2(oe_gltf_height_lod)) /
+            vec2(textureSize(oe_gltf_height_tex, 0)), abs(dx) + abs(dy));
+        vec2 u = vec2(delta.x, 0.0);
+        vec2 v = vec2(0.0, delta.y);
+        vec2 slope = vec2(
+            textureLod(oe_gltf_height_tex, oe_gltf_material_uv + u, oe_gltf_height_lod).r -
+            textureLod(oe_gltf_height_tex, oe_gltf_material_uv - u, oe_gltf_height_lod).r,
+            textureLod(oe_gltf_height_tex, oe_gltf_material_uv + v, oe_gltf_height_lod).r -
+            textureLod(oe_gltf_height_tex, oe_gltf_material_uv - v, oe_gltf_height_lod).r) / (2.0 * delta);
+        // Preserve the normal map's surface detail as an additional slope.
+        vec3 detail = vp_Normal / max(dot(vp_Normal, N), 0.05) - N;
+        vp_Normal = normalize(N + detail - oe_gltf_relief_scale *
+            (tbn[0] * slope.x + tbn[1] * slope.y));
+    }
+#endif
 
     if (oe_gltf_pbr_flags.w > 0.5)
     {
@@ -1219,20 +1365,26 @@ void oe_gltf_pbr_fs(inout vec4 color)
         float metal = oe_gltf_pbr_factors.z;
         if (oe_gltf_pbr_flags.y > 0.5)
         {
-            vec4 metallicRoughness = texture(oe_gltf_metallic_roughness_tex, oe_gltf_pbr_uv);
+            vec4 metallicRoughness = textureGrad(oe_gltf_metallic_roughness_tex, oe_gltf_material_uv,
+                dFdx(oe_gltf_pbr_uv), dFdy(oe_gltf_pbr_uv));
             roughness *= metallicRoughness.g;
             metal *= metallicRoughness.b;
         }
-        oe_pbr.displacement = 0.0;
         oe_pbr.roughness *= roughness;
         oe_pbr.metal = clamp(oe_pbr.metal + metal, 0.0, 1.0);
     }
 
     if (oe_gltf_pbr_flags.z > 0.5)
     {
-        float occlusion = texture(oe_gltf_occlusion_tex, oe_gltf_pbr_uv).r;
+        float occlusion = textureGrad(oe_gltf_occlusion_tex, oe_gltf_material_uv,
+            dFdx(oe_gltf_pbr_uv), dFdy(oe_gltf_pbr_uv)).r;
         oe_pbr.ao *= 1.0 + oe_gltf_pbr_factors.w * (occlusion - 1.0);
     }
+
+#ifdef OE_GLTF_HAS_HEIGHT_MAP
+    oe_pbr.displacement = textureGrad(oe_gltf_height_tex, oe_gltf_material_uv,
+        dFdx(oe_gltf_pbr_uv), dFdy(oe_gltf_pbr_uv)).r;
+#endif
 }
 )";
         }
@@ -1248,14 +1400,24 @@ void oe_gltf_pbr_fs(inout vec4 color)
             float roughnessFactor,
             float metallicFactor,
             float occlusionStrength,
-            bool applyPBRFactors)
+            bool applyPBRFactors,
+            osg::Texture2D* heightTex = nullptr)
         {
-            if (!stateset || (!normalTex && !metallicRoughnessTex && !occlusionTex && !applyPBRFactors))
+            if (!stateset || (!normalTex && !metallicRoughnessTex && !occlusionTex && !applyPBRFactors && !heightTex))
                 return;
 
             VirtualProgram* vp = VirtualProgram::getOrCreate(stateset);
             vp->setName("glTF PBR material");
             ShaderLoader::load(vp, pbrMaterialShaderSource());
+
+            if (heightTex)
+            {
+                ShaderGenerator::setIgnoreHint(heightTex, true);
+                stateset->setDefine("OE_GLTF_HAS_HEIGHT_MAP");
+                stateset->setTextureAttribute(HEIGHT_UNIT, heightTex);
+                stateset->addUniform(new osg::Uniform("oe_gltf_height_tex", (int)HEIGHT_UNIT));
+                stateset->addUniform(new osg::Uniform("oe_gltf_albedo_tex", (int)ALBEDO_UNIT));
+            }
 
             stateset->addUniform(new osg::Uniform(
                 "oe_gltf_pbr_flags", osg::Vec4f(
@@ -1832,9 +1994,107 @@ void oe_gltf_pbr_fs(inout vec4 color)
         }
 
         //! Base color (albedo) texture for a material.
-        osg::ref_ptr<osg::Texture2D> getOrCreateColorTexture(const tinygltf::TextureInfo& info) const
+        osg::ref_ptr<osg::Texture2D> getOrCreateColorTexture(
+            const tinygltf::TextureInfo& info, bool parallax = false) const
         {
-            return getOrCreateSourceTexture(info.index, false);
+            if (!parallax)
+                return getOrCreateSourceTexture(info.index, false);
+            if (!validTextureIndex(info.index))
+                return {};
+
+            // Ignore hints belong to textures, so do not share this binding
+            // with a material whose color is still sampled by ShaderGenerator.
+            const auto& texture = model.textures[info.index];
+            return getOrCreateTexture(
+                Stringify() << "parallax-color:" << info.index,
+                sharedTextureKey(texture, "|gltf-parallax-color"),
+                [&]() {
+                    osg::ref_ptr<osg::Texture2D> tex = makeTextureFromModel(texture, true);
+                    if (tex.valid()) ShaderGenerator::setIgnoreHint(tex.get(), true);
+                    return tex;
+                });
+        }
+
+        //! Optional local Substance sidecar, e.g. civic_basecolor.png ->
+        //! civic_height.png. Plain names also work: brick.png -> brick_height.png.
+        osg::ref_ptr<osg::Texture2D> getOrCreateHeightTexture(const tinygltf::TextureInfo& info) const
+        {
+            if (!validTextureIndex(info.index) || info.texCoord != 0)
+                return {};
+            const auto& texture = model.textures[info.index];
+            int source = getTextureSource(texture);
+            // An embedded WebP alternative can still have an external core URI.
+            if (source >= 0 && static_cast<size_t>(source) < model.images.size() &&
+                (model.images[source].uri.empty() || tinygltf::IsDataURI(model.images[source].uri)))
+                source = texture.source;
+            if (source < 0 || static_cast<size_t>(source) >= model.images.size())
+                return {};
+            const auto& image = model.images[source];
+            if (image.uri.empty() || tinygltf::IsDataURI(image.uri))
+                return {};
+            const std::string filename = resolveResourceURI(image.uri, env.referrer);
+            // This convention is for local assets; do not probe arbitrary URLs.
+            if (URI(filename).isRemote())
+                return {};
+            std::string stem = osgDB::getNameLessExtension(filename);
+            const std::string lowerStem = osgDB::convertToLowerCase(stem);
+            for (const std::string suffix : { "_basecolor", "_base_color", "_albedo", "_diffuse" })
+            {
+                if (stem.size() >= suffix.size() &&
+                    lowerStem.compare(stem.size() - suffix.size(), suffix.size(), suffix) == 0)
+                {
+                    stem.resize(stem.size() - suffix.size());
+                    break;
+                }
+            }
+            const std::string heightFilename = stem + "_height.png";
+            // Sampler state is part of the key, since a sidecar may be used
+            // with different wrap modes in different models.
+            std::ostringstream key;
+            key << heightFilename << "|gltf-height";
+            if (texture.sampler >= 0 && static_cast<size_t>(texture.sampler) < model.samplers.size())
+            {
+                const auto& sampler = model.samplers[texture.sampler];
+                key << ':' << sampler.wrapS << ':' << sampler.wrapT << ':' << sampler.wrapR;
+            }
+            //OE_INFO << "Looking for height" << heightFilename  << std::endl;
+            return getOrCreateTexture(key.str(), key.str(), [&]() {
+                if (!osgDB::fileExists(heightFilename))
+                    return osg::ref_ptr<osg::Texture2D>();
+                auto rr = osgDB::Registry::instance()->readImageImplementation(
+                    heightFilename + ".flipvertical", env.readOptions);
+                if (!rr.validImage())
+                    return osg::ref_ptr<osg::Texture2D>();
+
+                OE_INFO << "Found height!" << heightFilename << std::endl;
+                osg::ref_ptr<osg::Image> heightImage = rr.takeImage();
+                // PNG grayscale uses legacy luminance formats. Core OpenGL
+                // requires RED/RG for both the upload format and the storage;
+                // changing only the texture's internal format is insufficient.
+                // Clone before changing metadata since the loader may cache it.
+                GLenum format = heightImage->getPixelFormat();
+                if (format == GL_LUMINANCE || format == GL_LUMINANCE_ALPHA)
+                {
+                    heightImage = new osg::Image(*heightImage, osg::CopyOp::DEEP_COPY_ALL);
+                    format = format == GL_LUMINANCE ? GL_RED : GL_RG;
+                    heightImage->setPixelFormat(format);
+                }
+                const bool sixteenBit = heightImage->getDataType() == GL_UNSIGNED_SHORT;
+                if (format == GL_RED)
+                    heightImage->setInternalTextureFormat(sixteenBit ? GL_R16 : GL_R8);
+                else if (format == GL_RG)
+                    heightImage->setInternalTextureFormat(sixteenBit ? GL_RG16 : GL_RG8);
+                osg::ref_ptr<osg::Texture2D> tex = makeTexture(heightImage.get(), texture, false);
+                tex->setName(heightFilename);
+                // Preserve the precision of Substance's 16-bit RGB(A) exports.
+                if (sixteenBit)
+                {
+                    if (heightImage->getPixelFormat() == GL_RGB) tex->setInternalFormat(GL_RGB16);
+                    else if (heightImage->getPixelFormat() == GL_RGBA) tex->setInternalFormat(GL_RGBA16);
+                }
+                ShaderGenerator::setIgnoreHint(tex.get(), true);
+                return tex;
+            });
         }
 
         //! tinygltf's legacy values map only contains factors explicitly
@@ -2026,9 +2286,13 @@ void oe_gltf_pbr_fs(inout vec4 color)
                     }
 
                     // Base color (albedo) map. This is a plain osg::Texture2D on
-                    // unit 0 so that the ShaderGenerator picks it up for normal
-                    // rendering, and the Chonk ripper reads it as the albedo.
-                    osg::ref_ptr<osg::Texture2D> albedoTex = getOrCreateColorTexture(pbr.baseColorTexture);
+                    // unit 0, also recognized by the Chonk ripper. With a height
+                    // sidecar the material shader takes over color sampling.
+                    osg::ref_ptr<osg::Texture2D> heightTex = loadPBRTextures ?
+                        getOrCreateHeightTexture(pbr.baseColorTexture) : nullptr;
+                    osg::ref_ptr<osg::Texture2D> albedoTex = getOrCreateColorTexture(pbr.baseColorTexture, heightTex.valid());
+                    if (!albedoTex.valid())
+                        heightTex = nullptr;
                     if (albedoTex.valid())
                     {
                         // Set the mode along with the attribute: on OSG builds with the
@@ -2054,7 +2318,7 @@ void oe_gltf_pbr_fs(inout vec4 color)
                             occlusionTex.valid() ||
                             hasExplicitPBRFactors(material);
 
-                        if (normalTex.valid() || applyPBRFactors)
+                        if (normalTex.valid() || applyPBRFactors || heightTex.valid())
                         {
                             installPBRMaterial(
                                 geom->getOrCreateStateSet(),
@@ -2065,8 +2329,10 @@ void oe_gltf_pbr_fs(inout vec4 color)
                                 static_cast<float>(pbr.roughnessFactor),
                                 static_cast<float>(pbr.metallicFactor),
                                 static_cast<float>(material.occlusionTexture.strength),
-                                applyPBRFactors);
+                                applyPBRFactors,
+                                heightTex.get());
                         }
+
                     }
 
                     if (material.alphaMode == "BLEND")

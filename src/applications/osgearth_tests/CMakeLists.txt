@@ -21,3 +21,8 @@ add_osgearth_app(
     SOURCES ${TARGET_SRC}
     LIBRARIES ${OPENGL_LIBRARIES}
     FOLDER Tests)
+
+if(OSGEARTH_BUILD_IMGUI_NODEKIT)
+    target_sources(osgearth_tests PRIVATE ImGuiTests.cpp)
+    target_link_libraries(osgearth_tests PRIVATE osgEarthImGui)
+endif()

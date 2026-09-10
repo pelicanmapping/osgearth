@@ -72,14 +72,16 @@ namespace
     osg::ref_ptr<osg::Node> readModel(
         const URI& uri,
         const osgDB::Options* readOptions,
-        ProgressCallback* progress)
+        ProgressCallback* progress,
+        std::shared_ptr<ChonkFactory> chonks = nullptr)
     {
         if (progress && progress->isCanceled())
             return {};
 
         osg::ref_ptr< osg::Node > node = osgDB::readNodeFile(uri.full(), readOptions);
-        return node.get();
-        //return uri.readNode(readOptions, progress).getNode();
+        if (progress && progress->isCanceled())
+            return {};
+        return chonks && node ? ChonkFactory::convertExternalInstances(node.get(), chonks) : node;
     }
 
     bool readSidecarBounds(
@@ -404,6 +406,9 @@ void PrestigeLayer::addedToMap(const Map* map)
     _readOptions = Registry::instance()->cloneOrCreateOptions(getReadOptions());
     _readOptions->setObjectCacheHint(osgDB::Options::CACHE_IMAGES);
     super::addedToMap(map);
+    // Keep the factory alive with paged cells, and share prototypes/textures
+    // across independent detail loads. TiledModelLayer owns the arena's update.
+    _detailChonks = _textures.valid() ? std::make_shared<ChonkFactory>(_textures.get()) : nullptr;
 }
 
 osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
@@ -463,6 +468,7 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
 
     const float lod0Range = *options().lod0Range();
     const osg::ref_ptr<osgDB::Options> readOptions = _readOptions;
+    const auto detailChonks = _detailChonks;
 
     if (!*options().split())
     {
@@ -473,10 +479,10 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
         const URI fullURI = makeTileURI(base, makeTileStem(z, x, y) + ".gltf");
 
         lod2Pager->setLoadFunction(
-            [fullURI, readOptions](Cancelable* cancelable)
+            [fullURI, readOptions, detailChonks](Cancelable* cancelable)
             {
                 osg::ref_ptr<ProgressCallback> progress = new ProgressCallback(cancelable);
-                return readModel(fullURI, readOptions.get(), progress.get());
+                return readModel(fullURI, readOptions.get(), progress.get(), detailChonks);
             });
     }
     else
@@ -506,7 +512,7 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
         lod2Pager->setMaxRange(*options().lod1Range());
 
         lod2Pager->setLoadFunction(
-        [base, z, x, y, lod0Range, gridSize, skipLOD1, cellBounds, readOptions](Cancelable* cancelable)
+        [base, z, x, y, lod0Range, gridSize, skipLOD1, cellBounds, readOptions, detailChonks](Cancelable* cancelable)
         {
             osg::ref_ptr<ProgressCallback> progress = new ProgressCallback(cancelable);
             osg::ref_ptr<osg::Group> group = new osg::Group();
@@ -582,7 +588,7 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
                     setBounds(lod1Pager, pagingBounds);
 
                     lod1Pager->setLoadFunction(
-                        [lod0URI, readOptions](Cancelable* lod0Cancelable)
+                        [lod0URI, readOptions, detailChonks](Cancelable* lod0Cancelable)
                         {
                             osg::ref_ptr<ProgressCallback> lod0Progress =
                                 new ProgressCallback(lod0Cancelable);
@@ -590,7 +596,8 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
                             osg::ref_ptr<osg::Node> lod0 = readModel(
                                 lod0URI,
                                 readOptions.get(),
-                                lod0Progress.get());
+                                lod0Progress.get(),
+                                detailChonks);
 
                             if (lod0.valid())
                             {

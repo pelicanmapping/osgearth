@@ -35,6 +35,7 @@ namespace osgEarth
         std::vector<DefineSpec> _defines;
 
         ProgramRepo::ProgramMap _db;
+        bool _refreshPrograms = false;
 
     public:
         ShaderGUI(osg::ArgumentParser* args = nullptr) : ImGuiPanel("Shaders")
@@ -108,12 +109,13 @@ namespace osgEarth
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(1, 1, 0, 1), "Active Programs:");
 
-                if (_db.empty() || ImGui::Button("Refresh"))
+                if (ImGui::Button("Refresh") || _db.empty() || _refreshPrograms)
                 {
                     _db = Registry::programRepo().copy();
+                    _refreshPrograms = false;
                 }
 
-                static void* open_shader = nullptr;
+                static osg::ref_ptr<osg::Shader> open_shader;
                 int count = 0;
                 int frame = ri.getState()->getFrameStamp()->getFrameNumber();
                 for (auto& entry : _db)
@@ -156,8 +158,13 @@ namespace osgEarth
                                     auto text = shader->getShaderSource();
                                     if (ImGuiEx::InputTextMultiline("##shader_source", &text, ImVec2(-1, -1)))
                                     {
-                                        shader->setShaderSource(text);
-                                        program->releaseGLObjects(nullptr);
+                                        // This is a composed shader, not a registered VP input.
+                                        // Replace it through the repo to preserve immutable
+                                        // snapshots, shared shaders, and the cache's indexes.
+                                        auto replacement = Registry::programRepo().editShader(program, i, text);
+                                        if (replacement.valid())
+                                            open_shader = replacement->getShader(i);
+                                        _refreshPrograms = true;
                                     }
 
                                     ImGui::End();

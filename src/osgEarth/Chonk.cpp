@@ -15,11 +15,11 @@
 #include "Notify"
 #include "ImageUtils"
 #include "Math"
-#include "ExternalNode"
 #include "InstancedExternalNode"
 #include <osg/MatrixTransform>
 #include <osg/CullFace>
 #include <osg/FrontFace>
+#include <cstdlib>
 
 #include <osgUtil/Optimizer>
 
@@ -671,29 +671,56 @@ ChonkFactory::setGetOrCreateFunction(GetOrCreateFunction value)
 
 namespace
 {
-    // Chonk records vertex/material data, not arbitrary OSG state. Only accept
-    // the static, opaque subset for which dropping the source state is safe.
+    bool enforceChonkEligibility()
+    {
+        // Startup-only restriction policy. Keep this fixed so cached Chonks
+        // cannot outlive the eligibility policy under which they were built.
+        static const bool enforce = []()
+        {
+            const char* value = std::getenv("OSGEARTH_CHONK_ENFORCE_ELIGIBILITY");
+            return value && std::string(value) == "1";
+        }();
+        return enforce;
+    }
+
+    // Optional restrictions to the static, opaque subset whose scene/state
+    // semantics Chonk can preserve. Report the first rejection per conversion.
     struct ChonkEligibility : osg::NodeVisitor
     {
         bool valid = true;
         ChonkEligibility() : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN) { }
 
+        void reject(const osg::Node& node, const std::string& reason)
+        {
+            if (!valid) return;
+            valid = false;
+            OE_WARN << LC << "Eligibility rejected " << node.className()
+                << " \"" << node.getName() << "\": " << reason << std::endl;
+        }
+
         void inspect(osg::Node& node)
         {
-            if (node.getNodeMask() != ~0u || node.getUpdateCallback() ||
-                node.getEventCallback() || node.getCullCallback() ||
-                node.getDataVariance() == osg::Object::DYNAMIC)
-                valid = false;
+            if (!valid) return;
+            if (node.getNodeMask() != ~0u)
+                reject(node, "non-default node mask");
+            else if (node.getUpdateCallback() || node.getEventCallback() || node.getCullCallback())
+                reject(node, "node callbacks");
+            else if (node.getDataVariance() == osg::Object::DYNAMIC)
+                reject(node, "dynamic node");
+            if (!valid) return;
             auto* ss = node.getStateSet();
             if (!ss) return;
-            if (ss->getDataVariance() == osg::Object::DYNAMIC ||
-                ss->requiresUpdateTraversal() || ss->requiresEventTraversal() ||
-                (ss->getMode(GL_BLEND) & osg::StateAttribute::ON) ||
+            if (ss->getDataVariance() == osg::Object::DYNAMIC)
+                reject(node, "dynamic StateSet");
+            else if (ss->requiresUpdateTraversal() || ss->requiresEventTraversal())
+                reject(node, "StateSet callbacks");
+            else if ((ss->getMode(GL_BLEND) & osg::StateAttribute::ON) ||
                 ss->getRenderingHint() == osg::StateSet::TRANSPARENT_BIN)
-                valid = false;
+                reject(node, "blending or transparent render bin");
             auto cull = ss->getModeList().find(GL_CULL_FACE);
             if (cull != ss->getModeList().end() && !(cull->second & osg::StateAttribute::ON))
-                valid = false;
+                reject(node, "face culling is disabled (two-sided rendering)");
+            if (!valid) return;
             for (const auto& entry : ss->getAttributeList())
             {
                 auto* attr = entry.second.first.get();
@@ -704,25 +731,27 @@ namespace
                     // Other shader effects stay on the ordinary path.
                     bool linearColor = false;
                     node.getUserValue(CHONK_HINT_LINEAR_COLOR, linearColor);
-                    if (!linearColor) valid = false;
+                    if (!linearColor) reject(node, "shader state lacks the supported linear-color hint");
                     VirtualProgram::ShaderMap shaders;
                     vp->getShaderMap(shaders);
                     for (const auto& shader : shaders)
                     {
                         const auto& name = shader.second._shader->getName();
                         if (name != "oe_sg_vert_model" && name != "oe_sg_vert_view" && name != "oe_sg_frag")
-                            valid = false;
+                            reject(node, "unsupported shader: " + name);
                     }
                 }
                 else if (auto* face = dynamic_cast<osg::FrontFace*>(attr))
                 {
-                    if (face->getMode() != osg::FrontFace::COUNTER_CLOCKWISE) valid = false;
+                    if (face->getMode() != osg::FrontFace::COUNTER_CLOCKWISE)
+                        reject(node, "clockwise front faces");
                 }
                 else if (auto* face = dynamic_cast<osg::CullFace*>(attr))
                 {
-                    if (face->getMode() != osg::CullFace::BACK) valid = false;
+                    if (face->getMode() != osg::CullFace::BACK)
+                        reject(node, "cull mode is not BACK");
                 }
-                else valid = false;
+                else reject(node, "unsupported state attribute: " + std::string(attr->className()));
             }
         }
 
@@ -730,7 +759,7 @@ namespace
         {
             inspect(node);
             if (typeid(node) != typeid(osg::Group) && typeid(node) != typeid(osg::Geode) &&
-                typeid(node) != typeid(osg::Node)) valid = false;
+                typeid(node) != typeid(osg::Node)) reject(node, "specialized node type");
             if (valid) traverse(node);
         }
 
@@ -738,7 +767,8 @@ namespace
         {
             inspect(node);
             if (typeid(node) != typeid(osg::MatrixTransform) ||
-                node.getReferenceFrame() != osg::Transform::RELATIVE_RF) valid = false;
+                node.getReferenceFrame() != osg::Transform::RELATIVE_RF)
+                reject(node, "specialized or absolute transform");
             if (valid) traverse(node);
         }
 
@@ -746,10 +776,11 @@ namespace
         {
             inspect(node);
             if (typeid(node) != typeid(osg::Geometry) ||
-                !dynamic_cast<osg::Vec3Array*>(node.getVertexArray())) valid = false;
+                !dynamic_cast<osg::Vec3Array*>(node.getVertexArray()))
+                reject(node, "geometry requires a plain osg::Geometry with Vec3 vertices");
             for (auto& primitive : node.getPrimitiveSetList())
                 if (primitive->getMode() != GL_TRIANGLES || primitive->getNumInstances() > 0)
-                    valid = false;
+                    reject(node, "primitive is not an uninstanced triangle list");
         }
     };
 
@@ -798,7 +829,9 @@ namespace
                     return node;
                 for (const auto& matrix : external->getMatrices())
                     if (!positiveAffine(osg::Matrixd(matrix) * parent)) return node;
-                auto chonk = _factory->getOrCreateChonk(payload.get());
+                // Match ChonkDrawable::add: global SSE sets the minimum
+                // instance pixel size independently of tile paging thresholds.
+                auto chonk = _factory->getOrCreateChonk(payload.get(), 1.0f);
                 if (!chonk) return node;
                 for (const auto& matrix : external->getMatrices())
                     drawable->add(chonk, osg::Matrixf(osg::Matrixd(matrix) * parent));
@@ -812,9 +845,12 @@ namespace
                 node->getEventCallback() || node->getCullCallback() ||
                 (typeid(*node) != typeid(osg::Group) && typeid(*node) != typeid(osg::MatrixTransform)))
                 return node;
-            ChonkEligibility eligibility;
-            eligibility.inspect(*node);
-            if (!eligibility.valid) return node;
+            if (enforceChonkEligibility())
+            {
+                ChonkEligibility eligibility;
+                eligibility.inspect(*node);
+                if (!eligibility.valid) return node;
+            }
             osg::Matrixd matrix = parent;
             if (auto* mt = dynamic_cast<osg::MatrixTransform*>(node))
             {
@@ -876,9 +912,12 @@ ChonkFactory::getOrCreateChonk(osg::Node* node, float farScale, float nearScale)
             ++i;
         }
     }
-    ChonkEligibility eligibility;
-    node->accept(eligibility);
-    if (!eligibility.valid) return {};
+    if (enforceChonkEligibility())
+    {
+        ChonkEligibility eligibility;
+        node->accept(eligibility);
+        if (!eligibility.valid) return {};
+    }
     auto chonk = Chonk::create();
     chonk->name() = node->getName();
     // The manager owns node. Unlike load(Node*, Chonk*), this never runs an

@@ -134,9 +134,10 @@ TEST_CASE("Chonk cell conversion preserves placements and asset reloads", "[chon
     REQUIRE(result->getBound().valid());
 }
 
-TEST_CASE("Chonk external instance eligibility respects the profiling override", "[chonk]")
+TEST_CASE("Chonk external instance eligibility restrictions are opt-in", "[chonk]")
 {
     auto geometry = ChonkTest::mesh();
+    geometry->setName("double-sided test asset");
     geometry->getOrCreateStateSet()->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
     ChonkTest::AssetFile file;
     REQUIRE(file.write(geometry));
@@ -145,17 +146,20 @@ TEST_CASE("Chonk external instance eligibility respects the profiling override",
     osg::ref_ptr<InstancedExternalNode> external = new InstancedExternalNode(file.path, matrices);
     REQUIRE(external->isUsingHardwareInstancing());
     osg::ref_ptr<osg::Group> source = new osg::Group();
+    source->setName("double-sided test cell");
     source->getOrCreateStateSet()->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
     source->addChild(external);
     osg::ref_ptr<TextureArena> arena = new TextureArena();
     auto factory = std::make_shared<ChonkFactory>(arena);
+    const char* value = std::getenv("OSGEARTH_CHONK_ENFORCE_ELIGIBILITY");
+    const bool enforce = value && std::string(value) == "1";
+    auto prototype = factory->getOrCreateChonk(external->getExternalNode(), 1.0f);
+    REQUIRE(bool(prototype) == !enforce);
     auto converted = ChonkFactory::convertExternalInstances(source, factory);
     ChonkTest::FindDrawables find;
     converted->accept(find);
-    const char* value = std::getenv("OSGEARTH_CHONK_BYPASS_ELIGIBILITY");
-    const bool bypass = value && std::string(value) == "1";
-    REQUIRE(find.drawables.size() == (bypass ? 1u : 0u));
-    if (bypass)
+    REQUIRE(find.drawables.size() == (enforce ? 0u : 1u));
+    if (!enforce)
         REQUIRE(find.drawables[0]->getNumInstances() == matrices.size());
     REQUIRE(source->getChild(0) == external.get());
     REQUIRE(source->getStateSet()->getMode(GL_CULL_FACE) == osg::StateAttribute::OFF);

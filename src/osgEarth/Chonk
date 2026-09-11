@@ -188,7 +188,9 @@ namespace osgEarth
 
         //! Read-only conversion of a static asset, shared across cells. The
         //! cache is weak and keyed by the source graph and pixel limits.
-        //! Unsupported scene/state semantics return an empty pointer.
+        //! Scene/state eligibility checks are disabled by default.
+        //! OSGEARTH_CHONK_ENFORCE_ELIGIBILITY=1 rejects unsupported semantics
+        //! with a warning and returns an empty pointer. Set before startup.
         Chonk::Ptr getOrCreateChonk(osg::Node* node,
             float far_pixel_scale = 0.0f, float near_pixel_scale = FLT_MAX);
 

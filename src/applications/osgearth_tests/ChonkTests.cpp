@@ -134,7 +134,35 @@ TEST_CASE("Chonk cell conversion preserves placements and asset reloads", "[chon
     REQUIRE(result->getBound().valid());
 }
 
-TEST_CASE("Chonk GPU rendering agrees with attribute instancing", "[chonk][gpu]")
+TEST_CASE("Chonk external instance eligibility respects the profiling override", "[chonk]")
+{
+    auto geometry = ChonkTest::mesh();
+    geometry->getOrCreateStateSet()->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
+    ChonkTest::AssetFile file;
+    REQUIRE(file.write(geometry));
+    InstancedExternalNode::MatrixList matrices = {
+        osg::Matrixf::translate(-10,0,0), osg::Matrixf::translate(10,0,0)};
+    osg::ref_ptr<InstancedExternalNode> external = new InstancedExternalNode(file.path, matrices);
+    REQUIRE(external->isUsingHardwareInstancing());
+    osg::ref_ptr<osg::Group> source = new osg::Group();
+    source->getOrCreateStateSet()->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
+    source->addChild(external);
+    osg::ref_ptr<TextureArena> arena = new TextureArena();
+    auto factory = std::make_shared<ChonkFactory>(arena);
+    auto converted = ChonkFactory::convertExternalInstances(source, factory);
+    ChonkTest::FindDrawables find;
+    converted->accept(find);
+    const char* value = std::getenv("OSGEARTH_CHONK_BYPASS_ELIGIBILITY");
+    const bool bypass = value && std::string(value) == "1";
+    REQUIRE(find.drawables.size() == (bypass ? 1u : 0u));
+    if (bypass)
+        REQUIRE(find.drawables[0]->getNumInstances() == matrices.size());
+    REQUIRE(source->getChild(0) == external.get());
+    REQUIRE(source->getStateSet()->getMode(GL_CULL_FACE) == osg::StateAttribute::OFF);
+    REQUIRE(converted->getBound().valid());
+}
+
+TEST_CASE("Chonk GPU rendering preserves instances and responds to SSE", "[chonk][gpu]")
 {
     if (!Capabilities::get().supportsNVGL())
     {
@@ -184,6 +212,31 @@ TEST_CASE("Chonk GPU rendering agrees with attribute instancing", "[chonk][gpu]"
             REQUIRE(glGetError() == GL_NO_ERROR);
         }
     }
+
+    // Changing global SSE must cull small instances and restore them without
+    // rebuilding the cell. Keep the camera and all instance transforms fixed.
+    find.drawables[0]->setUseGPUCulling(true);
+    renderer.viewer.getCamera()->setViewMatrixAsLookAt(
+        osg::Vec3d(0,0,100), osg::Vec3d(), osg::Vec3d(0,1,0));
+    auto* sse = renderer.root->getStateSet()->getUniform("oe_sse");
+    REQUIRE(sse);
+    std::vector<unsigned> litPixels;
+    for (float value : {0.0f, 8.0f, 128.0f, 8.0f})
+    {
+        sse->set(value);
+        renderer.frame(); renderer.frame();
+        auto pixels = renderer.pixels();
+        unsigned lit = 0;
+        for (unsigned i = 0; i < 256u*256u; ++i)
+            if (pixels->data()[4*i+2] > 0) ++lit;
+        litPixels.push_back(lit);
+        INFO("Global SSE: " << value);
+        REQUIRE(glGetError() == GL_NO_ERROR);
+    }
+    REQUIRE(litPixels[0] > 100);
+    REQUIRE(litPixels[1] == litPixels[0]);
+    REQUIRE(litPixels[2] == 0);
+    REQUIRE(litPixels[3] == litPixels[0]);
 }
 
 TEST_CASE("Prestige detail cell preserves all external placements", "[.prestige]")

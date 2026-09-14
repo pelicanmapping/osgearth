@@ -31,6 +31,8 @@ namespace osgEarth
     class ImGuiPanel // no export
     {
     public:
+        virtual ~ImGuiPanel() = default;
+
         void setVisible(bool value) {
             _visible = value;
             dirtySettings();

@@ -146,12 +146,20 @@ void ImGuiEventHandler::render(osg::RenderInfo& ri)
 
         auto dockSpaceId = ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), dockspace_flags);
 
+        // Disable multisampling only while drawing the UI. Restore the actual GL
+        // state afterwards so it stays in sync with OSG's cached scene state.
+        const GLboolean multisampleEnabled = glIsEnabled(GL_MULTISAMPLE);
         glDisable(GL_MULTISAMPLE);
 
         draw(ri);
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        if (multisampleEnabled)
+            glEnable(GL_MULTISAMPLE);
+        else
+            glDisable(GL_MULTISAMPLE);
 
         auto centralNode = ImGui::DockBuilderGetCentralNode(dockSpaceId);
 

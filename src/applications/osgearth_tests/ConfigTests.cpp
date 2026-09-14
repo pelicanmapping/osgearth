@@ -245,6 +245,7 @@ TEST_CASE("Config primitive access handles values, fallbacks, and boundaries")
 
     REQUIRE(config.value<int>("integer", 7) == (std::numeric_limits<int>::min)());
     REQUIRE(config.value<int>("missing", 7) == 7);
+    REQUIRE(config.value<std::string>("missing", "fallback") == "fallback");
     REQUIRE_FALSE(config.get("blank", integer));
     REQUIRE(integer == (std::numeric_limits<int>::min)());
 
@@ -470,10 +471,37 @@ TEST_CASE("Config JSON serialization round-trips nested and repeated children")
     Config repeatedRoundTrip;
     REQUIRE(repeatedRoundTrip.fromJSON(repeatedSimple.toJSON()));
     REQUIRE(repeatedRoundTrip.key() == "root");
-    const ConfigSet repeatedItems = repeatedRoundTrip.children("item");
+    const ConfigSet& repeatedItems = repeatedRoundTrip.children();
     REQUIRE(repeatedItems.size() == 2u);
-    REQUIRE(repeatedItems[0].value() == "one");
-    REQUIRE(repeatedItems[1].value() == "two");
+    REQUIRE(repeatedItems[0].key().empty());
+    REQUIRE(repeatedItems[0].value("item") == "one");
+    REQUIRE(repeatedItems[1].key().empty());
+    REQUIRE(repeatedItems[1].value("item") == "two");
+
+    Config nestedCollection("root");
+    Config collection("collection");
+    Config firstElement("element");
+    firstElement.set("name", "first");
+    firstElement.set("value", 1);
+    Config secondElement("element");
+    secondElement.set("name", "second");
+    secondElement.set("value", 2);
+    collection.add(firstElement);
+    collection.add(secondElement);
+    nestedCollection.add(collection);
+
+    Config nestedCollectionRoundTrip;
+    REQUIRE(nestedCollectionRoundTrip.fromJSON(nestedCollection.toJSON()));
+    const Config& parsedCollection = nestedCollectionRoundTrip.child("collection");
+    REQUIRE(parsedCollection.children().size() == 2u);
+    REQUIRE_FALSE(parsedCollection.hasChild("name"));
+    REQUIRE_FALSE(parsedCollection.hasChild("value"));
+    REQUIRE(parsedCollection.children()[0].key().empty());
+    REQUIRE(parsedCollection.children()[0].value("name") == "first");
+    REQUIRE(parsedCollection.children()[0].value<int>("value", -1) == 1);
+    REQUIRE(parsedCollection.children()[1].key().empty());
+    REQUIRE(parsedCollection.children()[1].value("name") == "second");
+    REQUIRE(parsedCollection.children()[1].value<int>("value", -1) == 2);
 }
 
 TEST_CASE("Config XML parsing preserves elements, attributes, text, and failures")

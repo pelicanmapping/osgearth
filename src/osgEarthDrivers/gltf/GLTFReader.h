@@ -9,7 +9,6 @@
 #include <osg/Geometry>
 #include <osg/MatrixTransform>
 #include <osg/observer_ptr>
-#include <osg/Texture2D>
 #include <osg/CullFace>
 #include <osg/FrontFace>
 #include <osgDB/FileNameUtils>
@@ -25,8 +24,8 @@
 #include <osgEarth/Registry>
 #include <osgEarth/ShaderUtils>
 #include <osgEarth/ShaderGenerator>
-#include <osgEarth/ShaderLoader>
-#include <osgEarth/VirtualProgram>
+#include <osgEarth/PBRMaterial>
+#include <osgEarth/ImageUtils>
 #include <osgEarth/StringUtils>
 #include <osgEarth/InstanceBuilder>
 #include <osgEarth/StateTransition>
@@ -55,7 +54,7 @@ class GLTFReader
 {
 public:
     using TextureCache = osgEarth::Threading::Mutexed<
-        std::unordered_map<std::string, osg::observer_ptr<osg::Texture2D>> >;
+        std::unordered_map<std::string, osg::observer_ptr<PBRTexture>> >;
 
     struct NodeBuilder;
 
@@ -199,7 +198,7 @@ public:
         int requestedHeight, const unsigned char* bytes, int size, void* userData)
     {
         // stb_image does not support WebP. Keep embedded WebP data encoded so
-        // makeTextureFromModel can pass it through osgEarth's WebP plugin.
+        // makeImageFromModel can pass it through osgEarth's WebP plugin.
         const bool isWebP =
             image->mimeType == "image/webp" ||
             (size >= 12 &&
@@ -1090,30 +1089,14 @@ public:
         std::map<std::string, ExternalInstanceBatch> externalBatches;
         bool externalAssetInstancing = true;
 
-        // Texture image units for the original glTF material maps.
-        enum : unsigned
-        {
-            ALBEDO_UNIT = 0u,
-            NORMAL_UNIT = 1u,
-            METALLIC_ROUGHNESS_UNIT = 2u,
-            OCCLUSION_UNIT = 3u
-        };
-
-        // Whether to load the normal, metallic-roughness and occlusion maps
-        // in addition to the base color. Disable with the "gltfSkipPBRTextures"
-        // read option.
         bool loadPBRTextures = true;
-
-        // Textures already created for this model, so that primitives that
-        // share a material also share the same osg::Texture2D objects.
-        mutable std::unordered_map<std::string, osg::ref_ptr<osg::Texture2D>> localTextures;
+        mutable std::unordered_map<int, osg::ref_ptr<PBRTexture>> localMaterials;
+        mutable std::unordered_map<int, osg::ref_ptr<osg::Image>> localImages;
 
         NodeBuilder(const GLTFReader* reader_, const tinygltf::Model &model_, const Env& env_)
             : reader(reader_), model(model_), env(env_)
         {
-            loadPBRTextures =
-                !env.readOptions ||
-                env.readOptions->getOptionString().find("gltfSkipPBRTextures") == std::string::npos;
+            loadPBRTextures = !hasOption(env.readOptions, "gltfSkipPBRTextures");
 
             // Static batching is the default. Successful batches create one
             // root-level matrix list. Callers needing per-reference masks,
@@ -1125,174 +1108,6 @@ public:
                     "gltfDisableExternalAssetInstancing");
 
             extractArrays(arrays);
-        }
-
-        //! glTF colors are linear until after texture modulation. The rest of
-        //! osgEarth's coloring/lighting pipeline expects sRGB color values.
-        static void installBaseColor(osg::Geometry* geom)
-        {
-            geom->setUserValue(CHONK_HINT_LINEAR_COLOR, true);
-            ShaderLoader::load(VirtualProgram::getOrCreate(geom->getOrCreateStateSet()), R"(
-#pragma vp_function oe_gltf_color_fs, fragment_coloring, 0.55
-void oe_gltf_color_fs(inout vec4 color)
-{
-    vec3 c = clamp(color.rgb, 0.0, 1.0);
-    color.rgb = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
-                    12.92 * c, lessThanEqual(c, vec3(0.0031308)));
-}
-)");
-        }
-
-        //! Shader that samples the original glTF material maps directly. It
-        //! performs the glTF channel selection, normal scaling, and material
-        //! factor application that would otherwise require converted images.
-        static const char* pbrMaterialShaderSource()
-        {
-            return R"(
-#pragma vp_function oe_gltf_pbr_vs, vertex_view, 1.0
-
-out vec3 oe_gltf_pbr_pos_view;
-out vec2 oe_gltf_pbr_uv;
-
-void oe_gltf_pbr_vs(inout vec4 vertex_view)
-{
-    oe_gltf_pbr_pos_view = vertex_view.xyz / vertex_view.w;
-    oe_gltf_pbr_uv = gl_MultiTexCoord0.st;
-}
-
-[break]
-#pragma vp_function oe_gltf_pbr_fs, fragment_coloring, 0.6
-#pragma import_defines(OE_IS_SHADOW_CAMERA)
-#pragma import_defines(OE_IS_DEPTH_CAMERA)
-
-struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;
-
-in vec3 vp_Normal;
-in vec3 oe_gltf_pbr_pos_view;
-in vec2 oe_gltf_pbr_uv;
-
-uniform sampler2D oe_gltf_normal_tex;
-uniform sampler2D oe_gltf_metallic_roughness_tex;
-uniform sampler2D oe_gltf_occlusion_tex;
-
-uniform vec4 oe_gltf_pbr_flags;
-uniform vec4 oe_gltf_pbr_factors; // normal scale, roughness, metallic, AO strength
-
-// Cotangent frame from screen-space derivatives. The bitangent follows
-// increasing V, so the sampled glTF normal's Y component is inverted below.
-mat3 oe_gltf_pbr_tbn(vec3 N, vec3 p, vec2 uv)
-{
-    vec3 dp1 = dFdx(p);
-    vec3 dp2 = dFdy(p);
-    vec2 duv1 = dFdx(uv);
-    vec2 duv2 = dFdy(uv);
-    vec3 dp2perp = cross(dp2, N);
-    vec3 dp1perp = cross(N, dp1);
-    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-    float det = max(dot(T, T), dot(B, B));
-    float invmax = det > 0.0 ? inversesqrt(det) : 0.0;
-    return mat3(T * invmax, B * invmax, N);
-}
-
-void oe_gltf_pbr_fs(inout vec4 color)
-{
-#if defined(OE_IS_SHADOW_CAMERA) || defined(OE_IS_DEPTH_CAMERA)
-    return;
-#endif
-
-    if (oe_gltf_pbr_flags.x > 0.5)
-    {
-        vec3 N = normalize(vp_Normal);
-        vec3 n = texture(oe_gltf_normal_tex, oe_gltf_pbr_uv).xyz * 2.0 - 1.0;
-        n.xy *= vec2(oe_gltf_pbr_factors.x, -oe_gltf_pbr_factors.x);
-        float nlen = length(n);
-        n = nlen > 0.0 ? n / nlen : vec3(0.0, 0.0, 1.0);
-        vec3 pn = oe_gltf_pbr_tbn(N, oe_gltf_pbr_pos_view, oe_gltf_pbr_uv) * n;
-        float len = length(pn);
-        vp_Normal = len > 0.0 ? pn / len : N;
-    }
-
-    if (oe_gltf_pbr_flags.w > 0.5)
-    {
-        float roughness = oe_gltf_pbr_factors.y;
-        float metal = oe_gltf_pbr_factors.z;
-        if (oe_gltf_pbr_flags.y > 0.5)
-        {
-            vec4 metallicRoughness = texture(oe_gltf_metallic_roughness_tex, oe_gltf_pbr_uv);
-            roughness *= metallicRoughness.g;
-            metal *= metallicRoughness.b;
-        }
-        oe_pbr.displacement = 0.0;
-        oe_pbr.roughness *= roughness;
-        oe_pbr.metal = clamp(oe_pbr.metal + metal, 0.0, 1.0);
-    }
-
-    if (oe_gltf_pbr_flags.z > 0.5)
-    {
-        float occlusion = texture(oe_gltf_occlusion_tex, oe_gltf_pbr_uv).r;
-        oe_pbr.ao *= 1.0 + oe_gltf_pbr_factors.w * (occlusion - 1.0);
-    }
-}
-)";
-        }
-
-        //! Installs the original glTF maps and the shader state that interprets
-        //! their channels and factors.
-        static void installPBRMaterial(
-            osg::StateSet* stateset,
-            osg::Texture2D* normalTex,
-            osg::Texture2D* metallicRoughnessTex,
-            osg::Texture2D* occlusionTex,
-            float normalScale,
-            float roughnessFactor,
-            float metallicFactor,
-            float occlusionStrength,
-            bool applyPBRFactors)
-        {
-            if (!stateset || (!normalTex && !metallicRoughnessTex && !occlusionTex && !applyPBRFactors))
-                return;
-
-            VirtualProgram* vp = VirtualProgram::getOrCreate(stateset);
-            vp->setName("glTF PBR material");
-            ShaderLoader::load(vp, pbrMaterialShaderSource());
-
-            stateset->addUniform(new osg::Uniform(
-                "oe_gltf_pbr_flags", osg::Vec4f(
-                normalTex ? 1.0f : 0.0f,
-                metallicRoughnessTex ? 1.0f : 0.0f,
-                occlusionTex ? 1.0f : 0.0f,
-                applyPBRFactors ? 1.0f : 0.0f)));
-            stateset->addUniform(new osg::Uniform(
-                "oe_gltf_pbr_factors", osg::Vec4f(
-                normalScale,
-                roughnessFactor,
-                metallicFactor,
-                occlusionStrength)));
-
-            if (normalTex)
-            {
-                // Keep the ShaderGenerator from folding these into the color.
-                ShaderGenerator::setIgnoreHint(normalTex, true);
-                stateset->setTextureAttribute(NORMAL_UNIT, normalTex);
-                stateset->addUniform(new osg::Uniform("oe_gltf_normal_tex", (int)NORMAL_UNIT));
-            }
-
-            if (metallicRoughnessTex)
-            {
-                ShaderGenerator::setIgnoreHint(metallicRoughnessTex, true);
-                stateset->setTextureAttribute(METALLIC_ROUGHNESS_UNIT, metallicRoughnessTex);
-                stateset->addUniform(new osg::Uniform(
-                    "oe_gltf_metallic_roughness_tex", (int)METALLIC_ROUGHNESS_UNIT));
-            }
-
-            if (occlusionTex)
-            {
-                ShaderGenerator::setIgnoreHint(occlusionTex, true);
-                stateset->setTextureAttribute(OCCLUSION_UNIT, occlusionTex);
-                stateset->addUniform(new osg::Uniform(
-                    "oe_gltf_occlusion_tex", (int)OCCLUSION_UNIT));
-            }
         }
 
         static std::string makeExternalBatchKey(
@@ -1669,55 +1484,25 @@ void oe_gltf_pbr_fs(inout vec4 color)
             return img;
         }
 
-        //! Wraps an image in a texture configured from the glTF texture's sampler.
-        osg::Texture2D* makeTexture(osg::Image* img, const tinygltf::Texture& texture, bool srgb) const
+        //! Configure textures created by PBRTexture using the source sampler.
+        void configureTexture(osg::Texture* result, int textureIndex, bool srgb = false) const
         {
-            if (!img)
-                return nullptr;
-
-            if(img->getPixelFormat() == GL_RGB)
-                img->setInternalTextureFormat(GL_RGB8);
-            else if (img->getPixelFormat() == GL_RGBA)
-                img->setInternalTextureFormat(GL_RGBA8);
-
-            osg::ref_ptr<osg::Texture2D> tex = new osg::Texture2D(img);
-            // Set the texture format, not the shared image's format: one image
-            // can supply both sRGB base color and linear material data.
-            if (srgb)
-                tex->setInternalFormat(img->getPixelFormat() == GL_RGB ? GL_SRGB8 : GL_SRGB8_ALPHA8);
-            //tex->setUnRefImageDataAfterApply(imageEmbedded);
-            tex->setResizeNonPowerOfTwoHint(false);
-            tex->setDataVariance(osg::Object::STATIC);
-
-            // Preserve texture detail at grazing angles while retaining mipmaps.
-            tex->setMaxAnisotropy(16.0f);
-
-            if (texture.sampler >= 0 && texture.sampler < model.samplers.size())
+            if (!result) return;
+            if (srgb) result->setInternalFormat(GL_SRGB8_ALPHA8);
+            result->setResizeNonPowerOfTwoHint(false);
+            result->setDataVariance(osg::Object::STATIC);
+            result->setMaxAnisotropy(16.0f);
+            if (validTextureIndex(textureIndex))
             {
-                const tinygltf::Sampler& sampler = model.samplers[texture.sampler];
-                //tex->setFilter(osg::Texture::MIN_FILTER, (osg::Texture::FilterMode)sampler.minFilter);
-                //tex->setFilter(osg::Texture::MAG_FILTER, (osg::Texture::FilterMode)sampler.magFilter);
-                tex->setFilter(osg::Texture::MIN_FILTER, (osg::Texture::FilterMode)osg::Texture::LINEAR_MIPMAP_LINEAR); //sampler.minFilter);
-                tex->setFilter(osg::Texture::MAG_FILTER, (osg::Texture::FilterMode)osg::Texture::LINEAR); //sampler.magFilter);
-                tex->setWrap(osg::Texture::WRAP_S, (osg::Texture::WrapMode)sampler.wrapS);
-                tex->setWrap(osg::Texture::WRAP_T, (osg::Texture::WrapMode)sampler.wrapT);
-                tex->setWrap(osg::Texture::WRAP_R, (osg::Texture::WrapMode)sampler.wrapR);
+                const int index = model.textures[textureIndex].sampler;
+                if (index >= 0 && static_cast<size_t>(index) < model.samplers.size())
+                {
+                    const auto& sampler = model.samplers[index];
+                    result->setWrap(osg::Texture::WRAP_S, (osg::Texture::WrapMode)sampler.wrapS);
+                    result->setWrap(osg::Texture::WRAP_T, (osg::Texture::WrapMode)sampler.wrapT);
+                    result->setWrap(osg::Texture::WRAP_R, (osg::Texture::WrapMode)sampler.wrapR);
+                }
             }
-            else
-            {
-                tex->setFilter(osg::Texture::MIN_FILTER, (osg::Texture::FilterMode)osg::Texture::LINEAR_MIPMAP_LINEAR);
-                tex->setFilter(osg::Texture::MAG_FILTER, (osg::Texture::FilterMode)osg::Texture::LINEAR);
-                tex->setWrap(osg::Texture::WRAP_S, (osg::Texture::WrapMode)osg::Texture::CLAMP_TO_EDGE);
-                tex->setWrap(osg::Texture::WRAP_T, (osg::Texture::WrapMode)osg::Texture::CLAMP_TO_EDGE);
-            }
-
-            return tex.release();
-        }
-
-        osg::Texture2D* makeTextureFromModel(const tinygltf::Texture& texture, bool srgb) const
-        {
-            osg::ref_ptr<osg::Image> img = makeImageFromTexture(texture);
-            return makeTexture(img.get(), texture, srgb);
         }
 
         bool validTextureIndex(int index) const
@@ -1725,116 +1510,179 @@ void oe_gltf_pbr_fs(inout vec4 color)
             return index >= 0 && static_cast<size_t>(index) < model.textures.size();
         }
 
-        //! Key under which a texture may be shared across models through the
-        //! reader's TextureCache. Embedded images have no stable identity and
-        //! return an empty key (i.e., do not share them).
-        std::string sharedTextureKey(const tinygltf::Texture& texture, const std::string& usage) const
+        osg::ref_ptr<osg::Image> materialImage(int textureIndex) const
         {
-            const int source = getTextureSource(texture);
-            if (source < 0 || static_cast<size_t>(source) >= model.images.size())
-                return {};
-
-            const tinygltf::Image& image = model.images[source];
-            const bool imageEmbedded =
-                tinygltf::IsDataURI(image.uri) ||
-                image.image.size() > 0;
-
-            if (imageEmbedded)
-                return {};
-
-            return resolveResourceURI(image.uri, env.referrer) + usage;
+            if (!validTextureIndex(textureIndex)) return {};
+            auto found = localImages.find(textureIndex);
+            if (found != localImages.end()) return found->second;
+            return localImages[textureIndex] = makeImageFromTexture(model.textures[textureIndex]);
         }
 
-        //! Looks up a texture in this model's local cache and, when sharedKey
-        //! is non-empty, in the reader's cross-model TextureCache; otherwise
-        //! creates it with the supplied function and caches the result.
-        template<typename CREATE>
-        osg::ref_ptr<osg::Texture2D> getOrCreateTexture(
-            const std::string& localKey,
-            const std::string& sharedKey,
-            CREATE&& create) const
+        static osg::ref_ptr<osg::Image> constantImage(const osg::Vec4& color)
         {
-            auto local = localTextures.find(localKey);
-            if (local != localTextures.end())
-                return local->second;
+            osg::ref_ptr<osg::Image> image = new osg::Image();
+            image->allocateImage(1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+            image->setColor(color, 0, 0);
+            return image;
+        }
 
-            osg::ref_ptr<osg::Texture2D> tex;
-            TextureCache* sharedCache = reader->_texCache;
-            const bool useSharedCache =
-                sharedCache != nullptr && !sharedKey.empty();
-            const bool forceReload =
-                hasOption(env.readOptions, "gltfForceReload");
+        //! PBRMaterial's scalar rasters store their value in the red channel.
+        static osg::ref_ptr<osg::Image> componentImage(
+            osg::Image* source, unsigned channel, float scale, float offset = 0.0f)
+        {
+            osg::ref_ptr<osg::Image> result = new osg::Image();
+            result->allocateImage(source ? source->s() : 1, source ? source->t() : 1,
+                1, GL_RED, GL_FLOAT);
+            ImageUtils::PixelReader read(source);
+            ImageUtils::PixelWriter write(result);
+            write.forEachPixel([&](auto& pixel) {
+                osg::Vec4 value(1, 1, 1, 1);
+                if (source) read(value, pixel);
+                value.set(offset + scale * value[channel], 0, 0, 1);
+                write(value, pixel);
+            });
+            return result;
+        }
 
-            if (useSharedCache && !forceReload)
+        static osg::ref_ptr<osg::Image> normalImage(osg::Image* source, float scale)
+        {
+            if (!source) return {};
+            osg::ref_ptr<osg::Image> result = new osg::Image();
+            result->allocateImage(source->s(), source->t(), 1, GL_RGB, GL_UNSIGNED_BYTE);
+            ImageUtils::PixelReader read(source);
+            ImageUtils::PixelWriter write(result);
+            write.forEachPixel([&](auto& pixel) {
+                osg::Vec4 value;
+                read(value, pixel);
+                osg::Vec3 n((value.r() * 2.0f - 1.0f) * scale,
+                    -(value.g() * 2.0f - 1.0f) * scale, value.b() * 2.0f - 1.0f);
+                if (n.normalize() == 0.0f) n.set(0, 0, 1);
+                write(osg::Vec4(n.x() * 0.5f + 0.5f, n.y() * 0.5f + 0.5f,
+                    n.z() * 0.5f + 0.5f, 1), pixel);
+            });
+            return result;
+        }
+
+        //! Include every source, sampler, and baked factor in the shared key.
+        //! Embedded images have model-local identities and cannot be shared here.
+        std::string materialKey(const tinygltf::Material& material) const
+        {
+            std::ostringstream key;
+            key.precision(std::numeric_limits<double>::max_digits10);
+            key << "gltf-dram-v1:" << loadPBRTextures;
+            const auto& pbr = material.pbrMetallicRoughness;
+            for (int index : { pbr.baseColorTexture.index,
+                loadPBRTextures ? material.normalTexture.index : -1,
+                loadPBRTextures ? pbr.metallicRoughnessTexture.index : -1,
+                loadPBRTextures ? material.occlusionTexture.index : -1 })
             {
-                std::lock_guard<std::mutex> lock(sharedCache->mutex());
-                auto i = sharedCache->find(sharedKey);
-                if (i != sharedCache->end())
+                key << '|';
+                if (!validTextureIndex(index)) { key << "none"; continue; }
+                const auto& texture = model.textures[index];
+                for (int source : { getTextureSource(texture), texture.source })
                 {
-                    if (!i->second.lock(tex))
-                        sharedCache->erase(i);
+                    if (source < 0 || static_cast<size_t>(source) >= model.images.size())
+                    { key << "none:"; continue; }
+                    const auto& image = model.images[source];
+                    if (tinygltf::IsDataURI(image.uri) || !image.image.empty()) return {};
+                    const auto uri = resolveResourceURI(image.uri, env.referrer);
+                    key << uri.size() << ':' << uri;
                 }
-            }
-
-            if (!tex.valid())
-            {
-                tex = create();
-
-                if (tex.valid() && useSharedCache)
+                if (texture.sampler >= 0 && static_cast<size_t>(texture.sampler) < model.samplers.size())
                 {
-                    std::lock_guard<std::mutex> lock(sharedCache->mutex());
-                    if (forceReload)
-                    {
-                        // Publish the freshly loaded texture for subsequent
-                        // ordinary reads. Existing graphs retain their old
-                        // Texture2D until the shared asset swap completes.
-                        (*sharedCache)[sharedKey] = tex.get();
-                    }
-                    else
-                    {
-                        auto insResult = sharedCache->insert(
-                            TextureCache::value_type(sharedKey, tex.get()));
-                        if (!insResult.second)
+                    const auto& sampler = model.samplers[texture.sampler];
+                    key << ':' << sampler.wrapS << ',' << sampler.wrapT << ',' << sampler.wrapR;
+                }
+                else key << ":default";
+            }
+            key << '|' << material.normalTexture.scale << '|' << pbr.roughnessFactor
+                << '|' << pbr.metallicFactor << '|' << material.occlusionTexture.strength
+                << '|' << hasExplicitPBRFactors(material);
+            return key.str();
+        }
+
+        osg::ref_ptr<PBRTexture> getOrCreateMaterial(int index) const
+        {
+            auto local = localMaterials.find(index);
+            if (local != localMaterials.end()) return local->second;
+            const auto& source = model.materials[index];
+            const auto& pbr = source.pbrMetallicRoughness;
+            auto* cache = reader->_texCache;
+            const auto key = materialKey(source);
+            const bool shared = cache && !key.empty();
+            const bool reload = hasOption(env.readOptions, "gltfForceReload");
+            osg::ref_ptr<PBRTexture> result;
+            if (shared && !reload)
+            {
+                std::lock_guard<std::mutex> lock(cache->mutex());
+                auto found = cache->find(key);
+                if (found != cache->end() && !found->second.lock(result))
+                    cache->erase(found);
+            }
+            if (!result)
+            {
+                PBRMaterial material;
+                material.name() = source.name;
+                material.colorImage = materialImage(pbr.baseColorTexture.index);
+                if (!material.colorImage) material.colorImage = constantImage(osg::Vec4(1, 1, 1, 1));
+
+                osg::ref_ptr<osg::Image> normal, mr, ao;
+                if (loadPBRTextures)
+                {
+                    normal = materialImage(source.normalTexture.index);
+                    mr = materialImage(pbr.metallicRoughnessTexture.index);
+                    ao = materialImage(source.occlusionTexture.index);
+                }
+                const bool factors = loadPBRTextures && (mr || ao || hasExplicitPBRFactors(source));
+                material.normalImage = normalImage(normal, static_cast<float>(source.normalTexture.scale));
+                if (factors)
+                {
+                    material.roughnessImage = componentImage(mr, 1, static_cast<float>(pbr.roughnessFactor));
+                    material.metalImage = componentImage(mr, 2, static_cast<float>(pbr.metallicFactor));
+                    material.aoImage = componentImage(ao, 0,
+                        static_cast<float>(source.occlusionTexture.strength),
+                        1.0f - static_cast<float>(source.occlusionTexture.strength));
+                }
+                result = new PBRTexture();
+                if (!result->load(material, env.readOptions).isOK())
+                {
+                    OE_WARN << LC << "Failed to load material " << source.name << std::endl;
+                    return {};
+                }
+                // Preserve the reader's no-map/skip-PBR behavior, without sampling
+                // the generic fallback maps (roughness defaults differ).
+                if (!normal) result->normal = nullptr;
+                if (!factors) result->pbr = nullptr;
+                configureTexture(result->albedo, pbr.baseColorTexture.index, true);
+                configureTexture(result->normal, source.normalTexture.index);
+                const int packedSampler = mr ? pbr.metallicRoughnessTexture.index : source.occlusionTexture.index;
+                configureTexture(result->pbr, packedSampler);
+
+                if (mr && ao)
+                {
+                    auto wraps = [&](int textureIndex) {
+                        const auto& tex = model.textures[textureIndex];
+                        if (tex.sampler >= 0 && static_cast<size_t>(tex.sampler) < model.samplers.size())
                         {
-                            // Some other loader thread beat us to the cache.
-                            // Reclaim an expired weak entry if its graph was
-                            // released between lookup and insertion.
-                            osg::ref_ptr<osg::Texture2D> existing;
-                            if (insResult.first->second.lock(existing))
-                                tex = existing;
-                            else
-                                insResult.first->second = tex.get();
+                            const auto& s = model.samplers[tex.sampler];
+                            return std::make_pair(s.wrapS, s.wrapT);
                         }
-                    }
+                        return std::make_pair(int(GL_CLAMP_TO_EDGE), int(GL_CLAMP_TO_EDGE));
+                    };
+                    if (wraps(pbr.metallicRoughnessTexture.index) != wraps(source.occlusionTexture.index))
+                        OE_WARN << LC << "Material " << source.name
+                            << ": packed AO uses the metallic-roughness sampler" << std::endl;
+                }
+                if (shared)
+                {
+                    std::lock_guard<std::mutex> lock(cache->mutex());
+                    auto& entry = (*cache)[key];
+                    osg::ref_ptr<PBRTexture> existing;
+                    if (!reload && entry.lock(existing)) result = existing;
+                    else entry = result.get();
                 }
             }
-
-            localTextures[localKey] = tex;
-            return tex;
-        }
-
-        //! Returns a glTF texture without rewriting its source image. Keep the
-        //! ShaderGenerator-managed color binding separate from maps interpreted
-        //! by our material shader, since the latter carry an ignore hint.
-        osg::ref_ptr<osg::Texture2D> getOrCreateSourceTexture(
-            int textureIndex,
-            bool shaderManaged) const
-        {
-            if (!validTextureIndex(textureIndex))
-                return {};
-
-            const tinygltf::Texture& texture = model.textures[textureIndex];
-            const char* usage = shaderManaged ? "material" : "color";
-            return getOrCreateTexture(
-                Stringify() << usage << ":" << textureIndex,
-                sharedTextureKey(texture, Stringify() << "|gltf-" << usage),
-                [&]() { return osg::ref_ptr<osg::Texture2D>(makeTextureFromModel(texture, !shaderManaged)); });
-        }
-
-        //! Base color (albedo) texture for a material.
-        osg::ref_ptr<osg::Texture2D> getOrCreateColorTexture(const tinygltf::TextureInfo& info) const
-        {
-            return getOrCreateSourceTexture(info.index, false);
+            return localMaterials[index] = result;
         }
 
         //! tinygltf's legacy values map only contains factors explicitly
@@ -1997,7 +1845,8 @@ void oe_gltf_pbr_fs(inout vec4 color)
                 }
                 geom->setName(typeid(*this).name());
                 geom->setUseVertexBufferObjects(true);
-                installBaseColor(geom);
+                geom->setUserValue(SHADERGEN_HINT_LINEAR_COLOR, true);
+                geom->getOrCreateStateSet();
 
                 osg::Geode* geode = new osg::Geode;
                 geode->addDrawable(geom);
@@ -2025,49 +1874,9 @@ void oe_gltf_pbr_fs(inout vec4 color)
                             static_cast<float>(pbr.baseColorFactor[3]));
                     }
 
-                    // Base color (albedo) map. This is a plain osg::Texture2D on
-                    // unit 0 so that the ShaderGenerator picks it up for normal
-                    // rendering, and the Chonk ripper reads it as the albedo.
-                    osg::ref_ptr<osg::Texture2D> albedoTex = getOrCreateColorTexture(pbr.baseColorTexture);
-                    if (albedoTex.valid())
-                    {
-                        // Set the mode along with the attribute: on OSG builds with the
-                        // fixed-function pipeline available, the ShaderGenerator only
-                        // captures texture attributes whose GL_TEXTURE_2D mode is ON,
-                        // and it removes the mode again once it has generated the sampler.
-                        geom->getOrCreateStateSet()->setTextureAttributeAndModes(ALBEDO_UNIT, albedoTex.get());
-                    }
-
-                    // Bind the original glTF maps directly. The material shader
-                    // selects their glTF channels and applies the scalar factors.
-                    if (loadPBRTextures)
-                    {
-                        osg::ref_ptr<osg::Texture2D> normalTex =
-                            getOrCreateSourceTexture(material.normalTexture.index, true);
-                        osg::ref_ptr<osg::Texture2D> metallicRoughnessTex =
-                            getOrCreateSourceTexture(pbr.metallicRoughnessTexture.index, true);
-                        osg::ref_ptr<osg::Texture2D> occlusionTex =
-                            getOrCreateSourceTexture(material.occlusionTexture.index, true);
-
-                        const bool applyPBRFactors =
-                            metallicRoughnessTex.valid() ||
-                            occlusionTex.valid() ||
-                            hasExplicitPBRFactors(material);
-
-                        if (normalTex.valid() || applyPBRFactors)
-                        {
-                            installPBRMaterial(
-                                geom->getOrCreateStateSet(),
-                                normalTex.get(),
-                                metallicRoughnessTex.get(),
-                                occlusionTex.get(),
-                                static_cast<float>(material.normalTexture.scale),
-                                static_cast<float>(pbr.roughnessFactor),
-                                static_cast<float>(pbr.metallicFactor),
-                                static_cast<float>(material.occlusionTexture.strength),
-                                applyPBRFactors);
-                        }
-                    }
+                    auto textures = getOrCreateMaterial(primitive.material);
+                    if (textures)
+                        geom->getOrCreateStateSet()->setTextureAttributeAndModes(0, textures.get());
 
                     if (material.alphaMode == "BLEND")
                     {

@@ -25,8 +25,17 @@ struct ChonkInstance
 layout(binding = 0, std430) buffer ChonkInstances {
     ChonkInstance chonkInstances[];
 };
-layout(binding = 1, std430) buffer ChonkTextureArena {
-    uint64_t chonkTextures[];
+struct ChonkMaterial
+{
+    uint64_t albedo;
+    uint64_t normal;
+    uint64_t pbr;
+    uint64_t material1;
+    uint64_t material2;
+    ivec2 extended;
+};
+layout(binding = 2, std430) readonly buffer ChonkMaterialArena {
+    ChonkMaterial chonkMaterials[];
 };
 
 layout(location = 0) in vec3 position;
@@ -35,14 +44,8 @@ layout(location = 2) in uint normal_technique;
 layout(location = 3) in vec4 color;
 layout(location = 4) in vec2 uv;
 layout(location = 5) in vec3 flex;
-layout(location = 6) in int albedo_index;
-layout(location = 7) in int normalmap_index;
-layout(location = 8) in int pbr_index;
-layout(location = 9) in ivec2 extended_materials;
-layout(location = 10) in uint color_is_linear;
-layout(location = 11) in int occlusion_index;
-layout(location = 12) in uint gltf_material;
-layout(location = 13) in vec4 pbr_factors;
+layout(location = 6) in uint material_index;
+layout(location = 7) in uint color_is_linear;
 
 #define NT_DEFAULT 0
 #define NT_ZAXIS 1
@@ -66,10 +69,11 @@ flat out uint64_t oe_albedo_tex;
 flat out uint64_t oe_normal_tex;
 flat out uint64_t oe_pbr_tex;
 flat out ivec2 oe_extended_materials;
-flat out uint64_t oe_occlusion_tex;
-flat out uint oe_gltf_material;
-flat out vec4 oe_pbr_factors;
+flat out uint64_t oe_material1_tex;
+flat out uint64_t oe_material2_tex;
 
+// Transform this instance and resolve its vertex material ID to cached handles.
+// Keep legacy extended IDs available to custom shaders and honor map LOD limits.
 void oe_chonk_default_vertex_model(inout vec4 vertex)
 {
     int i = gl_BaseInstance + gl_InstanceID;
@@ -85,11 +89,10 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
     oe_tex_uv = uv;
     oe_alpha_cutoff = chonkInstances[i].alpha_cutoff;
     oe_fade = chonkInstances[i].visibility[chonk_lod];
-    oe_albedo_tex = albedo_index >= 0 ? chonkTextures[albedo_index] : 0;
-    oe_extended_materials = extended_materials;
-    oe_gltf_material = gltf_material;
-    oe_pbr_factors = pbr_factors;
-    oe_occlusion_tex = 0;
+    oe_albedo_tex = chonkMaterials[material_index].albedo;
+    oe_extended_materials = chonkMaterials[material_index].extended;
+    oe_material1_tex = chonkMaterials[material_index].material1;
+    oe_material2_tex = chonkMaterials[material_index].material2;
 
 #if defined(OE_IS_SHADOW_CAMERA) || defined(OE_IS_DEPTH_CAMERA)
     oe_fade = 1.0;
@@ -110,18 +113,16 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
 
     // disable/ignore normal maps as directed:
     oe_normal_tex = 0;
-    if (normalmap_index >= 0 && chonk_lod <= OE_CHONK_MAX_LOD_FOR_NORMAL_MAPS)
+    if (chonk_lod <= OE_CHONK_MAX_LOD_FOR_NORMAL_MAPS)
     {
-        oe_normal_tex = chonkTextures[normalmap_index];
+        oe_normal_tex = chonkMaterials[material_index].normal;
     }
 
     oe_pbr_tex = 0;
-    if (pbr_index >= 0 && chonk_lod <= OE_CHONK_MAX_LOD_FOR_PBR_MAPS)
+    if (chonk_lod <= OE_CHONK_MAX_LOD_FOR_PBR_MAPS)
     {
-        oe_pbr_tex = chonkTextures[pbr_index];
+        oe_pbr_tex = chonkMaterials[material_index].pbr;
     }
-    if (occlusion_index >= 0 && chonk_lod <= OE_CHONK_MAX_LOD_FOR_PBR_MAPS)
-        oe_occlusion_tex = chonkTextures[occlusion_index];
 }
 
 [break]
@@ -146,9 +147,6 @@ flat in uint64_t oe_albedo_tex;
 flat in uint64_t oe_normal_tex;
 flat in uint64_t oe_pbr_tex;
 flat in float oe_alpha_cutoff;
-flat in uint64_t oe_occlusion_tex;
-flat in uint oe_gltf_material;
-flat in vec4 oe_pbr_factors;
 
 flat in uint oe_normal_technique;
 flat in uint oe_color_is_linear;
@@ -199,7 +197,7 @@ void oe_chonk_default_fragment(inout vec4 color)
     }
     if (oe_color_is_linear != 0u)
     {
-        // glTF albedo textures decode sRGB on sample; vertex colors and
+        // Albedo textures decode sRGB on sample; vertex colors and
         // material factors remain linear until after their multiplication.
         vec3 c = clamp(color.rgb, 0.0, 1.0);
         color.rgb = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
@@ -289,11 +287,6 @@ void oe_chonk_default_fragment(inout vec4 color)
         {
             pixel_normal = normalize(n.xyz*2.0 - 1.0);
         }
-        if ((oe_gltf_material & 1u) != 0u)
-        {
-            pixel_normal.xy *= vec2(oe_pbr_factors.x, -oe_pbr_factors.x);
-            pixel_normal = normalize(pixel_normal);
-        }
     }
 
     //pixel_normal = vec3(0, 0, 1); // testing
@@ -316,29 +309,7 @@ void oe_chonk_default_fragment(inout vec4 color)
         vp_Normal = normalize(mix(world_up, face_up, 0.25));
     }
 
-    if ((oe_gltf_material & 1u) != 0u)
-    {
-        if ((oe_gltf_material & 2u) != 0u)
-        {
-            float roughness = oe_pbr_factors.y;
-            float metal = oe_pbr_factors.z;
-            if (oe_pbr_tex > 0)
-            {
-                vec4 mr = texture(sampler2D(oe_pbr_tex), oe_tex_uv);
-                roughness *= mr.g;
-                metal *= mr.b;
-            }
-            oe_pbr.displacement = 0.0;
-            oe_pbr.roughness *= roughness;
-            oe_pbr.metal = clamp(oe_pbr.metal + metal, 0.0, 1.0);
-        }
-        if (oe_occlusion_tex > 0)
-        {
-            float ao = texture(sampler2D(oe_occlusion_tex), oe_tex_uv).r;
-            oe_pbr.ao *= 1.0 + oe_pbr_factors.w * (ao - 1.0);
-        }
-    }
-    else if (oe_pbr_tex > 0)
+    if (oe_pbr_tex > 0)
     {
         // apply PBR maps:
         vec4 texel = texture(sampler2D(oe_pbr_tex), oe_tex_uv);

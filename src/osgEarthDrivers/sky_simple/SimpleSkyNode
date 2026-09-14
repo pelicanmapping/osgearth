@@ -4,6 +4,7 @@
  */
 
 #include "SimpleSkyOptions"
+#include "SkyEnvironment"
 #include <osgEarth/Sky>
 #include <osgEarth/MapNode>
 #include <osgEarth/PhongLightingEffect>
@@ -84,6 +85,8 @@ namespace osgEarth {
             osg::ref_ptr<osg::Uniform> _starPointSize;
 
             osg::ref_ptr<PhongLightingEffect> _phong;
+            osg::ref_ptr<SkyEnvironment> _environment;
+            osg::observer_ptr<osg::View> _environmentView;
 
             Ellipsoid _ellipsoid;
 

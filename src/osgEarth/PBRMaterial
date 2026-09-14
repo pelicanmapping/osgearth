@@ -24,6 +24,17 @@ namespace osgEarth
         PBRMaterial(PBRMaterial&& rhs) = default;
         PBRMaterial& operator=(PBRMaterial&& rhs) = default;
 
+        //! Images to use. If unset, PBRTexture will try to load from
+        //! the corresponding URI. These are not serialized.
+        osg::ref_ptr<osg::Image>
+            colorImage,
+            normalImage,
+            roughnessImage,
+            aoImage,
+            metalImage,
+            displacementImage,
+            opacityImage;
+
         OE_PROPERTY(std::string, name, {});
         OE_OPTION(URI, color);
         OE_OPTION(URI, normal);
@@ -65,13 +76,13 @@ namespace osgEarth
         //! Returns true if the material is "simple" (i.e., has only a color map)
         bool isSimple() const
         {
-            return color().isSet() && 
-                !normal().isSet() && 
-                !roughness().isSet() && 
-                !ao().isSet() && 
-                !metal().isSet() && 
-                !displacement().isSet() && 
-                !opacity().isSet();
+            return (colorImage.valid() || color().isSet()) &&
+                !normalImage && !normal().isSet() &&
+                !roughnessImage && !roughness().isSet() &&
+                !aoImage && !ao().isSet() &&
+                !metalImage && !metal().isSet() &&
+                !displacementImage && !displacement().isSet() &&
+                !opacityImage && !opacity().isSet();
         }
     };
 

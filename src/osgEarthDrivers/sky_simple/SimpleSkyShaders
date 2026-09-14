@@ -12,6 +12,7 @@ namespace osgEarth { namespace SimpleSky
     struct Shaders : public osgEarth::Util::ShaderPackage
 	{
         Shaders();
+        std::string Environment;
 		std::string Atmosphere_Vert;
 		std::string Atmosphere_Frag;
         std::string Ground_ONeil_Vert;

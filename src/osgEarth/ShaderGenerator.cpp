@@ -12,6 +12,8 @@
 #include <osgEarth/Shaders>
 #include <osgEarth/GLUtils>
 #include <osgEarth/Lighting>
+#include <osgEarth/PBRMaterial>
+#include <array>
 #include "ShaderLoader"
 
 #include <osg/PagedLOD>
@@ -255,6 +257,18 @@ namespace
                         osg::StateAttribute* sa = const_cast<osg::StateAttribute*>(pair.first);
                         ActiveAttributeCollector collector(stateset, sa, unit);
 						bool modeless = isModeless(sa) || !sa->getModeUsage(collector);
+                        // Shader generation removes fixed-function texture modes.
+                        // Retain its existing sampler inputs when regenerating a
+                        // program, while still honoring an explicit OFF mode.
+                        auto* texture = dynamic_cast<osg::Texture*>(sa);
+                        if (texture && stateset->getTextureMode(unit, texture->getTextureTarget()) == osg::StateAttribute::INHERIT)
+                        {
+                            auto sampler = _uniformMap.find(Stringify() << SAMPLER << unit);
+                            int binding = -1;
+                            if (sampler != _uniformMap.end() && !sampler->second.uniformVec.empty() &&
+                                sampler->second.uniformVec.back().first->get(binding) && binding == static_cast<int>(unit))
+                                modeless = true;
+                        }
 						if (modeless)
 						{
                             // if getModeUsage returns false, there are no modes associated with
@@ -807,6 +821,52 @@ ShaderGenerator::processGeometry(
     GenBuffers buf;
     buf._stateSet = newStateSet.get();
 
+    // Keep PBRTexture descriptors in place for other consumers (e.g. Chonk).
+    // Ordinary rendering binds their component textures on available units.
+    const int maxUnits = Registry::capabilities().getMaxGPUTextureUnits();
+    std::map<int, std::array<int, 3>> materialUnits;
+    std::set<int> componentUnits;
+    for (int unit = 0; unit < maxUnits; ++unit)
+    {
+        auto* material = dynamic_cast<PBRTexture*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXTURE));
+        if (!material || !accept(material)) continue;
+        std::array<int, 3> units = {{ -1, -1, -1 }};
+        unsigned component = 0;
+        for (auto* texture : { material->albedo.get(), material->normal.get(), material->pbr.get() })
+        {
+            const std::string name = Stringify() << "oe_sg_pbr_" << unit << "_" << component;
+            if (texture)
+            {
+                // Reuse bindings on repeated runs, including inherited state.
+                const auto& uniforms = _state->getUniformMap();
+                auto previous = uniforms.find(name);
+                int binding = -1;
+                if (previous != uniforms.end() && !previous->second.uniformVec.empty())
+                    previous->second.uniformVec.back().first->get(binding);
+                auto* bound = binding >= 0 && binding < maxUnits ?
+                    current->getTextureAttribute(binding, osg::StateAttribute::TEXTURE) : nullptr;
+                if (binding < 0 || binding >= maxUnits || componentUnits.count(binding) ||
+                    (bound && bound != texture))
+                {
+                    binding = maxUnits - 1;
+                    while (binding >= 0 && (componentUnits.count(binding) ||
+                        current->getTextureAttribute(binding, osg::StateAttribute::TEXTURE))) --binding;
+                }
+                if (binding < 0)
+                {
+                    OE_WARN << LC << "Insufficient texture units for PBR material" << std::endl;
+                    return false;
+                }
+                units[component] = binding;
+                componentUnits.insert(binding);
+                newStateSet->setTextureAttributeAndModes(binding, texture, osg::StateAttribute::ON);
+                newStateSet->getOrCreateUniform(name, osg::Uniform::SAMPLER_2D)->set(binding);
+            }
+            ++component;
+        }
+        materialUnits[unit] = units;
+    }
+
     // if the geometry doesn't have normals, we need to set a default value.
     if (geom && geom->getNormalArray() == nullptr)
     {
@@ -819,12 +879,14 @@ ShaderGenerator::processGeometry(
     if (current->getTextureAttributeList().size() > 0)
     {
         bool wroteTexelDecl = false;
+        bool wrotePBRDecl = false;
 
         // Loop over all possible texture image units.
         int maxUnit = Registry::capabilities().getMaxGPUTextureUnits();
 
         for( int unit = 0; unit < maxUnit; ++unit )
         {
+            if (componentUnits.count(unit)) continue;
             if ( !wroteTexelDecl )
             {
                 buf._fragBody << INDENT << MEDIUMP "vec4 texel; \n";
@@ -837,6 +899,64 @@ ShaderGenerator::processGeometry(
             osg::TexEnv* texenv = dynamic_cast<osg::TexEnv*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXENV));
             osg::TexMat* texmat = dynamic_cast<osg::TexMat*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXMAT));
             osg::PointSprite* sprite = dynamic_cast<osg::PointSprite*>(current->getTextureAttribute(unit, osg::StateAttribute::POINTSPRITE));
+
+            auto material = materialUnits.find(unit);
+            if (material != materialUnits.end())
+            {
+                needNewStateSet = true;
+                if (!wrotePBRDecl)
+                {
+                    wrotePBRDecl = true;
+                    buf._viewHead << "out vec3 oe_sg_pbr_position;\n";
+                    buf._viewBody << "oe_sg_pbr_position = vertex_view.xyz / vertex_view.w;\n";
+                    buf._fragHead << R"(
+#pragma import_defines(OE_IS_SHADOW_CAMERA, OE_IS_DEPTH_CAMERA)
+in vec3 oe_sg_pbr_position;
+in vec3 vp_Normal;
+struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;
+vec3 oe_sg_pbr_normal(vec3 sample_normal, vec2 uv)
+{
+    vec3 N = normalize(vp_Normal);
+    vec3 dp1 = dFdx(oe_sg_pbr_position), dp2 = dFdy(oe_sg_pbr_position);
+    vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
+    vec3 p2 = cross(dp2, N), p1 = cross(N, dp1);
+    vec3 T = p2 * duv1.x + p1 * duv2.x;
+    vec3 B = p2 * duv1.y + p1 * duv2.y;
+    float det = max(dot(T,T), dot(B,B));
+    float inv = det > 0.0 ? inversesqrt(det) : 0.0;
+    vec3 n = mat3(T * inv, B * inv, N) * (sample_normal * 2.0 - 1.0);
+    float len = length(n);
+    return len > 0.0 ? n / len : N;
+}
+)";
+                }
+                buf._modelHead << "out vec4 " TEX_COORD << unit << ";\n";
+                buf._viewHead << "out vec4 " TEX_COORD << unit << ";\n";
+                buf._fragHead << "in vec4 " TEX_COORD << unit << ";\n";
+                apply(texgen, unit, buf);
+                apply(texmat, unit, buf);
+                if (sprite) apply(sprite, unit, buf);
+                const auto& units = material->second;
+                for (unsigned c = 0; c < units.size(); ++c)
+                    if (units[c] >= 0)
+                        buf._fragHead << "uniform sampler2D oe_sg_pbr_" << unit << "_" << c << ";\n";
+                if (units[0] >= 0)
+                {
+                    buf._fragBody << "texel = texture(oe_sg_pbr_" << unit << "_0, " TEX_COORD << unit << ".xy);\n";
+                    apply(texenv, unit, buf);
+                }
+                buf._fragBody << "#if !defined(OE_IS_SHADOW_CAMERA) && !defined(OE_IS_DEPTH_CAMERA)\n";
+                if (units[1] >= 0)
+                    buf._fragBody << "vp_Normal = oe_sg_pbr_normal(texture(oe_sg_pbr_" << unit
+                        << "_1, " TEX_COORD << unit << ".xy).xyz, " TEX_COORD << unit << ".xy);\n";
+                if (units[2] >= 0)
+                    buf._fragBody << "texel = texture(oe_sg_pbr_" << unit << "_2, " TEX_COORD << unit << ".xy);\n"
+                        << "oe_pbr.displacement = texel.r;\n"
+                        << "oe_pbr.roughness *= texel.g;\n"
+                        << "oe_pbr.ao *= texel.b;\n"
+                        << "oe_pbr.metal = clamp(oe_pbr.metal + texel.a, 0.0, 1.0);\n";
+                buf._fragBody << "#endif\n";
+            }
 
             if (accept(tex) && !ImageUtils::isFloatingPointInternalFormat(tex->getInternalFormat()))
             {
@@ -858,6 +978,18 @@ ShaderGenerator::processGeometry(
             }
 #endif
         }
+    }
+
+    bool linearColor = false;
+    if (geom && geom->getUserValue(SHADERGEN_HINT_LINEAR_COLOR, linearColor) && linearColor)
+    {
+        needNewStateSet = true;
+        buf._fragHead << "// Encode linear color after texture modulation.\n";
+        buf._fragBody << R"(
+    vec3 c = clamp(color.rgb, 0.0, 1.0);
+    color.rgb = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,
+        12.92 * c, lessThanEqual(c, vec3(0.0031308)));
+)";
     }
 
     // Process the state attributes.

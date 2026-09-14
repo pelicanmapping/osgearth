@@ -26,7 +26,7 @@ void oe_shadow_vertex(inout vec4 VertexVIEW)
 #pragma vp_name       Shadowing Fragment Shader
 #pragma vp_entryPoint oe_shadow_fragment
 #pragma vp_location   fragment_lighting
-#pragma vp_order      0.7
+#pragma vp_order      0.1
 
 #pragma import_defines(OE_LIGHTING)
 #pragma import_defines(OE_NUM_LIGHTS)
@@ -39,8 +39,8 @@ in vec3 vp_Normal; // stage global
 in vec4 oe_shadow_coord[$OE_SHADOW_NUM_SLICES];
 in float oe_shadow_rf;
 
-// fragment stage global PBR parameters.
-struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;
+// Stage global, consumed by the lighting shaders for light zero only.
+float oe_shadow_visibility;
 
 // Parameters of each light:
 struct osg_LightSourceParameters 
@@ -103,7 +103,10 @@ float oe_shadow_multisample(in vec3 c, in float refvalue, in float blur)
 
 void oe_shadow_fragment(inout vec4 color)
 {
-    float alpha = color.a;
+    oe_shadow_visibility = 1.0;
+#ifndef OE_LIGHTING
+    return;
+#endif
     float out_of_shadow = 1.0;
 
     // pre-pixel biasing to reduce moire/acne
@@ -112,7 +115,7 @@ void oe_shadow_fragment(inout vec4 color)
     vec3 L = normalize(osg_LightSource[0].position.xyz);
     vec3 N = normalize(vp_Normal);
     float costheta = clamp(dot(L,N), 0.0, 1.0);
-    float bias = b0*tan(acos(costheta));
+    float bias = min(b1, b0 * sqrt(max(1.0-costheta*costheta, 0.0)) / max(costheta, 0.01));
 
     float depth;
 
@@ -120,6 +123,8 @@ void oe_shadow_fragment(inout vec4 color)
     for(int i=0; i<$OE_SHADOW_NUM_SLICES && out_of_shadow > 0.0; ++i)
     {
         vec4 c = oe_shadow_coord[i];
+        if (any(lessThan(c.xyz, vec3(0.0))) || any(greaterThan(c.xyz, vec3(1.0))))
+            continue;
         vec3 coord = vec3(c.x, c.y, float(i));
 
         if ( oe_shadow_blur > 0.0 )
@@ -132,8 +137,9 @@ void oe_shadow_fragment(inout vec4 color)
             if ( depth < 1.0 && depth < c.z-bias )
                 out_of_shadow = 0.0;
         }
+        // The first containing cascade has the highest resolution.
+        break;
     }
 
-    oe_pbr.roughness = clamp(mix(oe_pbr.roughness*1.5, oe_pbr.roughness, out_of_shadow), 0, 1);
-    color.rgb = mix(color.rgb * oe_shadow_color, color.rgb, out_of_shadow);
+    oe_shadow_visibility = mix(clamp(oe_shadow_color, 0.0, 1.0), 1.0, out_of_shadow);
 }

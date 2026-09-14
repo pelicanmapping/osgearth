@@ -7,6 +7,7 @@
 #include <osgEarth/Common>
 #include <osgEarth/GLUtils>
 #include <osgEarth/TextureArena>
+#include <osgEarth/MaterialArena>
 #include <osgEarth/Utils>
 #include <osg/Geometry>
 #include <osgUtil/RenderLeaf>
@@ -23,40 +24,7 @@
 
 namespace osgEarth
 {
-    class OSGEARTH_EXPORT ChonkMaterial
-    {
-    public:
-        using Ptr = std::shared_ptr<ChonkMaterial>;
-
-        static Ptr create() {
-            return Ptr(new ChonkMaterial);
-        }
-
-        // texturearena indexes of material textures
-        int albedo_index = -1;
-        int normal_index = -1;
-        int pbr_index = -1;
-        int material1_index = -1;
-        int material2_index = -1;
-        int occlusion_index = -1;
-        // glTF: bit 0 selects the map convention; bit 1 enables PBR factors.
-        GLubyte gltf_material = 0;
-        osg::Vec4f pbr_factors = osg::Vec4f(1, 1, 1, 1);
-
-        // store refs to the original textures when the
-        // factory objects's texture arena is using auto-release.
-        // otherwise they are null.
-        Texture::Ptr albedo_tex;
-        Texture::Ptr normal_tex;
-        Texture::Ptr pbr_tex;
-        Texture::Ptr material1_tex;
-        Texture::Ptr material2_tex;
-        Texture::Ptr occlusion_tex;
-
-    private:
-        //! hidden to force use of create()
-        ChonkMaterial() = default;
-    };
+    using ChonkMaterial = MaterialArena::Material;
 
     class ChonkFactory;
     class ChonkDrawable;
@@ -101,18 +69,9 @@ namespace osgEarth
             char normal_technique = (char)0;
             osg::Vec4ub color;
             GLubyte color_is_linear = 0;
+            GLushort material_index = 0;
             osg::Vec2f uv;
             osg::Vec3f flex;
-
-            // texturearena indexes of materials
-            // TODO: use a material index instead?
-            GLshort albedo_index = -1;
-            GLshort normalmap_index = -1;
-            GLshort pbr_index = -1;
-            osg::Vec2s extended_material_index = osg::Vec2s(-1, -1);
-            GLshort occlusion_index = -1;
-            GLubyte gltf_material = 0;
-            osg::Vec4f pbr_factors = osg::Vec4f(1, 1, 1, 1);
         };
 
         static GLubyte NORMAL_TECHNIQUE_DEFAULT;
@@ -136,6 +95,8 @@ namespace osgEarth
         static Ptr create();
 
         std::string _name;
+        osg::ref_ptr<MaterialArena> _materialArena;
+        // One owner per distinct material, rather than one per vertex.
         std::vector<ChonkMaterial::Ptr> _materials;
         std::vector<VertexGPU> _vbo_store;
         std::vector<element_t> _ebo_store;
@@ -196,7 +157,10 @@ namespace osgEarth
 
         //! Read-only conversion of a static asset, shared across cells. The
         //! cache is weak and keyed by the source graph and pixel limits.
-        //! Unsupported scene/state semantics return an empty pointer.
+        //! Scene/state eligibility checks are disabled by default.
+        //! OSGEARTH_CHONK_ENFORCE_ELIGIBILITY=1 rejects unsupported semantics
+        //! with a warning and returns an empty pointer. Set before startup.
+        //! Also returns empty if the arena's 65536 material IDs are exhausted.
         Chonk::Ptr getOrCreateChonk(osg::Node* node,
             float far_pixel_scale = 0.0f, float near_pixel_scale = FLT_MAX);
 
@@ -210,7 +174,8 @@ namespace osgEarth
         //! For the given node, this method populates the provided Chonk wit
         //! its geometry. If the factory finds any InstancedGeometry's along
         //! the way it will create a Chonk for each one in out_instances.
-        //! Returns false if the node contained no geometry.
+        //! Returns false if the node contained no geometry, the material arena
+        //! is full, or this Chonk already uses a different arena.
         bool load(
             osg::Node* node,
             Chonk* chonk, 

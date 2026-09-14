@@ -3,6 +3,7 @@
 #
 
 set(TARGET_GLSL
+    SimpleSky.Environment.glsl
     SimpleSky.Atmosphere.frag.glsl
     SimpleSky.Atmosphere.vert.glsl
     SimpleSky.Ground.ONeil.frag.glsl
@@ -29,6 +30,7 @@ configure_shaders(
     ${TARGET_GLSL} )
 
 set(TARGET_SRC
+    SkyEnvironment.cpp
     SimpleSkyExtension.cpp
     SimpleSkyNode.cpp
     BrunetonImpl.cpp
@@ -40,6 +42,7 @@ set(TARGET_SRC
     ${SHADERS_CPP} )
 
 set(TARGET_H
+    SkyEnvironment
     SimpleSkyOptions
 	SimpleSkyNode
     SimpleSkyShaders

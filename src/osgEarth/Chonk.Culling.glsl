@@ -193,7 +193,11 @@ void cull()
 
 
     // Clip-space frustum boundary (in each direction)
+#ifdef OE_GPUCULL_DEBUG
+    float frustumBoundary = 0.95 * oe_chonk_shadow_buffer_multiplier;
+#else
     float frustumBoundary = 1.0 * oe_chonk_shadow_buffer_multiplier;
+#endif
 
 
     // Compute the minimum bounding box in clip space for this instance:

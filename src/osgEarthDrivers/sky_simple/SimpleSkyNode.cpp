@@ -212,7 +212,8 @@ SimpleSkyNode::construct()
 
     _light = new LightGL3(0);
     _light->setPosition(osg::Vec4f(0.0f, 0.0f, 1.0f, 0.0f));
-    _light->setAmbient(osg::Vec4f(1.0f, 1.0f, 1.0f, 1.0f));
+    float ambient = osg::clampBetween(_options.ambient().get(), 0.0f, 1.0f);
+    _light->setAmbient(osg::Vec4f(ambient, ambient, ambient, 1.0f));
     _light->setDiffuse(osg::Vec4f(1.0f, 1.0f, 1.0f, 1.0f));
     _light->setSpecular(osg::Vec4f(1.0f, 1.0f, 1.0f, 1.0f)); // does nothing in PBR mode
 
@@ -222,12 +223,6 @@ SimpleSkyNode::construct()
     lightSource->setCullingActive(false);
     _cullContainer->addChild(lightSource);
     lightSource->addCullCallback(new LightSourceGL3UniformGenerator());
-
-    if (_options.ambient().isSet())
-    {
-        float a = osg::clampBetween(_options.ambient().get(), 0.0f, 1.0f);
-        _light->setAmbient(osg::Vec4(a, a, a, 1.0f));
-    }
 
     // only supports geocentric for now.
     if (getReferencePoint().isValid())
@@ -367,6 +362,32 @@ SimpleSkyNode::traverse(osg::NodeVisitor& nv)
 
     else if (nv.getVisitorType() == nv.UPDATE_VISITOR)
     {
+        if (_useONeil && _options.atmosphericLighting() == true &&
+            _options.environmentLighting() == true && _environmentView.valid())
+        {
+            if (!_environment.valid())
+            {
+                auto terrain = osgEarth::findTopMostNodeOfType<TerrainEngineNode>(this);
+                if (terrain)
+                {
+                    _environment = new SkyEnvironment;
+                    if (!_environment->attach(getOrCreateStateSet(), terrain->getResources()))
+                    {
+                        OE_WARN << LC << "No texture units available for sky environment lighting" << std::endl;
+                        _options.environmentLighting() = false;
+                        _environment = nullptr;
+                    }
+                }
+            }
+            if (_environment.valid())
+            {
+                const auto& p = _light->getPosition();
+                _environment->update(_environmentView.get(), osg::Vec3d(p.x(),p.y(),p.z()));
+                if (_environment->isReady())
+                    getOrCreateStateSet()->setDefine("OE_SKY_ENVIRONMENT");
+            }
+        }
+
         // If the Bruneton compute shaders are finished, set up the rendering statesets.
         if (_useBruneton &&
             !_eb_initialized &&
@@ -388,6 +409,9 @@ SimpleSkyNode::traverse(osg::NodeVisitor& nv)
                         terrain->getResources());
 
                     _eb_initialized = true;
+
+                    if (ok && groundStateSet && _options.environmentLighting() == true)
+                        groundStateSet->setDefine("OE_SKY_ENVIRONMENT");
 
                     if (!ok)
                     {
@@ -456,6 +480,7 @@ SimpleSkyNode::attach(osg::View* view, int lightNum)
         return;
 
     _light->setLightNum(lightNum);
+    _environmentView = view;
 
     // black background
     view->getCamera()->setClearColor(osg::Vec4(0, 0, 0, 1));
@@ -568,7 +593,8 @@ SimpleSkyNode::makeSceneLighting()
             //TODO: api
             stateset->getOrCreateUniform("atmos_haze_cutoff", osg::Uniform::FLOAT)->set(0.0f);
             stateset->getOrCreateUniform("atmos_haze_strength", osg::Uniform::FLOAT)->set(1.0f);
-            stateset->getOrCreateUniform("oe_sky_maxAmbientIntensity", osg::Uniform::FLOAT)->set(_options.maxAmbientIntensity().get());
+            if (_options.environmentLighting() == true)
+                stateset->getOrCreateUniform("oe_sky_groundReflectance", osg::Uniform::FLOAT)->set(_options.groundReflectance().get());
         }
         else if (_useONeil)
         {
@@ -595,6 +621,8 @@ SimpleSkyNode::makeSceneLighting()
 
     stateset->getOrCreateUniform("oe_sky_exposure", osg::Uniform::FLOAT)->set(
         _options.exposure().value());
+    if ((_useONeil || _useBruneton) && _options.atmosphericLighting() == true && _options.environmentLighting() == true)
+        stateset->getOrCreateUniform("oe_sky_iblStrength", osg::Uniform::FLOAT)->set(1.0f);
 }
 
 void

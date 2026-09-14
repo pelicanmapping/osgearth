@@ -39,9 +39,14 @@ namespace
             << "_" << y;
     }
 
-    std::string makeLOD2TileName(unsigned z, unsigned x, unsigned y)
+    std::string extensionSuffix(const std::string& extension)
     {
-        return makeTileStem(z, x, y) + "_lod2.glb";
+        return startsWith(extension, ".") ? extension : "." + extension;
+    }
+
+    std::string makeLOD2TileName(unsigned z, unsigned x, unsigned y, const std::string& extension)
+    {
+        return makeTileStem(z, x, y) + "_lod2" + extensionSuffix(extension);
     }
 
     std::string makeDetailTileName(
@@ -50,7 +55,8 @@ namespace
         unsigned y,
         unsigned lod,
         unsigned cellX,
-        unsigned cellZ)
+        unsigned cellZ,
+        const std::string& extension)
     {
         return Stringify()
             << makeTileStem(z, x, y)
@@ -58,7 +64,7 @@ namespace
             << "_x" << std::setfill('0') << std::setw(3) << cellX
             << "_y000"
             << "_z" << std::setfill('0') << std::setw(3) << cellZ
-            << ".glb";
+            << extensionSuffix(extension);
     }
 
     URI makeTileURI(const URI& base, const std::string& filename)
@@ -282,6 +288,9 @@ void PrestigeLayer::Options::fromConfig(const Config& conf)
     conf.get("grid_size", gridSize());
     conf.get("lod1_range", lod1Range());
     conf.get("lod0_range", lod0Range());
+    conf.get("lod0_extension", lod0Extension());
+    conf.get("lod1_extension", lod1Extension());
+    conf.get("lod2_extension", lod2Extension());
 }
 
 Config PrestigeLayer::Options::getConfig() const
@@ -294,10 +303,27 @@ Config PrestigeLayer::Options::getConfig() const
     conf.set("grid_size", gridSize());
     conf.set("lod1_range", lod1Range());
     conf.set("lod0_range", lod0Range());
+    conf.set("lod0_extension", lod0Extension());
+    conf.set("lod1_extension", lod1Extension());
+    conf.set("lod2_extension", lod2Extension());
     return conf;
 }
 
 OE_LAYER_PROPERTY_IMPL(PrestigeLayer, URI, URL, url);
+OE_LAYER_PROPERTY_IMPL(PrestigeLayer, std::string, LOD1Extension, lod1Extension);
+OE_LAYER_PROPERTY_IMPL(PrestigeLayer, std::string, LOD2Extension, lod2Extension);
+
+void PrestigeLayer::setLOD0Extension(const std::string& value)
+{
+    options().lod0Extension() = value;
+}
+
+const std::string& PrestigeLayer::getLOD0Extension() const
+{
+    static const std::string unsplitDefault = "gltf";
+    return !*options().split() && !options().lod0Extension().isSet() ?
+        unsplitDefault : options().lod0Extension().get();
+}
 
 void PrestigeLayer::setInvertY(bool value)
 {
@@ -446,7 +472,7 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
         return {};
 
     const URI base = *options().url();
-    const std::string lod2Name = makeLOD2TileName(z, x, y);
+    const std::string lod2Name = makeLOD2TileName(z, x, y, getLOD2Extension());
     const URI lod2URI = makeTileURI(base, lod2Name);
 
     osg::ref_ptr<osg::Node> lod2 = readModel(lod2URI, _readOptions.get(), progress);
@@ -472,11 +498,11 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
 
     if (!*options().split())
     {
-        // Unsplit scheme: a single full-tile high-resolution gltf replaces
+        // Unsplit scheme: a single full-tile high-resolution model replaces
         // the LOD2 tile at the lod0 range.
         lod2Pager->setMaxRange(lod0Range);
 
-        const URI fullURI = makeTileURI(base, makeTileStem(z, x, y) + ".gltf");
+        const URI fullURI = makeTileURI(base, makeTileStem(z, x, y) + extensionSuffix(getLOD0Extension()));
 
         lod2Pager->setLoadFunction(
             [fullURI, readOptions, detailChonks](Cancelable* cancelable)
@@ -489,6 +515,8 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
     {
         const unsigned gridSize = *options().gridSize();
         const bool skipLOD1 = *options().skipLOD1();
+        const std::string lod0Extension = getLOD0Extension();
+        const std::string lod1Extension = getLOD1Extension();
         std::vector<osg::BoundingSphered> cellBounds;
         cellBounds.reserve(static_cast<std::size_t>(gridSize) * gridSize);
 
@@ -512,7 +540,7 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
         lod2Pager->setMaxRange(*options().lod1Range());
 
         lod2Pager->setLoadFunction(
-        [base, z, x, y, lod0Range, gridSize, skipLOD1, cellBounds, readOptions, detailChonks](Cancelable* cancelable)
+        [base, z, x, y, lod0Range, gridSize, skipLOD1, lod0Extension, lod1Extension, cellBounds, readOptions, detailChonks](Cancelable* cancelable)
         {
             osg::ref_ptr<ProgressCallback> progress = new ProgressCallback(cancelable);
             osg::ref_ptr<osg::Group> group = new osg::Group();
@@ -532,7 +560,8 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
                             y,
                             1u,
                             col,
-                            row);
+                            row,
+                            lod1Extension);
                     const std::string lod0Name =
                         makeDetailTileName(
                             z,
@@ -540,7 +569,8 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
                             y,
                             0u,
                             col,
-                            row);
+                            row,
+                            lod0Extension);
                     const URI lod1URI = makeTileURI(base, lod1Name);
                     const URI lod0URI = makeTileURI(base, lod0Name);
                     const URI sidecarURI = lod0URI.append(".json");

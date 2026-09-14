@@ -397,10 +397,7 @@ namespace
                 json2conf( *j, child, depth+1 );
                 if ( !child.empty() )
                 {
-                    if (child.key().empty() && child.value().empty())
-                        conf.add(child.children());
-                    else
-                        conf.add(child);
+                    conf.add(child);
                 }
             }
         }

@@ -93,7 +93,7 @@ namespace
         }
         else
         {
-            osg::ref_ptr<osg::Image> output = new osg::Image();
+            output = new osg::Image();
             output->allocateImage(1, 1, 1, GL_RGB, GL_UNSIGNED_BYTE);
             output->setInternalTextureFormat(GL_RGB8);
             output->setColor(osg::Vec4(0.5, 0.5, 1.0, 1.0), 0, 0);
@@ -185,7 +185,7 @@ namespace
         if (!output.valid())
         {
             // fallback - use defaults.
-            osg::ref_ptr<osg::Image> output = new osg::Image();
+            output = new osg::Image();
             output->allocateImage(1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE);
             output->setColor(osg::Vec4(DEFAULT_DISPLACEMENT, DEFAULT_ROUGHNESS, DEFAULT_AO, DEFAULT_METAL), 0, 0);
         }
@@ -203,60 +203,60 @@ namespace
 }
 
 Status
-PBRTexture::load(const PBRMaterial& mat, const osgDB::Options* options)
+PBRTexture::load(const PBRMaterial& mat_const, const osgDB::Options* options)
 {
-    osg::ref_ptr<osg::Image> color_image, normal_image, roughness_image, metal_image, ao_image, displacement_image, opacity_image;
+    PBRMaterial mat = mat_const;
 
-    if (mat.color().isSet()) {
+    if (!mat.colorImage && mat.color().isSet()) {
         auto rr = mat.color()->readImage(options);
         if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.color()->full() + " ... " + rr.errorDetail());
-        else color_image = rr.getImage();
+        else mat.colorImage = rr.getImage();
     }
 
-    if (mat.normal().isSet()) {
+    if (!mat.normalImage && mat.normal().isSet()) {
         auto rr = mat.normal()->readImage(options);
         if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.normal()->full() + " ... " + rr.errorDetail());
-        else normal_image = rr.getImage();
+        else mat.normalImage = rr.getImage();
     }
 
-    if (mat.roughness().isSet()) {
+    if (!mat.roughnessImage && mat.roughness().isSet()) {
         auto rr = mat.roughness()->readImage(options);
         if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.roughness()->full() + " ... " + rr.errorDetail());
-        else roughness_image = rr.getImage();
+        else mat.roughnessImage = rr.getImage();
     }
 
-    if (mat.metal().isSet()) {
+    if (!mat.metalImage && mat.metal().isSet()) {
         auto rr = mat.metal()->readImage(options);
         if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.metal()->full() + " ... " + rr.errorDetail());
-        else metal_image = rr.getImage();
+        else mat.metalImage = rr.getImage();
     }
 
-    if (mat.ao().isSet()) {
+    if (!mat.aoImage && mat.ao().isSet()) {
         auto rr = mat.ao()->readImage(options);
         if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.ao()->full() + " ... " + rr.errorDetail());
-        else ao_image = rr.getImage();
+        else mat.aoImage = rr.getImage();
     }
 
-    if (mat.displacement().isSet()) {
+    if (!mat.displacementImage && mat.displacement().isSet()) {
         auto rr = mat.displacement()->readImage(options);
         if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.displacement()->full() + " ... " + rr.errorDetail());
-        else displacement_image = rr.getImage();
+        else mat.displacementImage = rr.getImage();
     }
 
-    if (mat.opacity().isSet()) {
+    if (!mat.opacityImage && mat.opacity().isSet()) {
         auto rr = mat.opacity()->readImage(options);
         if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.opacity()->full() + " ... " + rr.errorDetail());
-        else opacity_image = rr.getImage();
+        else mat.opacityImage = rr.getImage();
     }
 
 
-    albedo = new osg::Texture2D(assemble_RGBA(color_image, opacity_image));
+    albedo = new osg::Texture2D(assemble_RGBA(mat.colorImage, mat.opacityImage));
     albedo->setName(mat.name() + " albedo");
 
-    normal = new osg::Texture2D(assemble_NORM(normal_image));
+    normal = new osg::Texture2D(assemble_NORM(mat.normalImage));
     normal->setName(mat.name() + " normal");
 
-    pbr = new osg::Texture2D(assemble_DRAM(displacement_image, roughness_image, ao_image, metal_image));
+    pbr = new osg::Texture2D(assemble_DRAM(mat.displacementImage, mat.roughnessImage, mat.aoImage, mat.metalImage));
     pbr->setName(mat.name() + " PBR");
 
     for (auto& tex : { albedo, normal, pbr })

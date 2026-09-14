@@ -11,6 +11,10 @@
 #include <osgEarth/Shadowing>
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/WindLayer>
+#include <osg/NodeCallback>
+#include <osg/Timer>
+#include <atomic>
+#include <cmath>
 
 namespace
 {
@@ -80,36 +84,96 @@ namespace osgEarth
     class EnvironmentGUI : public ImGuiPanel
     {
     private:
+        // Run on scene updates so recording can continue with the GUI hidden.
+        struct TimeCycle : public osg::NodeCallback
+        {
+            std::atomic<bool> playing{ false };
+            std::atomic<float> hoursPerSecond{ 0.25f };
+
+            void operator()(osg::Node* node, osg::NodeVisitor* nv) override
+            {
+                auto now = osg::Timer::instance()->tick();
+                double elapsed = osg::Timer::instance()->delta_s(_lastTick, now);
+                _lastTick = now;
+                bool running = playing.load();
+
+                if (running && _wasPlaying && elapsed > 0.0)
+                {
+                    // DateTime has whole-second resolution. Retain fractions so
+                    // slow playback does not stall at high frame rates.
+                    _seconds += elapsed * hoursPerSecond.load() * 3600.0;
+                    double wholeSeconds = std::floor(_seconds);
+                    _seconds -= wholeSeconds;
+                    if (wholeSeconds >= 1.0)
+                    {
+                        auto sky = static_cast<SkyNode*>(node);
+                        auto stamp = sky->getDateTime().asTimeStamp();
+                        TimeStamp secondsOfDay = (stamp % 86400 + 86400) % 86400;
+                        TimeStamp advance = static_cast<TimeStamp>(std::fmod(wholeSeconds, 86400.0));
+                        TimeStamp next = (secondsOfDay + advance) % 86400;
+                        // Repeat the selected calendar day, including at midnight.
+                        sky->setDateTime(DateTime(stamp - secondsOfDay + next));
+                    }
+                }
+                if (!running)
+                    _seconds = 0.0;
+                _wasPlaying = running;
+                traverse(node, nv);
+            }
+
+        private:
+            osg::Timer_t _lastTick = osg::Timer::instance()->tick();
+            double _seconds = 0.0;
+            bool _wasPlaying = false;
+        };
+
         osg::observer_ptr<MapNode> _mapNode;
         osg::observer_ptr<SkyNode> _skyNode;
         osg::observer_ptr<ShadowCaster> _shadowCaster;
         osg::observer_ptr<WindLayer> _windLayer;
+        osg::ref_ptr<TimeCycle> _timeCycle;
+        float _timeCycleSpeed = 0.25f;
         bool _showDetails = false;
-        float _hour;
-        int _day, _month, _year;
-        float _exposure = 3.5f;
+        float _exposure = 3.3f;
         float _contrast = 1.0f;
         float _ambient = 0.033f;
-        float _max_ambient_intensity = 0.75;
+        float _max_ambient_intensity = 0.15f;
+        float _environment_strength = 1.0f;
+        float _ground_reflectance = 0.15f;
         bool _first = true;
         bool _shadows = false;
         float _haze_cutoff = 0.0f, _haze_strength = 16.0f;
-        float _shadow_darkness = 0.5f, _shadow_blur = 0.001f;
+        float _shadow_darkness = 0.0f, _shadow_blur = 0.001f;
         float _wind_power = 1.0f;
 
     public:
-        EnvironmentGUI() : ImGuiPanel("Sky")
+        EnvironmentGUI() : ImGuiPanel("Sky") { }
+
+        ~EnvironmentGUI() override
         {
-            DateTime now;
-            _hour = now.hours(), _day = now.day(), _month = now.month(), _year = now.year();
+            if (_timeCycle.valid())
+            {
+                _timeCycle->playing = false;
+                osg::ref_ptr<SkyNode> sky;
+                if (_skyNode.lock(sky))
+                    sky->removeUpdateCallback(_timeCycle.get());
+            }
         }
 
         void load(const Config& conf) override
         {
             conf.get("ShowDetails", _showDetails);
+            conf.get("TimeCycleSpeed", _timeCycleSpeed);
+            _timeCycleSpeed = std::isfinite(_timeCycleSpeed) ?
+                osg::clampBetween(_timeCycleSpeed, 0.01f, 24.0f) : 0.25f;
+            if (_timeCycle.valid())
+                _timeCycle->hoursPerSecond = _timeCycleSpeed;
             conf.get("Exposure", _exposure);
             conf.get("Contrast", _contrast);
             conf.get("Ambient", _ambient);
+            conf.get("AmbientMax", _max_ambient_intensity);
+            conf.get("SkyEnvironment", _environment_strength);
+            conf.get("GroundReflectance", _ground_reflectance);
             conf.get("HazeCutoff", _haze_cutoff);
             conf.get("HazeStrength", _haze_strength);
             conf.get("WindPower", _wind_power);
@@ -117,9 +181,13 @@ namespace osgEarth
         void save(Config& conf) override
         {
             conf.set("ShowDetails", _showDetails);
+            conf.set("TimeCycleSpeed", _timeCycleSpeed);
             conf.set("Exposure", _exposure);
             conf.set("Contrast", _contrast);
             conf.set("Ambient", _ambient);
+            conf.set("AmbientMax", _max_ambient_intensity);
+            conf.set("SkyEnvironment", _environment_strength);
+            conf.set("GroundReflectance", _ground_reflectance);
             conf.set("HazeCutoff", _haze_cutoff);
             conf.set("HazeStrength", _haze_strength);
             conf.set("WindPower", _wind_power);
@@ -148,6 +216,13 @@ namespace osgEarth
                     return;
                 }
 
+                if (!_timeCycle.valid())
+                {
+                    _timeCycle = new TimeCycle;
+                    _timeCycle->hoursPerSecond = _timeCycleSpeed;
+                    _skyNode->addUpdateCallback(_timeCycle.get());
+                }
+
                 if (_first)
                 {
                     findNode(_shadowCaster, ri);
@@ -156,9 +231,8 @@ namespace osgEarth
 
                     findLayer(_windLayer, ri);
 
-                    _skyNode->setDateTime(DateTime(_year, _month, _day, _hour));
-
-                    // so we can visualize tiume-series layers.
+                    // Preserve the scene's selected date/time when opening the
+                    // panel; simulation time also drives time-series layers.
                     _skyNode->setSimulationTimeTracksDateTime(true);
                 }
 
@@ -177,6 +251,7 @@ namespace osgEarth
 
                 ImGui::SameLine();
                 if (ImGui::Button("Now")) {
+                    _timeCycle->playing = false;
                     _skyNode->setDateTime(DateTime());
                     dirtySettings();
                 }
@@ -192,30 +267,76 @@ namespace osgEarth
                     auto year = mark.year();
                     auto hour = mark.hours();
 
-                    if (ImGuiLTable::SliderDouble("Hour (UTC)", &hour, 0.0f, 24.0f))
-                        _hour = hour, dirtySettings();
+                    bool dateChanged = ImGuiLTable::SliderDouble("Hour (UTC)", &hour, 0.0f, 24.0f);
+
+                    bool cycleTime = _timeCycle->playing.load();
+                    if (ImGuiLTable::Checkbox("Cycle time", &cycleTime))
+                        _timeCycle->playing = cycleTime;
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Repeat this day automatically. Continues with the Sky panel or GUI hidden.");
+                    if (ImGuiLTable::SliderFloat("Speed (hours/sec)", &_timeCycleSpeed, 0.01f, 24.0f,
+                        "%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+                    {
+                        _timeCycle->hoursPerSecond = _timeCycleSpeed;
+                        dirtySettings();
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Simulated hours per real second. Ctrl-click to enter an exact speed.");
+                    ImGuiLTable::Text("Day loop", "%.1f seconds", 24.0f / _timeCycleSpeed);
 
                     if (_showDetails)
                     {
-                        if (ImGuiLTable::SliderInt("Day", &day, 1, 31))
-                            _day = day, dirtySettings();
-                        if (ImGuiLTable::SliderInt("Month", &month, 1, 12))
-                            _month = month, dirtySettings();
-                        if (ImGuiLTable::SliderInt("Year", &year, 1970, 2061))
-                            _year = year, dirtySettings();
+                        dateChanged |= ImGuiLTable::SliderInt("Day", &day, 1, 31);
+                        dateChanged |= ImGuiLTable::SliderInt("Month", &month, 1, 12);
+                        dateChanged |= ImGuiLTable::SliderInt("Year", &year, 1970, 2061);
                     }
-                    _skyNode->setDateTime(DateTime(year, month, day, hour));
+                    if (dateChanged)
+                    {
+                        _timeCycle->playing = false;
+                        _skyNode->setDateTime(DateTime(year, month, day, hour));
+                        dirtySettings();
+                    }
 
                     if (lighting)
                     {
+                        auto skyStateSet = _skyNode->getOrCreateStateSet();
+                        auto environmentStrength = skyStateSet->getUniform("oe_sky_iblStrength");
+                        auto environmentDefine = skyStateSet->getDefinePair("OE_SKY_ENVIRONMENT");
+                        bool environmentActive = environmentStrength && environmentDefine &&
+                            (environmentDefine->second & osg::StateAttribute::ON) != 0;
+
                         if (ImGuiLTable::SliderFloat("Exposure", &_exposure, 1.0f, 10.0f)) dirtySettings();
                         _skyNode->getOrCreateStateSet()->getOrCreateUniform("oe_sky_exposure", osg::Uniform::FLOAT)->set(_exposure);
 
                         if (ImGuiLTable::SliderFloat("Ambient min", &_ambient, 0.0f, 1.0f)) dirtySettings();
                         _skyNode->getSunLight()->setAmbient(osg::Vec4(_ambient, _ambient, _ambient, 1.0f));
 
-                        if (ImGuiLTable::SliderFloat("Ambient max", &_max_ambient_intensity, 0.0f, 1.0f)) dirtySettings();
-                        _skyNode->getOrCreateStateSet()->getOrCreateUniform("oe_sky_maxAmbientIntensity", osg::Uniform::FLOAT)->set(_max_ambient_intensity);
+                        auto ambientMaximum = skyStateSet->getUniform("oe_sky_maxAmbientIntensity");
+                        if (ambientMaximum)
+                        {
+                            if (ImGuiLTable::SliderFloat("Ambient max",
+                                &_max_ambient_intensity, 0.0f, 1.0f)) dirtySettings();
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Daytime ambient fill. Fades out as Sky environment approaches 1.");
+                            ambientMaximum->set(_max_ambient_intensity);
+                        }
+
+                        if (environmentActive)
+                        {
+                            if (ImGuiLTable::SliderFloat("Sky environment", &_environment_strength, 0.0f, 1.0f)) dirtySettings();
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Controls sky fill and reflections. Ambient min remains separate.");
+                            environmentStrength->set(_environment_strength);
+
+                            auto groundReflectance = skyStateSet->getUniform("oe_sky_groundReflectance");
+                            if (groundReflectance)
+                            {
+                                if (ImGuiLTable::SliderFloat("Ground reflectance", &_ground_reflectance, 0.0f, 1.0f)) dirtySettings();
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("Assumed linear reflectance of surrounding ground for indirect light.");
+                                groundReflectance->set(_ground_reflectance);
+                            }
+                        }
 
                         auto diffuse_color = _skyNode->getSunLight()->getDiffuse();
                         if (ImGuiLTable::ColorEdit3("Diffuse color", &diffuse_color[0], ImGuiColorEditFlags_Float)) {
@@ -263,7 +384,7 @@ namespace osgEarth
 
                         if (_shadows)
                         {
-                            if (ImGuiLTable::SliderFloat("Shadow darkness", &_shadow_darkness, 0.0f, 1.0f))
+                            if (ImGuiLTable::SliderFloat("Sunlight in shadow", &_shadow_darkness, 0.0f, 1.0f))
                                 stateset(ri)->addUniform(new osg::Uniform("oe_shadow_color", _shadow_darkness), 0x7);
 
                             if (ImGuiLTable::SliderFloat("Shadow blur", &_shadow_blur, 0.0f, 0.002f))

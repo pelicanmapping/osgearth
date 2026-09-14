@@ -646,6 +646,7 @@ LineDrawable::setFirst(unsigned value)
 {
     _first = value;
     updateFirstCount();
+    _geom->dirtyBound();
 }
 
 unsigned
@@ -659,6 +660,7 @@ LineDrawable::setCount(unsigned value)
 {
     _count = value;
     updateFirstCount();
+    _geom->dirtyBound();
 }
 
 unsigned
@@ -982,6 +984,7 @@ LineDrawable::setVertex(unsigned vi, const osg::Vec3& vert)
         }
 
         dirtyBound();
+        _geom->dirtyBound();
     }
 }
 
@@ -1164,6 +1167,7 @@ LineDrawable::dirty()
     initialize();
 
     dirtyBound();
+    _geom->dirtyBound();
 
     _current->dirty();
 

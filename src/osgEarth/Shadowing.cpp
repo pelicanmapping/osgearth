@@ -36,7 +36,7 @@ _enabled(true),
 _size         ( 4096 ),
 _texImageUnit ( 7 ),
 _blurFactor   ( 0.001f ),
-_color        ( 0.325f ),
+_color        ( 0.0f ),
 _traversalMask( ~0 )
 {
     _castingGroup = new osg::Group();
@@ -169,6 +169,7 @@ ShadowCaster::reinitialize()
     Shaders package;
     package.replace("$OE_SHADOW_NUM_SLICES", Stringify()<<numSlices);
     package.load(vp, package.ShadowCaster);
+    _renderStateSet->setDefine("OE_SHADOWING");
 
     // the texture coord generator matrix array (from the caster):
     _shadowMapTexGenUniform = _renderStateSet->getOrCreateUniform(

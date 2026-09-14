@@ -32,6 +32,11 @@ using namespace osgEarth;
 
 #define OE_DEVEL OE_DEBUG
 
+#ifndef GL_TEXTURE_BASE_LEVEL
+#define GL_TEXTURE_BASE_LEVEL 0x813C
+#define GL_TEXTURE_MAX_LEVEL 0x813D
+#endif
+
 #ifndef GL_LINE_SMOOTH
 #define GL_LINE_SMOOTH 0x0B20
 #endif
@@ -779,11 +784,12 @@ GLObject::GLObject(GLenum ns, osg::State& state) :
 void
 GLObject::debugLabel(const std::string& category, const std::string& uniqueid)
 {
+    // Keep the label for error reports even without a GL debug context.
+    _category = category;
+    _uid = uniqueid;
+
     if (GLUtils::isGLDebuggingEnabled())
     {
-        _category = category;
-        _uid = uniqueid;
-
         OE_SOFT_ASSERT_AND_RETURN(valid(), void());
         ext()->debugObjectLabel(ns(), name(), label());
     }
@@ -1518,13 +1524,56 @@ GLTexture::bind(osg::State& state)
 GLuint64
 GLTexture::handle(osg::State& state)
 {
+    return handle(state, true);
+}
+
+GLuint64
+GLTexture::handle(osg::State& state, bool reportFailure)
+{
     if (_handle == 0)
     {
         bind(state);
         _handle = ext()->glGetTextureHandle(_name);
     }
 
-    OE_SOFT_ASSERT(_handle != 0, "glGetTextureHandle failed");
+    if (_handle == 0)
+    {
+        // Errors pending here may originate in storage allocation or parameter
+        // setup as well as glGetTextureHandle. Only query on the failure path.
+        std::stringstream errors;
+        for (unsigned i = 0; i < 16; ++i)
+        {
+            const GLenum error = glGetError();
+            if (error == GL_NO_ERROR)
+                break;
+            errors << " 0x" << std::hex << error;
+        }
+        if (!reportFailure)
+            return 0;
+
+        GLint width = 0, height = 0, depth = 0, format = 0;
+        GLint baseLevel = 0, maxLevel = 0, minFilter = 0, magFilter = 0;
+        if (_target == GL_TEXTURE_1D || _target == GL_TEXTURE_2D ||
+            _target == GL_TEXTURE_3D || _target == GL_TEXTURE_2D_ARRAY)
+        {
+            glGetTexParameteriv(_target, GL_TEXTURE_BASE_LEVEL, &baseLevel);
+            glGetTexParameteriv(_target, GL_TEXTURE_MAX_LEVEL, &maxLevel);
+            glGetTexParameteriv(_target, GL_TEXTURE_MIN_FILTER, &minFilter);
+            glGetTexParameteriv(_target, GL_TEXTURE_MAG_FILTER, &magFilter);
+            glGetTexLevelParameteriv(_target, baseLevel, GL_TEXTURE_WIDTH, &width);
+            glGetTexLevelParameteriv(_target, baseLevel, GL_TEXTURE_HEIGHT, &height);
+            glGetTexLevelParameteriv(_target, baseLevel, GL_TEXTURE_DEPTH, &depth);
+            glGetTexLevelParameteriv(_target, baseLevel, GL_TEXTURE_INTERNAL_FORMAT, &format);
+        }
+        OE_SOFT_ASSERT(_handle != 0, "glGetTextureHandle failed: " << label()
+            << " name=" << _name << " context=" << state.getContextID()
+            << " target=0x" << std::hex << _target << " format=0x" << format
+            << " minFilter=0x" << minFilter << " magFilter=0x" << magFilter << std::dec
+            << " size=" << width << "x" << height << "x" << depth
+            << " mipLevels=" << baseLevel << ".." << maxLevel
+            << " recycles=" << recycles()
+            << " pendingGLerrors=" << (errors.str().empty() ? "none" : errors.str()) << );
+    }
     return _handle;
 }
 
@@ -1541,7 +1590,9 @@ GLTexture::makeResident(const osg::State& state, bool toggle)
     
     if (resident != toggle)
     {
-        OE_SOFT_ASSERT_AND_RETURN(_handle != 0, void(), "makeResident() called on invalid handle: " + label() << );
+        OE_SOFT_ASSERT_AND_RETURN(_handle != 0, void(), "makeResident() called on invalid handle: " << label()
+            << " name=" << _name << " context=" << state.getContextID()
+            << " target=0x" << std::hex << _target << std::dec << " recycles=" << recycles() << );
 
         if (toggle == true)
             ext()->glMakeTextureHandleResident(_handle);

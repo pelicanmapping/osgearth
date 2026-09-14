@@ -90,7 +90,8 @@ namespace osgEarth { namespace Util
         void setTextureSize(unsigned size);
 
         /**
-         * The ambient color level of the shadow. 0.0 = black. Default is 0.4
+         * Minimum direct-light visibility in shadow. Default is 0.0 (sunlight
+         * is fully blocked). Ambient and environment lighting are unaffected.
          */
         void setShadowColor(float value);
         float getShadowColor() const { return _color; }

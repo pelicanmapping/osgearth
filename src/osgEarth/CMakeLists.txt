@@ -432,6 +432,7 @@ SET(TARGET_H
     TextSymbol
     TextSymbolizer
     TextureArena
+    MaterialArena
     TextureBuffer
     TFS
     TFSPackager
@@ -775,6 +776,7 @@ set(TARGET_SRC
     TextSymbol.cpp
     TextSymbolizer.cpp
     TextureArena.cpp
+    MaterialArena.cpp
     TextureBuffer.cpp
     TextureBufferSerializer.cpp
     TFS.cpp

@@ -1,0 +1,95 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarth/GLUtils>
+#include <osg/Vec2i>
+#include <array>
+#include <map>
+#include <mutex>
+#include <cstdint>
+
+namespace osgEarth
+{
+    class Texture;
+    class TextureArena;
+
+    /** Shared, reference-counted material IDs for one TextureArena. */
+    class OSGEARTH_EXPORT MaterialArena : public osg::Referenced
+    {
+    public:
+        using Indices = std::array<int, 5>;
+        static constexpr unsigned CAPACITY = 65536u;
+        static constexpr unsigned BINDING_POINT = 2u;
+
+        struct OSGEARTH_EXPORT Material
+        {
+            using Ptr = std::shared_ptr<const Material>;
+            const GLushort index;
+            const Indices textures;
+            // Preserve the existing custom-shader extended-material ID output.
+            const osg::Vec2i extended;
+            //! Return this material's ID to its arena when the final owner releases it.
+            ~Material();
+
+        private:
+            //! Retain the arena and textures; getOrCreate registers the ID after construction.
+            Material(MaterialArena*, GLushort, const Indices&, const osg::Vec2i&,
+                const std::array<std::shared_ptr<Texture>, 5>&);
+            osg::ref_ptr<MaterialArena> _arena;
+            std::array<std::shared_ptr<Texture>, 5> _textures;
+            bool _registered = false;
+            friend class MaterialArena;
+        };
+
+        // std430: five 64-bit handles, followed by two legacy integer IDs.
+        struct GPU
+        {
+            GLuint64 albedo = 0, normal = 0, pbr = 0, material1 = 0, material2 = 0;
+            GLint extended[2] = {-1, -1};
+        };
+
+        //! Reuse or register an immutable material, retaining its referenced textures.
+        //! Texture slots are albedo, normal, PBR, and two extended maps; negative
+        //! indices mean missing textures. Legacy extended IDs also participate in deduplication.
+        //! The returned ID remains valid while any caller retains the material.
+        //! Throws std::length_error if all 65536 IDs are simultaneously in use.
+        //! Throws std::invalid_argument for unregistered textures or a different TextureArena.
+        Material::Ptr getOrCreate(TextureArena&, const Indices&, const osg::Vec2i& extended);
+        //! Acquire an owner for the current material at index, or return empty if unused.
+        Material::Ptr find(GLushort index) const;
+        //! Return the number of registered material keys, excluding reusable slots.
+        std::size_t size() const;
+
+        //! Refresh the current share group's SSBO when either revision changes, then bind it.
+        //! Called by TextureArena with the GL context current and its mutex held.
+        //! handleStride is 1 for its SSBO handle table and 2 for its padded UBO table.
+        void apply(osg::State&, const std::vector<GLuint64>& handles, std::uint64_t revision,
+            unsigned handleStride = 1) const;
+        //! Grow the context cache without allocating GPU buffers; apply creates those lazily.
+        void resizeGLObjectBuffers(unsigned);
+        //! Drop buffers for state's share group, or all groups if null; apply rebuilds them.
+        void releaseGLObjects(osg::State*) const;
+
+    private:
+        using Key = std::array<int, 7>;
+        //! Include legacy IDs so materials with identical textures can keep distinct outputs.
+        static Key key(const Indices&, const osg::Vec2i&);
+        //! Recycle a registered ID and invalidate GPU records; called by Material's destructor.
+        void release(const Material&);
+        mutable std::mutex _mutex;
+        const TextureArena* _textures = nullptr;
+        std::map<Key, GLushort> _lookup;
+        std::vector<std::weak_ptr<const Material>> _materials;
+        std::vector<GLushort> _free;
+        std::uint64_t _revision = 0;
+
+        struct GLObjects : public BindlessShareableGLObjects
+        {
+            GLBuffer::Ptr buffer;
+            std::uint64_t materialsRevision = 0, texturesRevision = 0;
+        };
+        mutable osg::buffered_object<GLObjects> _globjects;
+    };
+}

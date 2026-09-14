@@ -210,7 +210,7 @@ namespace osgEarth
     /**
      * Renders batches of chonks with gpu culling.
      */
-    class OSGEARTH_EXPORT ChonkDrawable : public osg::Geometry //public osg::Drawable
+    class OSGEARTH_EXPORT ChonkDrawable : public osg::Geometry
     {
     public:
         META_Node(osgEarth, ChonkDrawable);
@@ -292,17 +292,33 @@ namespace osgEarth
 
         mutable Mutex _m;
 
-        // Keep me 16-byte aligned
+        // Stable source data, shared by every visible LOD of a placement.
+        // Keep this 80-byte std430 layout in sync with the shader source records.
         struct Instance
         {
             osg::Matrixf xform; // local xform
             osg::Vec2f uv; // tile-local UV
-            GLuint lod;
-            float visibility[2]; // per LOD
             float radius; // per chonk
-            float alphaCutoff;
             GLint first_lod_cmd_index = -1; // invalid instance
         };
+        static_assert(sizeof(Instance) == 80, "Chonk source instance layout must match GLSL");
+        static_assert(offsetof(Instance, xform) == 0 && offsetof(Instance, uv) == 64 &&
+            offsetof(Instance, radius) == 72 && offsetof(Instance, first_lod_cmd_index) == 76,
+            "Chonk source instance offsets must match GLSL std430");
+
+        // One result per visible instance/LOD pair; sourceIndex addresses Instance.
+        // Full-precision fade also preserves the culling debug values above 1.
+        struct VisibleInstance
+        {
+            GLuint sourceIndex;
+            GLuint lod;
+            GLfloat fade;
+            GLfloat alphaCutoff;
+        };
+        static_assert(sizeof(VisibleInstance) == 16, "Chonk visibility records must remain compact");
+        static_assert(offsetof(VisibleInstance, lod) == 4 &&
+            offsetof(VisibleInstance, fade) == 8 && offsetof(VisibleInstance, alphaCutoff) == 12,
+            "Chonk visibility record layout must match GLSL");
         using Instances = std::vector<Instance>;
         using Batches = std::unordered_map<Chonk::Ptr, Instances>;
         Batches _batches;

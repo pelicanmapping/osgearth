@@ -47,20 +47,27 @@ struct ChonkLOD
     uint total_num_commands;
 };
 
+// 80-byte std430 source record; matches ChonkDrawable::Instance.
 struct ChonkInstance
 {
     mat4 xform;
     vec2 local_uv;
-    uint lod;
-    float visibility[2]; // per LOD
     float radius;
-    float alpha_cutoff;
     int first_lod_cmd_index; // -1 means unused
 };
 
-layout(binding = 0) buffer OutputBuffer
+// A visible LOD references the original placement instead of copying its matrix.
+struct ChonkVisibleInstance
 {
-    ChonkInstance output_instances[];
+    uint source_index;
+    uint lod;
+    float fade;
+    float alpha_cutoff;
+};
+
+layout(binding = 0, std430) writeonly buffer OutputBuffer
+{
+    ChonkVisibleInstance output_instances[];
 };
 
 layout(binding = 29) buffer Commands
@@ -73,7 +80,7 @@ layout(binding = 30) readonly buffer ChonkLODs
     ChonkLOD chonks[];
 };
 
-layout(binding = 31) readonly buffer InputBuffer
+layout(binding = 31, std430) readonly buffer InputBuffer
 {
     ChonkInstance input_instances[];
 };
@@ -285,14 +292,12 @@ void cullAndCompact()
     if (fade < 0.1)
         return;
 
-    // Keep per-LOD results local: another invocation may be processing the
-    // same input instance for a different LOD. Rendering reads only the
-    // visibility slot selected by this output record's lod.
-    ChonkInstance result = input_instances[i];
+    // Keep per-LOD results local; multiple visible LODs share the same immutable
+    // source placement. Preserve full precision, including debug fade values.
+    ChonkVisibleInstance result;
+    result.source_index = i;
     result.lod = lod;
-    result.visibility[0] = 0.0;
-    result.visibility[1] = 0.0;
-    result.visibility[lod] = fade;
+    result.fade = fade;
     result.alpha_cutoff = chonks[v].alpha_cutoff;
 
     // baseInstance is fixed before dispatch. The atomic reserves a unique

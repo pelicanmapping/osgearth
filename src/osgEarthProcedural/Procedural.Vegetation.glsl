@@ -3,19 +3,27 @@
 #pragma import_defines(OE_WIND_TEX_MATRIX)
 #pragma import_defines(OE_NOISE_TEX_INDEX)
 
+// 80-byte std430 source record; matches ChonkDrawable::Instance.
 struct Instance
 {
     mat4 xform;
     vec2 local_uv;
-    uint lod;
-    float visibility[2]; // per LOD
     float radius;
-    float alpha_cutoff;
     uint first_lod_cmd_index;
 };
 
-layout(binding = 0, std430) buffer Instances {
+layout(binding = 31, std430) readonly buffer Instances {
     Instance instances[];
+};
+struct VisibleInstance
+{
+    uint source_index;
+    uint lod;
+    float fade;
+    float alpha_cutoff;
+};
+layout(binding = 0, std430) readonly buffer VisibleInstances {
+    VisibleInstance visibleInstances[];
 };
 layout(binding = 1, std430) buffer TextureArena {
     uint64_t textures[];
@@ -34,7 +42,9 @@ uniform float osg_FrameTime;
 uniform mat4 osg_ViewMatrixInverse;
 uniform float oe_wind_power = 1.0;
 
-void oe_apply_wind(inout vec4 vertex, in int index)
+// Apply wind using the original placement's transform and tile UV, addressed
+// by the visible record's source index rather than the compacted draw index.
+void oe_apply_wind(inout vec4 vertex, in uint index)
 {    // scale the vert's flexibility by the model Z scale factor
 
     mat3 vec3xform = mat3(instances[index].xform);
@@ -69,14 +79,16 @@ void oe_apply_wind(inout vec4 vertex, in int index)
 }
 #endif
 
+// Resolve this draw's LOD and use its source placement for wind deformation.
 void oe_vegetation_vs_view(inout vec4 vertex)
 {
     int i = gl_BaseInstance + gl_InstanceID;
-    oe_lod = instances[i].lod;
+    VisibleInstance visible = visibleInstances[i];
+    oe_lod = visible.lod;
 
 #ifdef OE_WIND_TEX
     if (oe_lod == 0)
-        oe_apply_wind(vertex, i);
+        oe_apply_wind(vertex, visible.source_index);
 #endif
 }
 

@@ -46,7 +46,7 @@ static_assert(offsetof(Chonk::VertexGPU, material_index) == 30, "Material ID occ
 // These are all in bytes
 #define COMMAND_BUF_CHUNK_SIZE 512
 #define INPUT_BUF_CHUNK_SIZE (1024 * 512)
-#define OUTPUT_BUF_CHUNK_SIZE (INPUT_BUF_CHUNK_SIZE * 2)
+#define OUTPUT_BUF_CHUNK_SIZE (128 * 1024)
 #define CHONK_BUF_CHUNK_SIZE 256
 
 namespace
@@ -1195,9 +1195,6 @@ ChonkDrawable::add(Chonk::Ptr chonk, const osg::Matrixf& xform, const osg::Vec2f
         Instance instance;
         instance.xform = xform;
         instance.uv = local_uv;
-        instance.lod = 0;
-        instance.visibility[0] = 0;
-        instance.visibility[1] = 0;
         // A conservative spectral-norm bound: the largest absolute row sum
         // of A*A^T bounds its largest eigenvalue. Exact for orthogonal TRS
         // axes, and conservative for shear and reflections as well.
@@ -1214,7 +1211,6 @@ ChonkDrawable::add(Chonk::Ptr chonk, const osg::Matrixf& xform, const osg::Vec2f
             maxRow = std::max(maxRow, row);
         }
         instance.radius = chonk->getBound().radius() * std::sqrt(maxRow);
-        instance.alphaCutoff = 0.0f;
         instance.first_lod_cmd_index = 0;
 
         _batches[chonk].emplace_back(std::move(instance));
@@ -1516,8 +1512,12 @@ ChonkDrawable::GLObjects::update(
     // record for each variant (LOD) of each chonk
     _chonk_lods.clear();
 
-    // build a LUT of all instances by (gl_InstanceID + gl_BaseInstance).
+    // Stable source records, addressed by each visibility record's sourceIndex.
     _all_instances.clear();
+
+    // When GPU culling is disabled, build the same visible-list layout once
+    // per update. Draw commands reference this dense list, skipping source padding.
+    std::vector<VisibleInstance> unculledInstances;
 
     std::size_t max_lod_count = 0;
     unsigned outputOffset = 0u;
@@ -1538,7 +1538,7 @@ ChonkDrawable::GLObjects::update(
             // Each batch/LOD has room for every input instance. The compute
             // shader compacts inside this range, avoiding an atomic update of
             // every subsequent command for each visible instance.
-            _commands.back().cmd.baseInstance = _gpucull ? outputOffset : _all_instances.size();
+            _commands.back().cmd.baseInstance = _gpucull ? outputOffset : unculledInstances.size();
             if (!_gpucull)
                 _commands.back().cmd.instanceCount = i == 0 ? instances.size() : 0;
             outputOffset += instances.size();
@@ -1568,14 +1568,10 @@ ChonkDrawable::GLObjects::update(
         // shader will need.
         for (auto& instance : instances)
         {
+            if (!_gpucull)
+                unculledInstances.push_back({ GLuint(_all_instances.size()), 0u, 1.0f, alphaCutoff });
             _all_instances.push_back(instance);
             _all_instances.back().first_lod_cmd_index = first_lod_cmd_index;
-            if (!_gpucull)
-            {
-                _all_instances.back().lod = 0;
-                _all_instances.back().visibility[0] = 1.0f;
-                _all_instances.back().alphaCutoff = alphaCutoff;
-            }
         }
 
         // pad out the size of the instances array so it's a multiple of the
@@ -1628,25 +1624,26 @@ ChonkDrawable::GLObjects::update(
             _chonkBuf->unbind();
         }
         _chonkBuf->uploadData(_chonk_lods, GL_STATIC_DRAW);
-        
-        // just reserve space if necessary - make sure there's enough space
-        // for 2 LODs for each instance so we can do transitioning!
-        // If someday, we draw more than 2 LODs at a time, we'll need to
-        // up this buffer size!!
-        if (!_instanceOutputBuf)
-        {
-            GLsizei sizeHint = _all_instances.size() * sizeof(Instance) * 2;
-            _instanceOutputBuf = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state, sizeHint, OUTPUT_BUF_CHUNK_SIZE);
-            _instanceOutputBuf->bind();
-            _instanceOutputBuf->debugLabel("Chonk drawable", "output " + host->getName());
-            _instanceOutputBuf->unbind();
-        }
-        _instanceOutputBuf->uploadData(_instanceInputBuf->size() * 2, nullptr);
     }
     else
     {
         _commandBuf->uploadData(_commands);
     }
+
+    // Reserve one small record for every possible survivor in the CPU-assigned
+    // command ranges. Source-buffer allocation padding needs no output records.
+    GLsizei outputSize = (_gpucull ? outputOffset : unculledInstances.size()) * sizeof(VisibleInstance);
+    if (!_instanceOutputBuf)
+    {
+        _instanceOutputBuf = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state, outputSize, OUTPUT_BUF_CHUNK_SIZE);
+        _instanceOutputBuf->bind();
+        _instanceOutputBuf->debugLabel("Chonk drawable", "visible instances " + host->getName());
+        _instanceOutputBuf->unbind();
+    }
+    if (_gpucull)
+        _instanceOutputBuf->uploadData(outputSize, nullptr);
+    else
+        _instanceOutputBuf->uploadData(unculledInstances, GL_STATIC_DRAW);
 
     _numInstances = _all_instances.size();
     _maxNumLODs = max_lod_count;
@@ -1706,12 +1703,10 @@ ChonkDrawable::GLObjects::draw(osg::State& state)
     // bind the command list for drawing
     _commandBuf->bind(GL_DRAW_INDIRECT_BUFFER);
 
-    // make the instance LUT visible in the shader
-    // (use gl_InstanceID + gl_BaseInstance to access)
-    if (_gpucull)
-        _instanceOutputBuf->bindBufferBase(0);
-    else
-        _instanceInputBuf->bindBufferBase(0);
+    // Rebind both tables: all cull leaves run before the draw leaves, so the
+    // source binding left by the culler may belong to a different drawable.
+    _instanceOutputBuf->bindBufferBase(0);
+    _instanceInputBuf->bindBufferBase(31);
 
     GLenum elementType = sizeof(Chonk::element_t) == sizeof(GLushort) ?
         GL_UNSIGNED_SHORT :

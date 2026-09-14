@@ -12,18 +12,26 @@
 #define OE_CHONK_MAX_LOD_FOR_PBR_MAPS 99
 #endif
 
+// 80-byte std430 source record; matches ChonkDrawable::Instance.
 struct ChonkInstance
 {
     mat4 xform;
     vec2 local_uv;
-    uint lod;
-    float visibility[2]; // per LOD
     float radius;
-    float alpha_cutoff;
     uint first_lod_cmd_index;
 };
-layout(binding = 0, std430) buffer ChonkInstances {
+layout(binding = 31, std430) readonly buffer ChonkInstances {
     ChonkInstance chonkInstances[];
+};
+struct ChonkVisibleInstance
+{
+    uint source_index;
+    uint lod;
+    float fade;
+    float alpha_cutoff;
+};
+layout(binding = 0, std430) readonly buffer ChonkVisibleInstances {
+    ChonkVisibleInstance chonkVisibleInstances[];
 };
 struct ChonkMaterial
 {
@@ -72,13 +80,15 @@ flat out ivec2 oe_extended_materials;
 flat out uint64_t oe_material1_tex;
 flat out uint64_t oe_material2_tex;
 
-// Transform this instance and resolve its vertex material ID to cached handles.
+// Resolve the visible LOD to its stable source placement, then transform the
+// vertex and resolve its material ID to cached handles.
 // Keep legacy extended IDs available to custom shaders and honor map LOD limits.
 void oe_chonk_default_vertex_model(inout vec4 vertex)
 {
-    int i = gl_BaseInstance + gl_InstanceID;
+    ChonkVisibleInstance visible = chonkVisibleInstances[gl_BaseInstance + gl_InstanceID];
+    uint i = visible.source_index;
 
-    chonk_lod = chonkInstances[i].lod;
+    chonk_lod = visible.lod;
 
     vertex = chonkInstances[i].xform * vec4(position, 1.0);
     vp_Color = color;
@@ -87,8 +97,8 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
     vp_Normal = transpose(inverse(xform3)) * normal;
     oe_normal_technique = normal_technique;
     oe_tex_uv = uv;
-    oe_alpha_cutoff = chonkInstances[i].alpha_cutoff;
-    oe_fade = chonkInstances[i].visibility[chonk_lod];
+    oe_alpha_cutoff = visible.alpha_cutoff;
+    oe_fade = visible.fade;
     oe_albedo_tex = chonkMaterials[material_index].albedo;
     oe_extended_materials = chonkMaterials[material_index].extended;
     oe_material1_tex = chonkMaterials[material_index].material1;

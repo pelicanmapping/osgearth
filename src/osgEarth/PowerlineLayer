@@ -15,7 +15,7 @@ namespace osgEarth
     {
     public:
         //! Configuration for the towers.
-        class ModelOptions : public ConfigOptions
+        class OSGEARTH_EXPORT ModelOptions : public ConfigOptions
         {
         public:
             META_ConfigOptions(osgEarth, ModelOptions, ConfigOptions);

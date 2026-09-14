@@ -824,8 +824,7 @@ namespace
                 m(0,3) == 0.0 && m(1,3) == 0.0 && m(2,3) == 0.0 && m(3,3) == 1.0;
         }
 
-        osg::ref_ptr<osg::Node> convert(osg::Node* node,
-            const osg::Matrixd& parent, ChonkDrawable* drawable)
+        osg::ref_ptr<osg::Node> convert(osg::Node* node, const osg::Matrixd& parent, ChonkDrawable* drawable)
         {
             if (auto* external = dynamic_cast<InstancedExternalNode*>(node))
             {
@@ -835,9 +834,13 @@ namespace
                     return node;
                 for (const auto& matrix : external->getMatrices())
                     if (!positiveAffine(osg::Matrixd(matrix) * parent)) return node;
-                // Match ChonkDrawable::add: global SSE sets the minimum
-                // instance pixel size independently of tile paging thresholds.
-                auto chonk = _factory->getOrCreateChonk(payload.get(), 1.0f);
+
+                // TODO: if we want pixel-size culling, pass near/far scales to the factory.
+                // example:
+                // auto chonk = _factory->getOrCreateChonk(payload.get(), 1.0f, 100.0f);
+                // By default no scales are set meaning no pixel-size culling.
+                
+                auto chonk = _factory->getOrCreateChonk(payload.get());
                 if (!chonk) return node;
                 for (const auto& matrix : external->getMatrices())
                     drawable->add(chonk, osg::Matrixf(osg::Matrixd(matrix) * parent));

@@ -352,11 +352,6 @@ namespace osgEarth
             void(GL_APIENTRY * _glMultiDrawElementsIndirectBindlessNV)
                 (GLenum, GLenum, const GLvoid*, GLsizei, GLsizei, GLint);
 
-            struct PCPState {
-                GLint _passUL = -1;
-            };
-            mutable std::unordered_map<const void*, PCPState> _pcps;
-
             void initialize(
                 const osg::Object* host, osg::State& state);
             void update(
@@ -364,6 +359,8 @@ namespace osgEarth
                 float fadeNear, float fadeFar,
                 double birthday, float alphaCutoff,
                 osg::State&);
+            // Resets draw counts and culls/compacts in one compute dispatch.
+            // Requires the culling program to be active on this context.
             void cull(osg::State& state);
             void draw(osg::State& state);
             void release();

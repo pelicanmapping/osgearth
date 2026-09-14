@@ -1664,15 +1664,10 @@ ChonkDrawable::GLObjects::cull(osg::State& state)
 
     auto ext = _vao->ext();
 
-    auto pcp = state.getLastAppliedProgramObject();
-    OE_HARD_ASSERT(pcp != nullptr, "Check for shader errors!");
-    PCPState& ps = _pcps[pcp];
-    if (ps._passUL < 0)
-    {
-        ps._passUL = pcp->getUniformLocation("oe_pass");
-    }
+    OE_HARD_ASSERT(state.getLastAppliedProgramObject() != nullptr, "Check for shader errors!");
 
-    // reset the command buffer values
+    // Start each dispatch with empty output ranges. Surviving instance/LOD
+    // pairs atomically increment these counts as they write their records.
     for (auto& command : _commands)
     {
         command.cmd.instanceCount = 0;
@@ -1684,28 +1679,13 @@ ChonkDrawable::GLObjects::cull(osg::State& state)
     _chonkBuf->bindBufferBase(30);
     _instanceInputBuf->bindBufferBase(31);
 
-    // 2-pass culling compute. 
-    // Note. I tried separating this out so that all "pass ones"
-    // would run, and then all "pass twos" afterwards, in an attempt
-    // to avoid the memory barrier and multiple uniform sets.
-    // It was slower. Maybe because if was offset by having to 
-    // double-set the the matrix uniforms and the bindBufferBase
-    // calls for each tile.
-    // Also, removing the memory barrier seems to make no difference,
-    // but it's the right thing to do
-
     // calculate number of workgroups.
     // (todo: this is probably unnecessary since we already padded the 
     // instances array before computing _numInstances)
     unsigned workgroups = (_numInstances + (GPU_CULLING_LOCAL_WG_SIZE-1)) / GPU_CULLING_LOCAL_WG_SIZE;
 
-    // cull:
-    ext->glUniform1i(ps._passUL, 0);
-    ext->glDispatchCompute(workgroups, _maxNumLODs, 1);
-
-    // compact:
-    ext->glUniform1i(ps._passUL, 1);
-    ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    // Fixed CPU-assigned output ranges let each invocation cull and compact
+    // independently. DrawLeaf publishes the results before the first draw.
     ext->glDispatchCompute(workgroups, _maxNumLODs, 1);
 }
 
@@ -1730,10 +1710,6 @@ ChonkDrawable::GLObjects::draw(osg::State& state)
     else
         _instanceInputBuf->bindBufferBase(0);
 
-    // likely do not need this here since the cull leafs execute 
-    // before the raw leafs. Reevaluate if necessary.
-    //_ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
     GLenum elementType = sizeof(Chonk::element_t) == sizeof(GLushort) ?
         GL_UNSIGNED_SHORT :
         GL_UNSIGNED_INT;
@@ -1757,7 +1733,6 @@ ChonkDrawable::GLObjects::release()
     _instanceOutputBuf = nullptr;
     _chonkBuf = nullptr;
     _commands.clear();
-    _pcps.clear(); // clear cached program-state map to prevent unbounded growth
     _dirty = true;
 }
 
@@ -1833,6 +1808,8 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
     {
         auto& gl = ChonkDrawable::GLObjects::get(drawable->_globjects, state);
         state.bindVertexArrayObject(gl._vao->name());
+        // Publish all culling dispatches to both the vertex shader's instance
+        // lookup and the indirect draw command reader before drawing the bin.
         gl._vao->ext()->glMemoryBarrier(
             GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
     }

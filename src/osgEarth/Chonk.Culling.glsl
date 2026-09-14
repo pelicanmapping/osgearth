@@ -68,12 +68,12 @@ layout(binding = 29) buffer Commands
     DrawElementsIndirectBindlessCommandNV commands[];
 };
 
-layout(binding = 30) buffer ChonkLODs
+layout(binding = 30) readonly buffer ChonkLODs
 {
     ChonkLOD chonks[];
 };
 
-layout(binding = 31) buffer InputBuffer
+layout(binding = 31) readonly buffer InputBuffer
 {
     ChonkInstance input_instances[];
 };
@@ -135,7 +135,10 @@ void compute_clip_mbb(in vec4 p_view, in float r, in mat4 proj, out vec4 LL, out
 
 
 
-void cull()
+// Culls one instance/LOD pair and appends a survivor to its command's output
+// range. The CPU reserves room for every input instance in each range and
+// resets the command counts before dispatch; no inter-workgroup barrier is needed.
+void cullAndCompact()
 {
     const uint i = gl_GlobalInvocationID.x; // instance
     const uint lod = gl_GlobalInvocationID.y; // lod
@@ -143,9 +146,6 @@ void cull()
     // skip instances that exist only to pad the instance array to the workgroup size:
     if (input_instances[i].first_lod_cmd_index < 0)
         return;
-
-    // initialize by clearing the visibility for this LOD:
-    input_instances[i].visibility[lod] = 0.0;
 
     // bail if our chonk does not have this LOD
     uint first = input_instances[i].first_lod_cmd_index;
@@ -285,41 +285,25 @@ void cull()
     if (fade < 0.1)
         return;
 
-    // Pass! Set the visibility for this LOD:
-    input_instances[i].visibility[lod] = fade;
+    // Keep per-LOD results local: another invocation may be processing the
+    // same input instance for a different LOD. Rendering reads only the
+    // visibility slot selected by this output record's lod.
+    ChonkInstance result = input_instances[i];
+    result.lod = lod;
+    result.visibility[0] = 0.0;
+    result.visibility[1] = 0.0;
+    result.visibility[lod] = fade;
+    result.alpha_cutoff = chonks[v].alpha_cutoff;
 
-    // Send along the other values:
-    input_instances[i].alpha_cutoff = chonks[v].alpha_cutoff;
-
-    // baseInstance is a fixed range assigned to this batch/LOD by the CPU.
-}
-
-// Copies the visible instances to a compacted output buffer.
-void compact()
-{
-    const uint i = gl_GlobalInvocationID.x; // instance
-    const uint lod = gl_GlobalInvocationID.y; // lod
-
-    float fade = input_instances[i].visibility[lod];
-    if (fade < 0.1)
-        return;
-
-    uint v = input_instances[i].first_lod_cmd_index + lod;
+    // baseInstance is fixed before dispatch. The atomic reserves a unique
+    // slot within this batch/LOD's range, including during LOD cross-fades.
     uint offset = commands[v].cmd.baseInstance;
     uint index = atomicAdd(commands[v].cmd.instanceCount, 1);
-
-    // Lazy! Re-using the instance struct for render leaves..
-    output_instances[offset + index] = input_instances[i];
-    output_instances[offset + index].lod = lod;
+    output_instances[offset + index] = result;
 }
 
-// Entry point.
-uniform int oe_pass;
-
+// Each invocation independently culls and emits one instance/LOD pair.
 void main()
 {
-    if (oe_pass == 0)
-        cull();
-    else // if (oe_pass == 1)
-        compact();
+    cullAndCompact();
 }

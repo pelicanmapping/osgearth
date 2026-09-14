@@ -28,3 +28,8 @@ To run benchmarks run this command from the tests directory
 ```
 osgearth_benchmarks
 ```
+
+Document every new function with a concise comment describing its purpose and,
+where relevant, its ownership, threading, preconditions, and failure behavior.
+Include new helpers and test/benchmark functions; explain non-obvious reasoning
+instead of merely restating the function name.

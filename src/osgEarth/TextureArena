@@ -6,12 +6,14 @@
 
 #include <osgEarth/Common>
 #include <osgEarth/GLUtils>
+#include <osgEarth/MaterialArena>
 #include <osgEarth/URI>
 #include <osg/Object>
 #include <osg/StateAttribute>
 #include <osg/buffered_value>
 #include <osg/Image>
 #include <queue>
+#include <mutex>
 #include <unordered_set>
 
 namespace osgEarth
@@ -100,6 +102,7 @@ namespace osgEarth
         {
             GLTexture::Ptr _gltexture;
             unsigned _imageModCount = 0u;
+            bool _compileFailed = false;
         };
         mutable osg::buffered_object<GLObjects> _globjects;
 
@@ -114,6 +117,11 @@ namespace osgEarth
     protected:
         Texture(GLenum target);
         Texture(osg::Texture*);
+        bool needsCompile_no_lock(const osg::State&) const;
+
+        // The ICO can compile a shared texture while an arena renders it.
+        // Protect GL object creation, residency, and release as one operation.
+        mutable std::mutex _glMutex;
         void* _host;
         friend class TextureArena;
     };
@@ -138,6 +146,9 @@ namespace osgEarth
 
         //! Construct an empty arena.
         TextureArena();
+
+        //! Material table sharing this arena's texture lifetime and GL handles.
+        MaterialArena* getMaterialArena() const;
 
         //! Whether to automatically release textures when they are no longer
         //! referenced anywhere outside of this arena. Default is false.
@@ -205,7 +216,7 @@ namespace osgEarth
 
     private:
         //! disable copy
-        TextureArena(const TextureArena&, const osg::CopyOp&) { }
+        TextureArena(const TextureArena&, const osg::CopyOp&) : TextureArena() { }
 
         void releaseGLObjects(osg::State*, bool force) const;
 
@@ -220,8 +231,12 @@ namespace osgEarth
             TextureVector _toRemove;
             GLBuffer::Ptr _handleBuffer;
             std::vector<GLuint64> _handles;
+            std::uint64_t _handleRevision = 0;
+            std::unordered_map<const osg::GraphicsContext*, std::uint64_t> _residentRevisions;
         };
         mutable osg::buffered_object<GLObjects> _globjects;
+
+        osg::ref_ptr<MaterialArena> _materials;
 
         mutable TextureVector _textures;
         mutable std::unordered_map<Texture*, unsigned> _textureIndices;

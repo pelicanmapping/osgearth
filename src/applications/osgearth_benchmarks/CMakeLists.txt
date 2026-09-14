@@ -3,6 +3,7 @@ find_package(benchmark CONFIG REQUIRED)
 set(TARGET_SRC
     main.cpp
     ChonkBenchmarks.cpp
+    ChonkMaterialBenchmarks.cpp
     VirtualProgramBenchmarks.cpp
     VirtualProgramProfileBenchmarks.cpp
     CacheBenchmarks.cpp)

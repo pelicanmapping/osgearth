@@ -501,8 +501,11 @@ namespace osgEarth
         //! Binds this texture to `target`
         void bind(osg::State& state);
 
-        //! Returns the GPU address of a bindless texture
+        //! Returns the GPU address of a bindless texture, or zero on failure.
         GLuint64 handle(osg::State& state);
+
+        //! Can suppress repeated diagnostics during a retry.
+        GLuint64 handle(osg::State& state, bool reportFailure);
 
         //! Toggles the bindless texture residency in the unique
         //! graphics context associated with `state`.

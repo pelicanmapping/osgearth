@@ -234,9 +234,11 @@ TEST_CASE("ShaderGenerator retains PBR descriptors and stable component bindings
     ChonkFactory factory(arena);
     auto chonk = factory.getOrCreateChonk(geometry);
     REQUIRE(chonk);
-    REQUIRE(chonk->_vbo_store.front().pbr_index >= 0);
-    REQUIRE(chonk->_vbo_store.front().albedo_index >= 0);
-    REQUIRE(chonk->_vbo_store.front().normalmap_index >= 0);
+    auto chonkMaterial = arena->getMaterialArena()->find(chonk->_vbo_store.front().material_index);
+    REQUIRE(chonkMaterial);
+    REQUIRE(chonkMaterial->textures[2] >= 0);
+    REQUIRE(chonkMaterial->textures[0] >= 0);
+    REQUIRE(chonkMaterial->textures[1] >= 0);
     REQUIRE(chonk->_vbo_store.front().color_is_linear == 1);
 }
 

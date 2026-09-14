@@ -3,6 +3,7 @@
 * MIT License
 */
 #include "TextureArena"
+#include "MaterialArena"
 #include "ImageUtils"
 #include "Math"
 #include "Metrics"
@@ -153,18 +154,27 @@ Texture::getPixelFormat() const
 GLTexture::Ptr
 Texture::getGLObject(osg::State& state) const
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
     return GLObjects::get(_globjects, state)._gltexture;
 }
 
 bool
 Texture::isCompiled(const osg::State& state) const
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
     auto gltex = GLObjects::get(_globjects, state)._gltexture;
     return gltex != nullptr && gltex->valid();
 }
 
 bool
 Texture::needsCompile(const osg::State& state) const
+{
+    std::lock_guard<std::mutex> lock(_glMutex);
+    return needsCompile_no_lock(state);
+}
+
+bool
+Texture::needsCompile_no_lock(const osg::State& state) const
 {
     auto& gc = GLObjects::get(_globjects, state);
 
@@ -217,7 +227,9 @@ Texture::isFBO() const
 bool
 Texture::compileGLObjects(osg::State& state) const
 {
-    if (!needsCompile(state))
+    std::lock_guard<std::mutex> lock(_glMutex);
+
+    if (!needsCompile_no_lock(state))
         return false;
 
     OE_DEBUG << LC << "Compiling " << name() << std::endl;
@@ -242,15 +254,24 @@ Texture::compileGLObjects(osg::State& state) const
     }
 
     auto* to = osgTexture()->getTextureObject(state.getContextID());
-    if (to)
+    if (to && to->isAllocated())
     {
         // This texture already HAS a compiled texture object, so let's wrap it.
         // The caller remains responsible for the texture's lifetime.
-        gc._gltexture = GLTexture::wrap(to->target(), to->id(), state);
+        auto gltexture = GLTexture::wrap(to->target(), to->id(), state);
+        gltexture->debugLabel(category(), name());
 
         // Create bindless handle and make it resident!
-        gc._gltexture->handle(state);
-        gc._gltexture->makeResident(state, true);
+        if (gltexture->handle(state, !gc._compileFailed) == 0)
+        {
+            gc._compileFailed = true;
+            return false;
+        }
+        gltexture->makeResident(state, true);
+        gc._gltexture = std::move(gltexture);
+        gc._compileFailed = false;
+        if (image)
+            gc._imageModCount = image->getModifiedCount();
 
         return true;
     }
@@ -334,29 +355,36 @@ Texture::compileGLObjects(osg::State& state) const
             clamp_r() ? GL_CLAMP_TO_EDGE : GL_REPEAT,
             maxAnisotropy().getOrUse(4.0f));
 
-        gc._gltexture = GLTexture::create(
+        auto gltexture = GLTexture::create(
             target(),
             state,
             profileHint);
 
-        OE_SOFT_ASSERT(gc._gltexture->name() != 0, "Oh no, GLTexture name == 0");
+        OE_SOFT_ASSERT(gltexture->name() != 0, "Oh no, GLTexture name == 0");
 
-        gc._gltexture->bind(state);
+        gltexture->bind(state);
 
-        gc._gltexture->debugLabel(category(), name());
+        gltexture->debugLabel(category(), name());
 
         if (target() == GL_TEXTURE_2D)
         {
-            gc._gltexture->storage2D(profileHint);
+            gltexture->storage2D(profileHint);
         }
         else if (target() == GL_TEXTURE_3D || target() == GL_TEXTURE_2D_ARRAY)
         {
-            gc._gltexture->storage3D(profileHint);
+            gltexture->storage3D(profileHint);
         }
 
         // Force creation of the bindless handle - once you do this, you can
         // no longer change the texture parameters.
-        gc._gltexture->handle(state);
+        if (gltexture->handle(state, !gc._compileFailed) == 0)
+        {
+            gc._compileFailed = true;
+            // This allocation belongs to us. Do not leave failed storage in
+            // the recycling pool, where it would be reused on the next retry.
+            gltexture->release();
+            return false;
+        }
 
         // debugging
         OE_DEVEL << LC
@@ -409,7 +437,7 @@ Texture::compileGLObjects(osg::State& state) const
 
                             if (compressed)
                             {
-                                gc._gltexture->compressedSubImage2D(
+                                gltexture->compressedSubImage2D(
                                     mipLevel - firstMipLevel,
                                     0, 0, // xoffset, yoffset
                                     mipLevelWidth, mipLevelHeight,
@@ -419,7 +447,7 @@ Texture::compileGLObjects(osg::State& state) const
                             }
                             else
                             {
-                                gc._gltexture->subImage2D(
+                                gltexture->subImage2D(
                                     mipLevel - firstMipLevel,
                                     0, 0, // xoffset, yoffset
                                     mipLevelWidth, mipLevelHeight,
@@ -436,7 +464,7 @@ Texture::compileGLObjects(osg::State& state) const
 
                             if (compressed)
                             {
-                                gc._gltexture->compressedSubImage3D(
+                                gltexture->compressedSubImage3D(
                                     mipLevel - firstMipLevel,
                                     0, 0, // xoffset, yoffset
                                     imageIndex + r, // zoffset (array layer)
@@ -448,7 +476,7 @@ Texture::compileGLObjects(osg::State& state) const
                             }
                             else
                             {
-                                gc._gltexture->subImage3D(
+                                gltexture->subImage3D(
                                     mipLevel - firstMipLevel,
                                     0, 0, // xoffset, yoffset
                                     imageIndex + r, // zoffset (array layer)
@@ -484,7 +512,9 @@ Texture::compileGLObjects(osg::State& state) const
         }
 
         // finally, make it resident.
-        gc._gltexture->makeResident(state, true);
+        gltexture->makeResident(state, true);
+        gc._gltexture = std::move(gltexture);
+        gc._compileFailed = false;
     }
 
     // sync the mod counts.
@@ -499,6 +529,7 @@ Texture::compileGLObjects(osg::State& state) const
 void
 Texture::makeResident(const osg::State& state, bool toggle) const
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
     auto& gc = GLObjects::get(_globjects, state);
 
     if (gc._gltexture != nullptr && gc._gltexture->valid())
@@ -514,6 +545,7 @@ Texture::makeResident(const osg::State& state, bool toggle) const
 bool
 Texture::isResident(const osg::State& state) const
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
     auto& gc = GLObjects::get(_globjects, state);
     return (gc._gltexture != nullptr && gc._gltexture->isResident(state));
 }
@@ -521,6 +553,7 @@ Texture::isResident(const osg::State& state) const
 void
 Texture::resizeGLObjectBuffers(unsigned maxSize)
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
     if (_globjects.size() < maxSize)
         _globjects.resize(maxSize);
 
@@ -531,6 +564,8 @@ Texture::resizeGLObjectBuffers(unsigned maxSize)
 void
 Texture::releaseGLObjects(osg::State* state, bool force) const
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
+
     // If this texture has a valid host that means it
     // belongs to an arena, which will take responsibility
     // for GL release.
@@ -578,7 +613,7 @@ Texture::releaseGLObjects(osg::State* state, bool force) const
 #define LC "[TextureArena] "
 
 
-TextureArena::TextureArena()
+TextureArena::TextureArena() : _materials(new MaterialArena())
 {
     // Keep this synchronous w.r.t. the render thread since we are
     // going to be changing things on the fly
@@ -591,6 +626,13 @@ TextureArena::TextureArena()
 TextureArena::~TextureArena()
 {
     releaseGLObjects(nullptr);
+}
+
+// Return the shared material registry whose GPU handles this texture arena
+// refreshes during apply. The returned pointer is owned by this TextureArena.
+MaterialArena* TextureArena::getMaterialArena() const
+{
+    return _materials.get();
 }
 
 void
@@ -921,10 +963,13 @@ TextureArena::flush()
 void
 TextureArena::apply(osg::State& state) const
 {
-    if (_textures.empty())
-        return;
-
     std::lock_guard<std::mutex> lock(_m);
+
+    if (_textures.empty())
+    {
+        _materials->apply(state, {}, 0);
+        return;
+    }
 
     OE_PROFILING_ZONE;
 
@@ -951,7 +996,7 @@ TextureArena::apply(osg::State& state) const
         for (auto& i : _dynamicTextures)
         {
             auto tex = _textures[i];
-            if (tex && tex->needsCompile(state))
+            if (tex && !tex->dormant() && tex->needsCompile(state))
             {
                 gc._toCompile.push(i);
             }
@@ -1012,11 +1057,22 @@ TextureArena::apply(osg::State& state) const
 
             unsigned num_compiled = 0;
 
-            while (!gc._toCompile.empty())
+            // A failed compile stays queued for the next frame. Process only
+            // this batch so a persistent failure cannot spin in this draw.
+            const auto numToCompile = gc._toCompile.size();
+            std::unordered_set<int> attempted;
+            attempted.reserve(numToCompile);
+            for (std::size_t i = 0; i < numToCompile; ++i)
             {
                 int ptr = gc._toCompile.front();
                 gc._toCompile.pop();
+                // Dynamic updates can enqueue a texture that is already
+                // waiting for a retry. Compile it at most once per batch.
+                if (!attempted.insert(ptr).second)
+                    continue;
                 auto tex = _textures[ptr];
+                if (tex && tex->dormant())
+                    continue;
                 if (tex)
                 {
                     if (tex->compileGLObjects(state))
@@ -1024,11 +1080,11 @@ TextureArena::apply(osg::State& state) const
                         ++num_compiled;
                         OE_DEVEL << "Compiled on demand = " << tex->name() << " " << (std::uintptr_t)tex.get() << std::endl;
                     }
+                    if (tex->needsCompile(state))
+                        gc._toCompile.push(ptr);
                 }
 
-                GLTexture* gltex = nullptr;
-                if (tex)
-                    gltex = Texture::GLObjects::get(tex->_globjects, state)._gltexture.get();
+                auto gltex = tex ? tex->getGLObject(state) : GLTexture::Ptr();
 
                 GLuint64 handle = gltex ? gltex->handle(state) : 0ULL;
                 unsigned index = _useUBO ? ptr * 2 : ptr; // hack for std140 vec4 alignment
@@ -1078,9 +1134,20 @@ TextureArena::apply(osg::State& state) const
     {
         gc._handleBuffer->uploadData(gc._handles);
         gc._handleBufferDirty = false;
+        ++gc._handleRevision;
+    }
+
+    // Handles are shareable; residency must be established in each context.
+    auto& residentRevision = gc._residentRevisions[state.getGraphicsContext()];
+    if (residentRevision != gc._handleRevision)
+    {
+        for (const auto& texture : _textures)
+            if (texture && !texture->dormant()) texture->makeResident(state, true);
+        residentRevision = gc._handleRevision;
     }
 
     gc._handleBuffer->bindBufferBase(_bindingPoint);
+    _materials->apply(state, gc._handles, gc._handleRevision, _useUBO ? 2u : 1u);
 }
 
 void
@@ -1113,6 +1180,7 @@ void
 TextureArena::resizeGLObjectBuffers(unsigned maxSize)
 {
     std::lock_guard<std::mutex> lock(_m);
+    _materials->resizeGLObjectBuffers(maxSize);
 
     if (_globjects.size() < maxSize)
     {
@@ -1136,6 +1204,7 @@ void
 TextureArena::releaseGLObjects(osg::State* state, bool force) const
 {
     std::lock_guard<std::mutex> lock(_m);
+    _materials->releaseGLObjects(state);
 
     //OE_DEVEL << LC << "releaseGLObjects on arena " << getName() << std::endl;
 

@@ -2,6 +2,7 @@ set(TARGET_SRC
     main.cpp
     CacheTests.cpp
     ChonkTests.cpp
+    ChonkMaterialTests.cpp
     ConfigTests.cpp
     CoverageTests.cpp
     EndianTests.cpp
@@ -15,6 +16,7 @@ set(TARGET_SRC
     SpatialReferenceTests.cpp
     StringUtilsTests.cpp
     ThreadingTests.cpp
+    TextureArenaTests.cpp
     VirtualProgramTests.cpp)
 
 add_osgearth_app(

@@ -11,6 +11,7 @@
 #include <osg/observer_ptr>
 #include <osg/CullFace>
 #include <osg/FrontFace>
+#include <osg/Texture2D>
 #include <osgDB/FileNameUtils>
 #include <osgDB/FileUtils>
 #include <osgDB/ReaderWriter>
@@ -44,6 +45,14 @@
 #include <sstream>
 #include <utility>
 
+// These extension tokens are absent from some OSG GL headers.
+#ifndef GL_COMPRESSED_SRGB_S3TC_DXT1_EXT
+#define GL_COMPRESSED_SRGB_S3TC_DXT1_EXT 0x8C4C
+#endif
+#ifndef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT
+#define GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT 0x8C4F
+#endif
+
 using namespace osgEarth;
 using namespace osgEarth::Util;
 
@@ -57,6 +66,59 @@ public:
         std::unordered_map<std::string, osg::observer_ptr<PBRTexture>> >;
 
     struct NodeBuilder;
+
+    // OSG 3.6 cannot size sRGB S3TC formats when uploading Texture2D images.
+    // Keep the linear BC pixel format for block sizing and the sRGB internal
+    // format for GPU sampling. TextureArena handles its own uploads separately.
+    struct CompressedSRGBUpload : osg::Texture2D::SubloadCallback
+    {
+        static unsigned mipLevels(const osg::Texture2D& texture)
+        {
+            const auto* image = texture.getImage();
+            const auto filter = texture.getFilter(osg::Texture::MIN_FILTER);
+            return !image->isMipmap() && filter != osg::Texture::LINEAR && filter != osg::Texture::NEAREST ?
+                osg::Image::computeNumberOfMipmapLevels(image->s(), image->t()) : image->getNumMipmapLevels();
+        }
+
+        bool textureObjectValid(const osg::Texture2D& texture, osg::State& state) const override
+        {
+            const auto* image = texture.getImage();
+            auto* object = texture.getTextureObject(state.getContextID());
+            return image && object && object->match(GL_TEXTURE_2D, mipLevels(texture),
+                texture.getInternalFormat(), image->s(), image->t(), 1, 0);
+        }
+
+        void load(const osg::Texture2D& texture, osg::State& state) const override
+        {
+            const auto* image = texture.getImage();
+            if (!image || !image->data()) return;
+            auto* ext = state.get<osg::GLExtensions>();
+            if (!ext->glCompressedTexImage2D) return;
+            state.unbindPixelBufferObject();
+            int width = image->s(), height = image->t();
+            for (unsigned level = 0; level < image->getNumMipmapLevels(); ++level)
+            {
+                GLint blockSize, size;
+                osg::Texture::getCompressedSize(image->getPixelFormat(), width, height, 1, blockSize, size);
+                ext->glCompressedTexImage2D(GL_TEXTURE_2D, level, texture.getInternalFormat(),
+                    width, height, 0, size, image->getMipmapData(level));
+                width = std::max(1, width / 2);
+                height = std::max(1, height / 2);
+            }
+            const auto levels = mipLevels(texture);
+            if (levels > image->getNumMipmapLevels() && ext->glGenerateMipmap)
+                ext->glGenerateMipmap(GL_TEXTURE_2D);
+            texture.setTextureSize(image->s(), image->t());
+            texture.setNumMipmapLevels(levels);
+            texture.getModifiedCount(state.getContextID()) = image->getModifiedCount();
+        }
+
+        void subload(const osg::Texture2D& texture, osg::State& state) const override
+        {
+            if (texture.getImage() && texture.isDirty(state.getContextID()))
+                load(texture, state);
+        }
+    };
 
     static const char* meshoptFallbackURI()
     {
@@ -197,17 +259,18 @@ public:
         std::string* err, std::string* warn, int requestedWidth,
         int requestedHeight, const unsigned char* bytes, int size, void* userData)
     {
-        // stb_image does not support WebP. Keep embedded WebP data encoded so
-        // makeImageFromModel can pass it through osgEarth's WebP plugin.
+        // Preserve formats that stb_image cannot decode for the image plugins.
+        const bool isKTX2 = image->mimeType == "image/ktx2" ||
+            (bytes && size >= 12 && memcmp(bytes, "\xABKTX 20\xBB\r\n\x1A\n", 12) == 0);
         const bool isWebP =
             image->mimeType == "image/webp" ||
-            (size >= 12 &&
+            (bytes && size >= 12 &&
              memcmp(bytes, "RIFF", 4) == 0 &&
              memcmp(bytes + 8, "WEBP", 4) == 0);
 
-        if (isWebP)
+        if ((isWebP || isKTX2) && bytes && size > 0)
         {
-            image->mimeType = "image/webp";
+            image->mimeType = isKTX2 ? "image/ktx2" : "image/webp";
             image->image.assign(bytes, bytes + size);
             image->as_is = true;
             return true;
@@ -1091,7 +1154,7 @@ public:
 
         bool loadPBRTextures = true;
         mutable std::unordered_map<int, osg::ref_ptr<PBRTexture>> localMaterials;
-        mutable std::unordered_map<int, osg::ref_ptr<osg::Image>> localImages;
+        mutable std::map<std::pair<int, bool>, osg::ref_ptr<osg::Image>> localImages;
 
         NodeBuilder(const GLTFReader* reader_, const tinygltf::Model &model_, const Env& env_)
             : reader(reader_), model(model_), env(env_)
@@ -1390,19 +1453,25 @@ public:
             return top.release();
         }
 
-        int getTextureSource(const tinygltf::Texture& texture) const
+        int getExtensionTextureSource(const tinygltf::Texture& texture, const char* extension) const
         {
-            auto extensionIt = texture.extensions.find("EXT_texture_webp");
+            auto extensionIt = texture.extensions.find(extension);
             if (extensionIt != texture.extensions.end() && extensionIt->second.IsObject())
             {
                 const tinygltf::Value& source = extensionIt->second.Get("source");
                 if (source.IsInt())
                     return source.Get<int>();
             }
-            return texture.source;
+            return -1;
         }
 
-        osg::Image* makeImageFromModel(int source) const
+        bool basisRequired() const
+        {
+            return std::find(model.extensionsRequired.begin(), model.extensionsRequired.end(),
+                "KHR_texture_basisu") != model.extensionsRequired.end();
+        }
+
+        osg::Image* makeImageFromModel(int source, bool basis = false, bool pixels = false) const
         {
             if (source < 0 || static_cast<size_t>(source) >= model.images.size())
                 return nullptr;
@@ -1418,7 +1487,34 @@ public:
 
             osg::ref_ptr<osg::Image> img;
 
-            if (image.as_is && image.image.size() > 0)
+            if (basis)
+            {
+                // Use the Basis plugin explicitly: external images need not
+                // have a filename extension, and embedded images have no file.
+                auto* imageReader = osgDB::Registry::instance()->getReaderWriterForExtension("basis");
+                if (!imageReader) return nullptr;
+                std::string encoded;
+                if (!image.image.empty())
+                    encoded.assign(reinterpret_cast<const char*>(image.image.data()), image.image.size());
+                else if (!imageEmbedded && !image.uri.empty())
+                {
+                    auto result = imageURI.readString(env.readOptions);
+                    if (result.failed()) return nullptr;
+                    encoded = result.getString();
+                }
+                // KHR_texture_basisu requires KTX2, not the .basis container.
+                if (encoded.size() < 12 || memcmp(encoded.data(), "\xABKTX 20\xBB\r\n\x1A\n", 12) != 0)
+                    return nullptr;
+                osg::ref_ptr<osgDB::Options> options = env.readOptions ?
+                    new osgDB::Options(*env.readOptions) : new osgDB::Options;
+                options->setPluginStringData("BASIS_ORIGIN", "top_left");
+                if (pixels) options->setPluginStringData("BASIS_FORMAT", "rgba8");
+                std::istringstream stream(encoded, std::ios::in | std::ios::binary);
+                auto result = imageReader->readImage(stream, options);
+                if (result.validImage()) img = result.takeImage();
+                else OE_WARN << LC << "KHR_texture_basisu: " << result.message() << std::endl;
+            }
+            else if (image.as_is && image.image.size() > 0)
             {
                 osgDB::ReaderWriter* imageReader =
                     osgDB::Registry::instance()->getReaderWriterForMimeType(image.mimeType);
@@ -1469,18 +1565,24 @@ public:
             return img.release();
         }
 
-        //! Loads the image referenced by a glTF texture, honoring the
-        //! EXT_texture_webp alternative and its optional core fallback.
-        osg::ref_ptr<osg::Image> makeImageFromTexture(const tinygltf::Texture& texture) const
+        //! Prefer Basis, then WebP, then the optional core PNG/JPEG fallback.
+        osg::ref_ptr<osg::Image> makeImageFromTexture(const tinygltf::Texture& texture, bool pixels) const
         {
-            const int source = getTextureSource(texture);
-            osg::ref_ptr<osg::Image> img = makeImageFromModel(source);
-
-            // If the WebP alternative cannot be decoded, retain the optional
-            // core PNG/JPEG fallback when one is present.
-            if (!img.valid() && source != texture.source)
-                img = makeImageFromModel(texture.source);
-
+            const bool hasBasis = texture.extensions.find("KHR_texture_basisu") != texture.extensions.end();
+            osg::ref_ptr<osg::Image> img;
+            if (hasBasis)
+            {
+                img = makeImageFromModel(getExtensionTextureSource(texture, "KHR_texture_basisu"), true, pixels);
+                if (!img && basisRequired())
+                {
+                    error = "Cannot load required KHR_texture_basisu texture (check KTX2 data and the Basis plugin)";
+                    return {};
+                }
+            }
+            if (!img) img = makeImageFromModel(getExtensionTextureSource(texture, "EXT_texture_webp"));
+            if (!img) img = makeImageFromModel(texture.source);
+            if (!img && hasBasis)
+                error = "Cannot load KHR_texture_basisu texture or its fallback";
             return img;
         }
 
@@ -1488,7 +1590,23 @@ public:
         void configureTexture(osg::Texture* result, int textureIndex, bool srgb = false) const
         {
             if (!result) return;
-            if (srgb) result->setInternalFormat(GL_SRGB8_ALPHA8);
+            if (srgb)
+            {
+                auto* image = result->getImage(0);
+                const auto format = image ? image->getPixelFormat() : GL_RGBA;
+                result->setInternalFormat(format == GL_COMPRESSED_RGB_S3TC_DXT1_EXT ?
+                    GL_COMPRESSED_SRGB_S3TC_DXT1_EXT :
+                    format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT ?
+                    GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT : GL_SRGB8_ALPHA8);
+                // TextureArena takes a compressed image's own internal format.
+                if (image && image->isCompressed())
+                    image->setInternalTextureFormat(result->getInternalFormat());
+                if (format == GL_COMPRESSED_RGB_S3TC_DXT1_EXT || format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT)
+                {
+                    if (auto* texture = dynamic_cast<osg::Texture2D*>(result))
+                        texture->setSubloadCallback(new CompressedSRGBUpload);
+                }
+            }
             result->setResizeNonPowerOfTwoHint(false);
             result->setDataVariance(osg::Object::STATIC);
             result->setMaxAnisotropy(16.0f);
@@ -1501,6 +1619,10 @@ public:
                     result->setWrap(osg::Texture::WRAP_S, (osg::Texture::WrapMode)sampler.wrapS);
                     result->setWrap(osg::Texture::WRAP_T, (osg::Texture::WrapMode)sampler.wrapT);
                     result->setWrap(osg::Texture::WRAP_R, (osg::Texture::WrapMode)sampler.wrapR);
+                    if (sampler.minFilter > 0)
+                        result->setFilter(osg::Texture::MIN_FILTER, (osg::Texture::FilterMode)sampler.minFilter);
+                    if (sampler.magFilter > 0)
+                        result->setFilter(osg::Texture::MAG_FILTER, (osg::Texture::FilterMode)sampler.magFilter);
                 }
             }
         }
@@ -1510,12 +1632,13 @@ public:
             return index >= 0 && static_cast<size_t>(index) < model.textures.size();
         }
 
-        osg::ref_ptr<osg::Image> materialImage(int textureIndex) const
+        osg::ref_ptr<osg::Image> materialImage(int textureIndex, bool pixels = false) const
         {
             if (!validTextureIndex(textureIndex)) return {};
-            auto found = localImages.find(textureIndex);
+            const auto key = std::make_pair(textureIndex, pixels);
+            auto found = localImages.find(key);
             if (found != localImages.end()) return found->second;
-            return localImages[textureIndex] = makeImageFromTexture(model.textures[textureIndex]);
+            return localImages[key] = makeImageFromTexture(model.textures[textureIndex], pixels);
         }
 
         static osg::ref_ptr<osg::Image> constantImage(const osg::Vec4& color)
@@ -1569,7 +1692,8 @@ public:
         {
             std::ostringstream key;
             key.precision(std::numeric_limits<double>::max_digits10);
-            key << "gltf-dram-v1:" << loadPBRTextures;
+            key << "gltf-dram-v2:" << loadPBRTextures << ':' << basisRequired() << ':';
+            if (env.readOptions) key << env.readOptions->getPluginStringData("BASIS_FORMAT");
             const auto& pbr = material.pbrMetallicRoughness;
             for (int index : { pbr.baseColorTexture.index,
                 loadPBRTextures ? material.normalTexture.index : -1,
@@ -1579,7 +1703,9 @@ public:
                 key << '|';
                 if (!validTextureIndex(index)) { key << "none"; continue; }
                 const auto& texture = model.textures[index];
-                for (int source : { getTextureSource(texture), texture.source })
+                key << (texture.extensions.count("KHR_texture_basisu") != 0) << ':';
+                for (int source : { getExtensionTextureSource(texture, "KHR_texture_basisu"),
+                    getExtensionTextureSource(texture, "EXT_texture_webp"), texture.source })
                 {
                     if (source < 0 || static_cast<size_t>(source) >= model.images.size())
                     { key << "none:"; continue; }
@@ -1591,7 +1717,8 @@ public:
                 if (texture.sampler >= 0 && static_cast<size_t>(texture.sampler) < model.samplers.size())
                 {
                     const auto& sampler = model.samplers[texture.sampler];
-                    key << ':' << sampler.wrapS << ',' << sampler.wrapT << ',' << sampler.wrapR;
+                    key << ':' << sampler.wrapS << ',' << sampler.wrapT << ',' << sampler.wrapR
+                        << ',' << sampler.minFilter << ',' << sampler.magFilter;
                 }
                 else key << ":default";
             }
@@ -1629,10 +1756,11 @@ public:
                 osg::ref_ptr<osg::Image> normal, mr, ao;
                 if (loadPBRTextures)
                 {
-                    normal = materialImage(source.normalTexture.index);
-                    mr = materialImage(pbr.metallicRoughnessTexture.index);
-                    ao = materialImage(source.occlusionTexture.index);
+                    normal = materialImage(source.normalTexture.index, true);
+                    mr = materialImage(pbr.metallicRoughnessTexture.index, true);
+                    ao = materialImage(source.occlusionTexture.index, true);
                 }
+                if (!error.empty()) return {};
                 const bool factors = loadPBRTextures && (mr || ao || hasExplicitPBRFactors(source));
                 material.normalImage = normalImage(normal, static_cast<float>(source.normalTexture.scale));
                 if (factors)
@@ -1649,6 +1777,10 @@ public:
                     OE_WARN << LC << "Failed to load material " << source.name << std::endl;
                     return {};
                 }
+                // PBRTexture packs color/opacity into a new image. glTF already
+                // supplies alpha in the color image; retain its blocks and mips.
+                if (material.colorImage->isCompressed() || material.colorImage->isMipmap())
+                    result->albedo->setImage(0, material.colorImage);
                 // Preserve the reader's no-map/skip-PBR behavior, without sampling
                 // the generic fallback maps (roughness defaults differ).
                 if (!normal) result->normal = nullptr;

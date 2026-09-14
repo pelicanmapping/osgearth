@@ -1,3 +1,4 @@
+add_subdirectory(basis)
 add_subdirectory(bumpmap)
 add_subdirectory(cache_filesystem)
 add_subdirectory(cache_sqlite3)

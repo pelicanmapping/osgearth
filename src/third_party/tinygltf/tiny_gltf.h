@@ -2662,6 +2662,11 @@ bool IsDataURI(const std::string &in) {
     return true;
   }
 
+  header = "data:image/ktx2;base64,";
+  if (in.find(header) == 0) {
+    return true;
+  }
+
   header = "data:image/bmp;base64,";
   if (in.find(header) == 0) {
     return true;
@@ -2714,6 +2719,14 @@ bool DecodeDataURI(std::vector<unsigned char> *out, std::string &mime_type,
     if (in.find(header) == 0) {
       mime_type = "image/bmp";
       data = base64_decode(in.substr(header.size()));  // cut mime string.
+    }
+  }
+
+  if (data.empty()) {
+    header = "data:image/ktx2;base64,";
+    if (in.find(header) == 0) {
+      mime_type = "image/ktx2";
+      data = base64_decode(in.substr(header.size()));
     }
   }
 

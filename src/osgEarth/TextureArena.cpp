@@ -419,7 +419,9 @@ Texture::compileGLObjects(osg::State& state) const
                         GLsizei blockSize; // unused
 
                         osg::Texture::getCompressedSize(
-                            gpuInternalFormat,
+                            // Size the source blocks. The GPU format may be
+                            // sRGB S3TC, which OSG 3.6's size helper does not know.
+                            image->getPixelFormat(),
                             mipLevelWidth, mipLevelHeight, 1,
                             blockSize, mipmapBytes);
                     }

@@ -173,6 +173,7 @@ Registry::Registry() :
     osgDB::Registry::instance()->addArchiveExtension( "3tz");
     osgDB::Registry::instance()->addFileExtensionAlias( "3tz", "zip" );
     osgDB::Registry::instance()->addFileExtensionAlias("glb", "gltf");
+    osgDB::Registry::instance()->addFileExtensionAlias("ktx2", "basis");
     osgDB::Registry::instance()->addFileExtensionAlias("b3dm", "gltf");
     osgDB::Registry::instance()->addMimeTypeExtensionMapping( "application/vnd.google-earth.kml+xml", "kml" );
     osgDB::Registry::instance()->addMimeTypeExtensionMapping( "application/vnd.google-earth.kml+xml; charset=utf8", "kml");
@@ -187,6 +188,7 @@ Registry::Registry() :
     // This is not correct, but some versions of readymap can return tif with one f instead of two.
     osgDB::Registry::instance()->addMimeTypeExtensionMapping( "image/tif",                            "tif" );
     osgDB::Registry::instance()->addMimeTypeExtensionMapping( "image/webp", "webp");
+    osgDB::Registry::instance()->addMimeTypeExtensionMapping("image/ktx2", "basis");
 
     // pre-load OSG's ZIP plugin so that we can use it in URIs
     std::string zipLib = osgDB::Registry::instance()->createLibraryNameForExtension( "zip" );

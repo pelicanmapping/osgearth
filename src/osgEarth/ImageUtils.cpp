@@ -3193,3 +3193,33 @@ ImageUtils::getMaxTextureSize(const osg::Image* image, const osgDB::Options* opt
 
     return out;
 }
+
+void
+ImageUtils::fixTextureForGlCoreProfile(osg::Texture* texture)
+{
+  if (!texture)
+    return;
+
+  // No change is required if we're not supporting core profile
+#ifndef OSG_GL_FIXED_FUNCTION_AVAILABLE
+  for (unsigned int k = 0; k < texture->getNumImages(); ++k)
+  {
+    // Get a pointer to the image, continuing if none
+    osg::Image* image = texture->getImage(k);
+    if (!image)
+      continue;
+
+    // Detect the image's pixel format, changing it out for a GL3-compatible one, fixing swizzle
+    if (image->getPixelFormat() == GL_LUMINANCE || image->getPixelFormat() == GL_RED)
+    {
+      image->setPixelFormat(GL_RED);
+      texture->setSwizzle(osg::Vec4i(GL_RED, GL_RED, GL_RED, GL_ONE));
+    }
+    else if (image->getPixelFormat() == GL_LUMINANCE_ALPHA || image->getPixelFormat() == GL_RG)
+    {
+      image->setPixelFormat(GL_RG);
+      texture->setSwizzle(osg::Vec4i(GL_RED, GL_RED, GL_RED, GL_GREEN));
+    }
+  }
+#endif
+}

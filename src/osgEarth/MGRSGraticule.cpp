@@ -196,7 +196,8 @@ namespace
                 return false;
             }
 
-            osgEarth::Ring* line = new osgEarth::Ring();
+            // Empty SQID records never transfer their geometry to a Feature.
+            osg::ref_ptr<osgEarth::Ring> line = new osgEarth::Ring();
             for (u_short n = 0; n < numPoints; ++n)
             {
                 uint64_t x;
@@ -210,7 +211,7 @@ namespace
 
             if (line->getTotalPointCount() > 0)
             {
-                osg::ref_ptr<Feature> feature = new Feature(line, wgs84);
+                osg::ref_ptr<Feature> feature = new Feature(line.get(), wgs84);
                 feature->set("gzd", std::string(gzd));
                 feature->set("sqid", std::string(sqid));
                 feature->set("easting", easting);

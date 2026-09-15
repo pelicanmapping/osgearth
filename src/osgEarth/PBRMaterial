@@ -18,6 +18,9 @@ namespace osgEarth
     class OSGEARTH_EXPORT PBRMaterial
     {
     public:
+        // RM uses glTF's G/B channels without reading AO from R.
+        enum Layout { DRAM = 0, ORM = 1, RM = 2 };
+
         PBRMaterial() = default;
         PBRMaterial(const PBRMaterial& rhs) = default;
         PBRMaterial& operator=(const PBRMaterial& rhs) = default;
@@ -33,9 +36,17 @@ namespace osgEarth
             aoImage,
             metalImage,
             displacementImage,
-            opacityImage;
+            opacityImage,
+            packedImage;
 
         OE_PROPERTY(std::string, name, {});
+        OE_PROPERTY(Layout, layout, DRAM);
+        OE_PROPERTY(float, roughnessFactor, 1.0f);
+        OE_PROPERTY(float, metallicFactor, 1.0f);
+        OE_PROPERTY(float, occlusionStrength, 1.0f);
+        //! A packed input takes precedence over separate scalar rasters;
+        //! aoImage/ao may supply an independent occlusion texture in this case.
+        OE_OPTION(URI, packed);
         OE_OPTION(URI, color);
         OE_OPTION(URI, normal);
         OE_OPTION(URI, roughness);
@@ -57,6 +68,13 @@ namespace osgEarth
             conf.get("displacement", displacement());
             conf.get("height", displacement());
             conf.get("opacity", opacity());
+            conf.get("packed", packed());
+            const auto packing = conf.value("layout");
+            if (packing == "orm") layout() = ORM;
+            else if (packing == "rm") layout() = RM;
+            conf.get("roughness_factor", roughnessFactor());
+            conf.get("metallic_factor", metallicFactor());
+            conf.get("occlusion_strength", occlusionStrength());
         }
 
         Config getConfig() const
@@ -70,6 +88,11 @@ namespace osgEarth
             conf.set("metal", metal());
             conf.set("displacement", displacement());
             conf.set("opacity", opacity());
+            conf.set("packed", packed());
+            if (layout() != DRAM) conf.set("layout", layout() == ORM ? "orm" : "rm");
+            if (roughnessFactor() != 1.0f) conf.set("roughness_factor", roughnessFactor());
+            if (metallicFactor() != 1.0f) conf.set("metallic_factor", metallicFactor());
+            if (occlusionStrength() != 1.0f) conf.set("occlusion_strength", occlusionStrength());
             return conf;
         }
 
@@ -77,6 +100,8 @@ namespace osgEarth
         bool isSimple() const
         {
             return (colorImage.valid() || color().isSet()) &&
+                !packedImage && !packed().isSet() && layout() == DRAM &&
+                roughnessFactor() == 1.0f && metallicFactor() == 1.0f && occlusionStrength() == 1.0f &&
                 !normalImage && !normal().isSet() &&
                 !roughnessImage && !roughness().isSet() &&
                 !aoImage && !ao().isSet() &&
@@ -95,12 +120,15 @@ namespace osgEarth
         META_StateAttribute(osgEarth, PBRTexture, TEXTURE);
         PBRTexture() = default;
         PBRTexture(const PBRTexture& rhs, const osg::CopyOp& op) :
-            osg::StateAttribute(rhs, op), albedo(rhs.albedo), normal(rhs.normal), pbr(rhs.pbr) { }
+            osg::StateAttribute(rhs, op), albedo(rhs.albedo), normal(rhs.normal), pbr(rhs.pbr),
+            occlusion(rhs.occlusion), layoutAndFactors(rhs.layoutAndFactors) { }
         int compare(const osg::StateAttribute& rhs) const override { return -1; }
         bool isTextureAttribute() const { return true; }
 
         //! The textures comprising the PBR material
-        osg::ref_ptr<osg::Texture> albedo, normal, pbr;
+        osg::ref_ptr<osg::Texture> albedo, normal, pbr, occlusion;
+        //! Packed as (layout, roughness factor, AO strength, metallic factor).
+        osg::Vec4 layoutAndFactors = osg::Vec4(PBRMaterial::DRAM, 1, 1, 1);
         Status status;
 
         //! Sets a wrap on all textures
@@ -108,6 +136,7 @@ namespace osgEarth
             if (albedo.valid()) albedo->setWrap(wrap, mode);
             if (normal.valid()) normal->setWrap(wrap, mode);
             if (pbr.valid()) pbr->setWrap(wrap, mode);
+            if (occlusion.valid()) occlusion->setWrap(wrap, mode);
         }
 
         //! Populates this object from a PBRMaterial description

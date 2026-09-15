@@ -6,6 +6,8 @@ namespace osgEarth { namespace Util
 {
     Shaders::Shaders()
     {
+        PBRMaterial = "PBRMaterial.glsl";
+        _sources[PBRMaterial] = @PBRMaterial.glsl@;
         // Cascade Draping
         CascadeDraping = "CascadeDraping.glsl";
         _sources[CascadeDraping] = @CascadeDraping.glsl@;

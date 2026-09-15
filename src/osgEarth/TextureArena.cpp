@@ -308,8 +308,8 @@ Texture::compileGLObjects(osg::State& state) const
             dataType = image->getDataType();
 
             gpuInternalFormat =
-                image->isCompressed() ? image->getInternalTextureFormat() :
                 internalFormat().isSet() ? internalFormat().get() :
+                image->isCompressed() ? image->getInternalTextureFormat() :
                 pixelFormat == GL_RED && dataType == GL_FLOAT ? GL_R32F :
                 pixelFormat == GL_RED && dataType == GL_UNSIGNED_SHORT ? GL_R16 :
                 pixelFormat == GL_RED && dataType == GL_UNSIGNED_BYTE ? GL_R8 :
@@ -795,7 +795,9 @@ TextureArena::add(Texture::Ptr tex, const osgDB::Options* readOptions)
                     image->getPixelFormat() == GL_RGBA ? GL_RGBA8 :
                     GL_RGBA8;
 
-                image->setInternalTextureFormat(internalFormat);
+                // An image may back both sRGB albedo and linear PBR textures.
+                // Normalize the texture's format without changing the shared image.
+                tex->internalFormat() = internalFormat;
             }
 
 #ifdef COMPRESS_AND_MIPMAP_ON_DEMAND

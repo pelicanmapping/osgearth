@@ -824,15 +824,15 @@ ShaderGenerator::processGeometry(
     // Keep PBRTexture descriptors in place for other consumers (e.g. Chonk).
     // Ordinary rendering binds their component textures on available units.
     const int maxUnits = Registry::capabilities().getMaxGPUTextureUnits();
-    std::map<int, std::array<int, 3>> materialUnits;
+    std::map<int, std::array<int, 4>> materialUnits;
     std::set<int> componentUnits;
     for (int unit = 0; unit < maxUnits; ++unit)
     {
         auto* material = dynamic_cast<PBRTexture*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXTURE));
         if (!material || !accept(material)) continue;
-        std::array<int, 3> units = {{ -1, -1, -1 }};
+        std::array<int, 4> units = {{ -1, -1, -1, -1 }};
         unsigned component = 0;
-        for (auto* texture : { material->albedo.get(), material->normal.get(), material->pbr.get() })
+        for (auto* texture : { material->albedo.get(), material->normal.get(), material->pbr.get(), material->occlusion.get() })
         {
             const std::string name = Stringify() << "oe_sg_pbr_" << unit << "_" << component;
             if (texture)
@@ -907,6 +907,8 @@ ShaderGenerator::processGeometry(
                 if (!wrotePBRDecl)
                 {
                     wrotePBRDecl = true;
+                    Shaders shaders;
+                    buf._fragHead << ShaderLoader::load(shaders.PBRMaterial, shaders);
                     buf._viewHead << "out vec3 oe_sg_pbr_position;\n";
                     buf._viewBody << "oe_sg_pbr_position = vertex_view.xyz / vertex_view.w;\n";
                     buf._fragHead << R"(
@@ -949,12 +951,26 @@ vec3 oe_sg_pbr_normal(vec3 sample_normal, vec2 uv)
                 if (units[1] >= 0)
                     buf._fragBody << "vp_Normal = oe_sg_pbr_normal(texture(oe_sg_pbr_" << unit
                         << "_1, " TEX_COORD << unit << ".xy).xyz, " TEX_COORD << unit << ".xy);\n";
-                if (units[2] >= 0)
-                    buf._fragBody << "texel = texture(oe_sg_pbr_" << unit << "_2, " TEX_COORD << unit << ".xy);\n"
+                auto* descriptor = static_cast<PBRTexture*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXTURE));
+                if (units[2] >= 0 || units[3] >= 0 || descriptor->layoutAndFactors.x() != PBRMaterial::DRAM)
+                {
+                    const std::string layoutAndFactors = Stringify() << "oe_sg_pbr_layoutAndFactors_" << unit;
+                    buf._fragHead << "uniform vec4 " << layoutAndFactors << ";\n";
+                    newStateSet->getOrCreateUniform(layoutAndFactors, osg::Uniform::FLOAT_VEC4)->set(descriptor->layoutAndFactors);
+                    buf._fragBody << "texel = vec4(1);\n";
+                    if (units[2] >= 0)
+                        buf._fragBody << "texel = texture(oe_sg_pbr_" << unit << "_2, " TEX_COORD << unit << ".xy);\n";
+                    buf._fragBody << "texel = oe_pbr_decode(texel, " << layoutAndFactors << ", ";
+                    if (units[3] >= 0)
+                        buf._fragBody << "texture(oe_sg_pbr_" << unit << "_3, " TEX_COORD << unit << ".xy).r";
+                    else
+                        buf._fragBody << "-1.0";
+                    buf._fragBody << ");\n"
                         << "oe_pbr.displacement = texel.r;\n"
                         << "oe_pbr.roughness *= texel.g;\n"
                         << "oe_pbr.ao *= texel.b;\n"
                         << "oe_pbr.metal = clamp(oe_pbr.metal + texel.a, 0.0, 1.0);\n";
+                }
                 buf._fragBody << "#endif\n";
             }
 

@@ -1598,9 +1598,8 @@ public:
                     GL_COMPRESSED_SRGB_S3TC_DXT1_EXT :
                     format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT ?
                     GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT : GL_SRGB8_ALPHA8);
-                // TextureArena takes a compressed image's own internal format.
-                if (image && image->isCompressed())
-                    image->setInternalTextureFormat(result->getInternalFormat());
+                // Color and PBR textures may share an image; keep color space
+                // on the texture instead of mutating the shared image.
                 if (format == GL_COMPRESSED_RGB_S3TC_DXT1_EXT || format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT)
                 {
                     if (auto* texture = dynamic_cast<osg::Texture2D*>(result))
@@ -1649,24 +1648,6 @@ public:
             return image;
         }
 
-        //! PBRMaterial's scalar rasters store their value in the red channel.
-        static osg::ref_ptr<osg::Image> componentImage(
-            osg::Image* source, unsigned channel, float scale, float offset = 0.0f)
-        {
-            osg::ref_ptr<osg::Image> result = new osg::Image();
-            result->allocateImage(source ? source->s() : 1, source ? source->t() : 1,
-                1, GL_RED, GL_FLOAT);
-            ImageUtils::PixelReader read(source);
-            ImageUtils::PixelWriter write(result);
-            write.forEachPixel([&](auto& pixel) {
-                osg::Vec4 value(1, 1, 1, 1);
-                if (source) read(value, pixel);
-                value.set(offset + scale * value[channel], 0, 0, 1);
-                write(value, pixel);
-            });
-            return result;
-        }
-
         static osg::ref_ptr<osg::Image> normalImage(osg::Image* source, float scale)
         {
             if (!source) return {};
@@ -1686,13 +1667,22 @@ public:
             return result;
         }
 
-        //! Include every source, sampler, and baked factor in the shared key.
+        //! Only matching bindings can supply ORM with a single texture sample.
+        static bool sharesORM(const tinygltf::Material& material)
+        {
+            const auto& mr = material.pbrMetallicRoughness.metallicRoughnessTexture;
+            const auto& ao = material.occlusionTexture;
+            return mr.index >= 0 && mr.index == ao.index &&
+                mr.texCoord == ao.texCoord && mr.extensions == ao.extensions;
+        }
+
+        //! Include every source, sampler, and material factor in the shared key.
         //! Embedded images have model-local identities and cannot be shared here.
         std::string materialKey(const tinygltf::Material& material) const
         {
             std::ostringstream key;
             key.precision(std::numeric_limits<double>::max_digits10);
-            key << "gltf-dram-v2:" << loadPBRTextures << ':' << basisRequired() << ':';
+            key << "gltf-orm-v1:" << loadPBRTextures << ':' << basisRequired() << ':';
             if (env.readOptions) key << env.readOptions->getPluginStringData("BASIS_FORMAT");
             const auto& pbr = material.pbrMetallicRoughness;
             for (int index : { pbr.baseColorTexture.index,
@@ -1724,7 +1714,7 @@ public:
             }
             key << '|' << material.normalTexture.scale << '|' << pbr.roughnessFactor
                 << '|' << pbr.metallicFactor << '|' << material.occlusionTexture.strength
-                << '|' << hasExplicitPBRFactors(material);
+                << '|' << hasExplicitPBRFactors(material) << '|' << sharesORM(material);
             return key.str();
         }
 
@@ -1757,19 +1747,21 @@ public:
                 if (loadPBRTextures)
                 {
                     normal = materialImage(source.normalTexture.index, true);
-                    mr = materialImage(pbr.metallicRoughnessTexture.index, true);
-                    ao = materialImage(source.occlusionTexture.index, true);
+                    mr = materialImage(pbr.metallicRoughnessTexture.index);
+                    ao = materialImage(source.occlusionTexture.index);
                 }
                 if (!error.empty()) return {};
                 const bool factors = loadPBRTextures && (mr || ao || hasExplicitPBRFactors(source));
                 material.normalImage = normalImage(normal, static_cast<float>(source.normalTexture.scale));
                 if (factors)
                 {
-                    material.roughnessImage = componentImage(mr, 1, static_cast<float>(pbr.roughnessFactor));
-                    material.metalImage = componentImage(mr, 2, static_cast<float>(pbr.metallicFactor));
-                    material.aoImage = componentImage(ao, 0,
-                        static_cast<float>(source.occlusionTexture.strength),
-                        1.0f - static_cast<float>(source.occlusionTexture.strength));
+                    const bool sharedAO = mr && ao && sharesORM(source);
+                    material.layout() = sharedAO ? PBRMaterial::ORM : PBRMaterial::RM;
+                    material.packedImage = mr;
+                    if (!sharedAO) material.aoImage = ao;
+                    material.roughnessFactor() = static_cast<float>(pbr.roughnessFactor);
+                    material.metallicFactor() = static_cast<float>(pbr.metallicFactor);
+                    material.occlusionStrength() = static_cast<float>(source.occlusionTexture.strength);
                 }
                 result = new PBRTexture();
                 if (!result->load(material, env.readOptions).isOK())
@@ -1777,34 +1769,14 @@ public:
                     OE_WARN << LC << "Failed to load material " << source.name << std::endl;
                     return {};
                 }
-                // PBRTexture packs color/opacity into a new image. glTF already
-                // supplies alpha in the color image; retain its blocks and mips.
-                if (material.colorImage->isCompressed() || material.colorImage->isMipmap())
-                    result->albedo->setImage(0, material.colorImage);
                 // Preserve the reader's no-map/skip-PBR behavior, without sampling
                 // the generic fallback maps (roughness defaults differ).
                 if (!normal) result->normal = nullptr;
                 if (!factors) result->pbr = nullptr;
                 configureTexture(result->albedo, pbr.baseColorTexture.index, true);
                 configureTexture(result->normal, source.normalTexture.index);
-                const int packedSampler = mr ? pbr.metallicRoughnessTexture.index : source.occlusionTexture.index;
-                configureTexture(result->pbr, packedSampler);
-
-                if (mr && ao)
-                {
-                    auto wraps = [&](int textureIndex) {
-                        const auto& tex = model.textures[textureIndex];
-                        if (tex.sampler >= 0 && static_cast<size_t>(tex.sampler) < model.samplers.size())
-                        {
-                            const auto& s = model.samplers[tex.sampler];
-                            return std::make_pair(s.wrapS, s.wrapT);
-                        }
-                        return std::make_pair(int(GL_CLAMP_TO_EDGE), int(GL_CLAMP_TO_EDGE));
-                    };
-                    if (wraps(pbr.metallicRoughnessTexture.index) != wraps(source.occlusionTexture.index))
-                        OE_WARN << LC << "Material " << source.name
-                            << ": packed AO uses the metallic-roughness sampler" << std::endl;
-                }
+                configureTexture(result->pbr, pbr.metallicRoughnessTexture.index);
+                configureTexture(result->occlusion, source.occlusionTexture.index);
                 if (shared)
                 {
                     std::lock_guard<std::mutex> lock(cache->mutex());

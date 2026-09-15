@@ -24,6 +24,9 @@ namespace
         osg::ref_ptr<osg::Image>& color,
         osg::ref_ptr<osg::Image>& opacity)
     {
+        // Keep existing alpha, compression, and mipmaps when no opacity map needs merging.
+        if (color.valid() && !opacity.valid()) return color;
+
         osg::ref_ptr<osg::Image> output;
 
         if (color.valid())
@@ -33,16 +36,12 @@ namespace
             ImageUtils::PixelWriter write_output(output.get());
             ImageUtils::PixelReader read_color(color.get());
             ImageUtils::PixelReader read_opacity(opacity.get());
-            ImageUtils::ImageIterator iter(output.get());
             osg::Vec4 a, b;
             write_output.forEachPixel([&](auto& iter)
                 {
                     read_color(a, iter);
-                    if (opacity.valid())
-                    {
-                        read_opacity(b, iter.u(), iter.v());
-                        a.a() = b[0];
-                    }
+                    read_opacity(b, iter.u(), iter.v());
+                    a.a() = b[0];
                     write_output(a, iter);
                 });
         }
@@ -206,6 +205,12 @@ Status
 PBRTexture::load(const PBRMaterial& mat_const, const osgDB::Options* options)
 {
     PBRMaterial mat = mat_const;
+    if (!mat.packedImage && mat.packed().isSet()) {
+        auto rr = mat.packed()->readImage(options);
+        if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.packed()->full() + " ... " + rr.errorDetail());
+        mat.packedImage = rr.getImage();
+    }
+    const bool packed = mat.packedImage.valid() || mat.layout() != PBRMaterial::DRAM;
 
     if (!mat.colorImage && mat.color().isSet()) {
         auto rr = mat.color()->readImage(options);
@@ -219,13 +224,13 @@ PBRTexture::load(const PBRMaterial& mat_const, const osgDB::Options* options)
         else mat.normalImage = rr.getImage();
     }
 
-    if (!mat.roughnessImage && mat.roughness().isSet()) {
+    if (!packed && !mat.roughnessImage && mat.roughness().isSet()) {
         auto rr = mat.roughness()->readImage(options);
         if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.roughness()->full() + " ... " + rr.errorDetail());
         else mat.roughnessImage = rr.getImage();
     }
 
-    if (!mat.metalImage && mat.metal().isSet()) {
+    if (!packed && !mat.metalImage && mat.metal().isSet()) {
         auto rr = mat.metal()->readImage(options);
         if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.metal()->full() + " ... " + rr.errorDetail());
         else mat.metalImage = rr.getImage();
@@ -237,7 +242,7 @@ PBRTexture::load(const PBRMaterial& mat_const, const osgDB::Options* options)
         else mat.aoImage = rr.getImage();
     }
 
-    if (!mat.displacementImage && mat.displacement().isSet()) {
+    if (!packed && !mat.displacementImage && mat.displacement().isSet()) {
         auto rr = mat.displacement()->readImage(options);
         if (rr.failed()) return status = Status(Status::ResourceUnavailable, "Failed to load " + mat.displacement()->full() + " ... " + rr.errorDetail());
         else mat.displacementImage = rr.getImage();
@@ -256,11 +261,21 @@ PBRTexture::load(const PBRMaterial& mat_const, const osgDB::Options* options)
     normal = new osg::Texture2D(assemble_NORM(mat.normalImage));
     normal->setName(mat.name() + " normal");
 
-    pbr = new osg::Texture2D(assemble_DRAM(mat.displacementImage, mat.roughnessImage, mat.aoImage, mat.metalImage));
-    pbr->setName(mat.name() + " PBR");
-
-    for (auto& tex : { albedo, normal, pbr })
+    layoutAndFactors.set(mat.layout(), mat.roughnessFactor(), mat.occlusionStrength(), mat.metallicFactor());
+    pbr = nullptr;
+    occlusion = nullptr;
+    if (packed)
     {
+        if (mat.packedImage) pbr = new osg::Texture2D(mat.packedImage);
+        if (mat.aoImage) occlusion = new osg::Texture2D(mat.aoImage);
+    }
+    else
+        pbr = new osg::Texture2D(assemble_DRAM(mat.displacementImage, mat.roughnessImage, mat.aoImage, mat.metalImage));
+    if (pbr) pbr->setName(mat.name() + " PBR");
+
+    for (auto& tex : { albedo, normal, pbr, occlusion })
+    {
+        if (!tex) continue;
         tex->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
         tex->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
         tex->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR_MIPMAP_LINEAR);

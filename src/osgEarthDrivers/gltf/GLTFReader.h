@@ -1648,25 +1648,6 @@ public:
             return image;
         }
 
-        static osg::ref_ptr<osg::Image> normalImage(osg::Image* source, float scale)
-        {
-            if (!source) return {};
-            osg::ref_ptr<osg::Image> result = new osg::Image();
-            result->allocateImage(source->s(), source->t(), 1, GL_RGB, GL_UNSIGNED_BYTE);
-            ImageUtils::PixelReader read(source);
-            ImageUtils::PixelWriter write(result);
-            write.forEachPixel([&](auto& pixel) {
-                osg::Vec4 value;
-                read(value, pixel);
-                osg::Vec3 n((value.r() * 2.0f - 1.0f) * scale,
-                    -(value.g() * 2.0f - 1.0f) * scale, value.b() * 2.0f - 1.0f);
-                if (n.normalize() == 0.0f) n.set(0, 0, 1);
-                write(osg::Vec4(n.x() * 0.5f + 0.5f, n.y() * 0.5f + 0.5f,
-                    n.z() * 0.5f + 0.5f, 1), pixel);
-            });
-            return result;
-        }
-
         //! Only matching bindings can supply ORM with a single texture sample.
         static bool sharesORM(const tinygltf::Material& material)
         {
@@ -1752,7 +1733,7 @@ public:
                 }
                 if (!error.empty()) return {};
                 const bool factors = loadPBRTextures && (mr || ao || hasExplicitPBRFactors(source));
-                material.normalImage = normalImage(normal, static_cast<float>(source.normalTexture.scale));
+                material.normalImage = normal;
                 if (factors)
                 {
                     const bool sharedAO = mr && ao && sharesORM(source);

@@ -1,37 +1,71 @@
 /* osgEarth
-* Copyright 2025 Pelican Mapping
+* Copyright 2026 Pelican Mapping
 * MIT License
 */
 #include <osg/Notify>
 
-#define TINYGLTF_IMPLEMENTATION
+// cgltf parses and writes; stb_image decodes embedded PNG/JPEG data.
+// Both keep their implementation blocks outside their include guards, so the
+// implementation macros are cleared right after the first include.
+#define CGLTF_IMPLEMENTATION
+#include <cgltf.h>
+#undef CGLTF_IMPLEMENTATION
+
+#define CGLTF_WRITE_IMPLEMENTATION
+#include <cgltf_write.h>
+#undef CGLTF_WRITE_IMPLEMENTATION
+
+// glTF images are PNG or JPEG; leave the other stb decoders out of the
+// attack surface for untrusted embedded data.
+#define STBI_NO_PSD
+#define STBI_NO_PIC
+#define STBI_NO_PNM
+#define STBI_NO_HDR
+#define STBI_NO_GIF
+#define STBI_NO_TGA
+#define STBI_NO_BMP
 #define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#define TINYGLTF_NO_EXTERNAL_IMAGE
-#define TINYGLTF_NOEXCEPTION // optional. disable exception handling.
-
-#ifdef OSGEARTH_HAVE_DRACO
-#define TINYGLTF_ENABLE_DRACO
-#endif
-#undef TINYGLTF_USE_RAPIDJSON
-//#define TINYGLTF_USE_RAPIDJSON
-//#define TINYGLTF_USE_RAPIDJSON_CRTALLOCATOR
-
-#include <cmath>
-#include "tiny_gltf.h"
-using namespace tinygltf;
+#include <stb_image.h>
+#undef STB_IMAGE_IMPLEMENTATION
 
 #include "GLTFReader.h"
 #include "GLTFWriter.h"
-#include "B3DMReader.h"
-#include "B3DMWriter.h"
 
 #include <osgDB/FileNameUtils>
+#include <osgDB/ObjectWrapper>
 #include <osgDB/Registry>
+#include <cctype>
+#include <iterator>
+#include <sstream>
 using namespace osgEarth;
 
 #undef LC
 #define LC "[gltf] "
+
+namespace
+{
+    // Some tile pipelines deliver zlib-compressed documents. Only attempt
+    // inflation when the payload is clearly neither GLB nor JSON.
+    bool inflateIfCompressed(std::string& data)
+    {
+        if (data.size() < 4 || data.compare(0, 4, "glTF") == 0)
+            return false;
+        for (char c : data)
+        {
+            if (std::isspace(static_cast<unsigned char>(c))) continue;
+            if (c == '{') return false;
+            break;
+        }
+        osg::ref_ptr<osgDB::BaseCompressor> compressor =
+            osgDB::Registry::instance()->getObjectWrapperManager()->findCompressor("zlib");
+        if (!compressor.valid()) return false;
+        std::stringstream in(data);
+        std::string out;
+        if (!compressor->decompress(in, out)) return false;
+        data.swap(out);
+        return true;
+    }
+}
 
 class GLTFReaderWriter : public osgDB::ReaderWriter
 {
@@ -43,101 +77,51 @@ public:
     {
         supportsExtension("gltf", "glTF ascii loader");
         supportsExtension("glb", "glTF binary loader");
-        supportsExtension("b3dm", "b3dm loader");
+        supportsOption("gltfZUp", "Content is already Z-up; skip the Y-up to Z-up rotation");
+        supportsOption("gltfDefaultSceneOnly", "Load only the default scene");
+        supportsOption("gltfParentReversesWinding", "The containing transform mirrors geometry");
+        supportsOption("gltfSkipImagery", "Do not load textures");
+        supportsOption("gltfSkipPBRTextures", "Load base color textures only");
+        supportsOption("gltfSkipNormals", "Do not generate missing normals");
+        supportsOption("gltfForceReload", "Bypass the shared material cache");
+        supportsOption("gltfDisableExternalAssetInstancing", "Create one ExternalNode per external asset reference");
     }
 
-    virtual const char* className() const { return "glTF plugin"; }
+    const char* className() const override { return "glTF plugin"; }
 
-    ReadResult readObject(const std::string& location, const osgDB::Options* options) const
+    ReadResult readObject(const std::string& location, const osgDB::Options* options) const override
     {
         return readNode(location, options);
     }
 
-    ReadResult readNode(const std::string& location, const osgDB::Options* options) const
+    ReadResult readNode(const std::string& location, const osgDB::Options* options) const override
     {
-        std::string ext = osgDB::getFileExtension(location);
-        if (!acceptsExtension(ext))
+        if (!acceptsExtension(osgDB::getLowerCaseFileExtension(location)))
             return ReadResult::FILE_NOT_HANDLED;
 
-        if (ext == "gltf")
-        {
-            GLTFReader reader;
-            reader.setTextureCache(&_cache);
-            tinygltf::Model model;
-            return reader.read(location, false, options);
-        }
-        else if (ext == "glb")
-        {
-            GLTFReader reader;
-            reader.setTextureCache(&_cache);
-            tinygltf::Model model;
-            return reader.read(location, true, options);
-        }
-        else if (ext == "b3dm")
-        {
-            std::string data = URI(location).getString(options);
-            B3DMReader reader;
-            reader.setTextureCache(&_cache);
-            return reader.read(location, data, options);
-        }
-        else return ReadResult::FILE_NOT_HANDLED;
+        GLTFReader reader;
+        reader.setTextureCache(&_cache);
+        return reader.read(location, options);
     }
 
-    //! Read from a stream:
-    ReadResult readNode(std::istream& inputStream, const osgDB::Options* options) const
+    ReadResult readNode(std::istream& in, const osgDB::Options* options) const override
     {
-        // load entire stream into a buffer
-        std::istreambuf_iterator<char> eof;
-        std::string buffer(std::istreambuf_iterator<char>(inputStream), eof);
+        std::string buffer((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        inflateIfCompressed(buffer);
 
-        // Find referrer in the options
-        URIContext context(options);
-
-        // Determine format by peeking the magic header:
-        std::string magic(buffer, 0, 4);
-
-        if (magic == "b3dm")
-        {
-            B3DMReader reader;
-            reader.setTextureCache(&_cache);
-            return reader.read(context.referrer(), buffer, options);
-        }
-        else
-        {
-            GLTFReader reader;
-            reader.setTextureCache(&_cache);
-            return reader.read(context.referrer(), buffer, options);
-        }
-
-        return ReadResult::FILE_NOT_HANDLED;
+        // The referrer identifies the document and resolves its relative URIs.
+        GLTFReader reader;
+        reader.setTextureCache(&_cache);
+        return reader.read(URIContext(options).referrer(), buffer.data(), buffer.size(), options);
     }
 
-    //! Writes a node to GLTF.
-    WriteResult writeNode(const osg::Node& node, const std::string& location, const osgDB::Options* options) const
+    WriteResult writeNode(const osg::Node& node, const std::string& location, const osgDB::Options* options) const override
     {
-        std::string ext = osgDB::getLowerCaseFileExtension(location);
+        const std::string ext = osgDB::getLowerCaseFileExtension(location);
         if (!acceptsExtension(ext))
             return WriteResult::FILE_NOT_HANDLED;
-
-        if (ext == "gltf")
-        {
-            GLTFWriter writer;
-            return writer.write(node, location, false, options);
-        }
-        else if (ext == "glb")
-        {
-            GLTFWriter writer;
-            return writer.write(node, location, true, options);
-        }
-        else if (ext == "b3dm")
-        {
-            B3DMWriter writer;
-            return writer.write(node, location, true, options);
-        }
-
-        return WriteResult::ERROR_IN_WRITING_FILE;
+        return GLTFWriter().write(node, location, ext == "glb", options);
     }
-
 };
 
 REGISTER_OSGPLUGIN(gltf, GLTFReaderWriter)

@@ -4,6 +4,7 @@
  */
 #include <osgEarth/LayerShader>
 #include <osgEarth/ShaderLoader>
+#include <osgEarth/Shaders>
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/Color>
 #include <osgEarth/Layer>
@@ -133,7 +134,7 @@ LayerShader::install(Layer* layer, TerrainResources* res)
 
     VirtualProgram* vp = VirtualProgram::getOrCreate(stateset);
     vp->setName(layer->getName());
-    ShaderPackage package;
+    Shaders package;
     package.add("", _options.code());
 
     ShaderLoader::load(vp, "", package, layer->getReadOptions());
@@ -243,7 +244,9 @@ LayerShader::install(Layer* layer, TerrainResources* res)
         PBRTexture textures;
         textures.load(pbrsampler._material);
 
-        _reservations.reserve(3);
+        _reservations.reserve(4);
+        // Custom shaders may include PBRMaterial.glsl and decode the raw sampler.
+        stateset->addUniform(new osg::Uniform((pbrsampler._name + "_layoutAndFactors").c_str(), textures.layoutAndFactors));
 
         if (textures.albedo)
         {
@@ -278,6 +281,16 @@ LayerShader::install(Layer* layer, TerrainResources* res)
             {
                 stateset->setTextureAttribute(reservation.unit(), textures.pbr);
                 stateset->addUniform(new osg::Uniform((pbrsampler._name + "_pbr").c_str(), reservation.unit()));
+            }
+        }
+        if (textures.occlusion)
+        {
+            _reservations.emplace_back();
+            auto& reservation = _reservations.back();
+            if (res->reserveTextureImageUnitForLayer(reservation, layer, "User shader occlusion sampler"))
+            {
+                stateset->setTextureAttribute(reservation.unit(), textures.occlusion);
+                stateset->addUniform(new osg::Uniform((pbrsampler._name + "_occlusion").c_str(), reservation.unit()));
             }
         }
     }

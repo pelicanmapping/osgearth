@@ -6,6 +6,7 @@
 #include <osgEarth/InstanceBuilder>
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/Shaders>
+#include <osgEarth/ShaderLoader>
 #include <osgEarth/Registry>
 #include <osgEarth/Capabilities>
 #include <osg/VertexAttribDivisor>
@@ -229,8 +230,15 @@ void InstanceBuilder::installInstancing(osg::Geometry* geometry) const
     }
     VirtualProgram* vp = VirtualProgram::cloneOrCreate(ss);
     vp->setName("DrawInstancedAttribute");
-    osgEarth::Shaders pkg;
-    pkg.load(vp, pkg.DrawInstancedAttribute);
+    // Resolving the shader source (the file-system override lookup and
+    // include processing) costs far more than installing it and never
+    // changes, so resolve it once rather than per instanced geometry.
+    static const std::string instancingSource = []()
+    {
+        osgEarth::Shaders pkg;
+        return osgEarth::ShaderLoader::load(pkg.DrawInstancedAttribute, pkg);
+    }();
+    osgEarth::ShaderLoader::load(vp, instancingSource);
     vp->addBindAttribLocation("oe_DrawInstancedAttribute_position", POSITION_ATTRIB);
     vp->addBindAttribLocation("oe_DrawInstancedAttribute_rotation", ROTATION_ATTRIB);
     vp->addBindAttribLocation("oe_DrawInstancedAttribute_scale", SCALE_ATTRIB);

@@ -146,7 +146,9 @@ namespace
             Texture::Ptr normal_tex,
             Texture::Ptr pbr_tex,
             Texture::Ptr mat1_tex,
-            Texture::Ptr mat2_tex)
+            Texture::Ptr mat2_tex,
+            Texture::Ptr ao_tex = nullptr,
+            const osg::Vec4& layoutAndFactors = osg::Vec4(0, 1, 1, 1))
         {
             int albedo_index = _textures->find(albedo_tex);
             int normal_index = _textures->find(normal_tex);
@@ -156,7 +158,7 @@ namespace
 
             return _textures->getMaterialArena()->getOrCreate(*_textures,
                 {{albedo_index, normal_index, pbr_index, mat1_index, mat2_index}},
-                osg::Vec2i(mat1_index, mat2_index));
+                osg::Vec2i(mat1_index, mat2_index), _textures->find(ao_tex), layoutAndFactors);
         }
 
         // Pin each distinct material once for the lifetime of this Chonk,
@@ -304,7 +306,7 @@ namespace
             bool pushed = false;
             if (stateset)
             {
-                Texture::Ptr albedo_tex, normal_tex, pbr_tex;
+                Texture::Ptr albedo_tex, normal_tex, pbr_tex, ao_tex;
                 Texture::Ptr material_tex1, material_tex2;
 
                 auto combo = dynamic_cast<PBRTexture*>(stateset->getTextureAttribute(ALBEDO_UNIT, osg::StateAttribute::TEXTURE));
@@ -313,6 +315,7 @@ namespace
                     albedo_tex = addTexture(combo->albedo);
                     normal_tex = addTexture(combo->normal);
                     pbr_tex = addTexture(combo->pbr);
+                    ao_tex = addTexture(combo->occlusion);
                 }
                 else
                 {
@@ -324,10 +327,11 @@ namespace
                 material_tex1 = findExternalTexture(MAT1_SLOT, stateset);
                 material_tex2 = findExternalTexture(MAT2_SLOT, stateset);
 
-                if (albedo_tex || normal_tex || pbr_tex)
+                if (albedo_tex || normal_tex || pbr_tex || ao_tex || combo)
                 {
                     ChonkMaterial::Ptr material = reuseOrCreateMaterial(
-                        albedo_tex, normal_tex, pbr_tex, material_tex1, material_tex2);
+                        albedo_tex, normal_tex, pbr_tex, material_tex1, material_tex2,
+                        ao_tex, combo ? combo->layoutAndFactors : osg::Vec4(0, 1, 1, 1));
                     _materialStack.push(material);
                     pushed = true;
                 }
@@ -499,7 +503,7 @@ namespace
                         if (!variant)
                         {
                             variant = _textures->getMaterialArena()->getOrCreate(*_textures,
-                                material->textures, osg::Vec2i(id, -1));
+                                material->textures, osg::Vec2i(id, -1), material->occlusion, material->layoutAndFactors);
                             retainMaterial(chonk, variant);
                         }
                         v.material_index = variant->index;
@@ -732,20 +736,25 @@ namespace
                 auto* attr = entry.second.first.get();
                 if (auto* vp = dynamic_cast<VirtualProgram*>(attr))
                 {
-                    // ShaderGenerator's color and PBR functions are
-                    // represented by Chonk's material fields.
-                    // Other shader effects stay on the ordinary path.
-                    bool linearColor = false;
-                    node.getUserValue(CHONK_HINT_LINEAR_COLOR, linearColor);
-                    if (!linearColor) reject(node, "shader state lacks the supported linear-color hint");
+                    // ShaderGenerator's color and PBR functions and the
+                    // standard PBRTexture program are represented by Chonk's
+                    // material fields. Other shader effects stay on the
+                    // ordinary path. The standard program always treats
+                    // colors as linear; generated programs need the hint.
+                    bool generated = false;
                     VirtualProgram::ShaderMap shaders;
                     vp->getShaderMap(shaders);
                     for (const auto& shader : shaders)
                     {
                         const auto& name = shader.second._shader->getName();
-                        if (name != "oe_sg_vert_model" && name != "oe_sg_vert_view" && name != "oe_sg_frag")
+                        if (name == "oe_sg_vert_model" || name == "oe_sg_vert_view" || name == "oe_sg_frag")
+                            generated = true;
+                        else if (!PBRTexture::isStandardProgramFunction(name))
                             reject(node, "unsupported shader: " + name);
                     }
+                    bool linearColor = false;
+                    node.getUserValue(CHONK_HINT_LINEAR_COLOR, linearColor);
+                    if (generated && !linearColor) reject(node, "shader state lacks the supported linear-color hint");
                 }
                 else if (auto* face = dynamic_cast<osg::FrontFace*>(attr))
                 {

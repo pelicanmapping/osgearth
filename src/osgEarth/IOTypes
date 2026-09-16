@@ -7,6 +7,7 @@
 #include <osgEarth/DateTime>
 #include <osgEarth/Containers>
 #include <osg/Object>
+#include <utility>
 
 /**
  * A collectin of types used by the various I/O systems in osgEarth. These
@@ -23,6 +24,9 @@ namespace osgEarth
         StringObject();
         StringObject( const StringObject& rhs, const osg::CopyOp& op ) : osg::Object(rhs, op), _str(rhs._str) { }
         StringObject( const std::string& in ) : osg::Object(), _str(in) { }
+
+        /** Takes ownership of an rvalue string's storage instead of copying it. */
+        StringObject( std::string&& in ) : osg::Object(), _str(std::move(in)) { }
 
         /** dtor */
         virtual ~StringObject();

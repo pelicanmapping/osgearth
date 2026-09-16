@@ -1,1 +1,0 @@
-# Simple serialization API sample.

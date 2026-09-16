@@ -3,6 +3,7 @@
 #pragma import_defines(OE_IS_DEPTH_CAMERA)
 #pragma import_defines(OE_CHONK_MAX_LOD_FOR_NORMAL_MAPS)
 #pragma import_defines(OE_CHONK_MAX_LOD_FOR_PBR_MAPS)
+#pragma include PBRMaterial.glsl
 
 #ifndef OE_CHONK_MAX_LOD_FOR_NORMAL_MAPS
 #define OE_CHONK_MAX_LOD_FOR_NORMAL_MAPS 99
@@ -41,6 +42,8 @@ struct ChonkMaterial
     uint64_t material1;
     uint64_t material2;
     ivec2 extended;
+    uint64_t occlusion;
+    vec4 layoutAndFactors;
 };
 layout(binding = 2, std430) readonly buffer ChonkMaterialArena {
     ChonkMaterial chonkMaterials[];
@@ -76,6 +79,8 @@ flat out float oe_alpha_cutoff;
 flat out uint64_t oe_albedo_tex;
 flat out uint64_t oe_normal_tex;
 flat out uint64_t oe_pbr_tex;
+flat out uint64_t oe_occlusion_tex;
+flat out vec4 oe_pbr_layoutAndFactors;
 flat out ivec2 oe_extended_materials;
 flat out uint64_t oe_material1_tex;
 flat out uint64_t oe_material2_tex;
@@ -129,9 +134,13 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
     }
 
     oe_pbr_tex = 0;
+    oe_occlusion_tex = 0;
+    oe_pbr_layoutAndFactors = vec4(OE_PBR_LAYOUT_DRAM, 1, 1, 1);
     if (chonk_lod <= OE_CHONK_MAX_LOD_FOR_PBR_MAPS)
     {
         oe_pbr_tex = chonkMaterials[material_index].pbr;
+        oe_occlusion_tex = chonkMaterials[material_index].occlusion;
+        oe_pbr_layoutAndFactors = chonkMaterials[material_index].layoutAndFactors;
     }
 }
 
@@ -145,6 +154,7 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
 #pragma import_defines(OE_CHONK_SINGLE_SIDED)
 
 struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;
+#pragma include PBRMaterial.glsl
 
 // inputs
 in vec3 vp_Normal;
@@ -156,6 +166,8 @@ in float oe_fade;
 flat in uint64_t oe_albedo_tex;
 flat in uint64_t oe_normal_tex;
 flat in uint64_t oe_pbr_tex;
+flat in uint64_t oe_occlusion_tex;
+flat in vec4 oe_pbr_layoutAndFactors;
 flat in float oe_alpha_cutoff;
 
 flat in uint oe_normal_technique;
@@ -319,10 +331,12 @@ void oe_chonk_default_fragment(inout vec4 color)
         vp_Normal = normalize(mix(world_up, face_up, 0.25));
     }
 
-    if (oe_pbr_tex > 0)
+    if (oe_pbr_tex > 0 || oe_occlusion_tex > 0 || oe_pbr_layoutAndFactors.x != OE_PBR_LAYOUT_DRAM)
     {
         // apply PBR maps:
-        vec4 texel = texture(sampler2D(oe_pbr_tex), oe_tex_uv);
+        vec4 texel = oe_pbr_tex > 0 ? texture(sampler2D(oe_pbr_tex), oe_tex_uv) : vec4(1);
+        float ao = oe_occlusion_tex > 0 ? texture(sampler2D(oe_occlusion_tex), oe_tex_uv).r : -1.0;
+        texel = oe_pbr_decode(texel, oe_pbr_layoutAndFactors, ao);
 
         oe_pbr.displacement = texel[0];
         oe_pbr.roughness *= texel[1];

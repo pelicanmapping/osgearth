@@ -101,7 +101,9 @@ set(TARGET_GLSL
     SimpleOceanLayer.glsl
     RTTPicker.glsl
     WindLayer.CS.glsl
-    PBR.glsl)
+    PBR.glsl
+    PBRMaterial.glsl
+    PBRTexture.glsl)
 
 set(TARGET_IN
     BuildConfig.in    

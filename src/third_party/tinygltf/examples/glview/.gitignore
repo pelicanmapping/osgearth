@@ -1,7 +1,0 @@
-.vs
-Debug
-x64
-packages
-
-!*.sln
-!*.vcxproj*

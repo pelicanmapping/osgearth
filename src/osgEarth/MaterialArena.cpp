@@ -11,15 +11,16 @@ using namespace osgEarth;
 constexpr unsigned MaterialArena::CAPACITY;
 constexpr unsigned MaterialArena::BINDING_POINT;
 
-static_assert(sizeof(MaterialArena::GPU) == 48, "Material SSBO layout must match Chonk.glsl");
+static_assert(sizeof(MaterialArena::GPU) == 80, "Material SSBO layout must match Chonk.glsl");
 static_assert(offsetof(MaterialArena::GPU, extended) == 40, "Material SSBO member alignment");
+static_assert(offsetof(MaterialArena::GPU, layoutAndFactors) == 64, "PBR layout and factors must be vec4 aligned");
 
 // Keep textures alive independently of TextureArena's auto-release setting.
 // Registration is deferred until getOrCreate has installed all lookup entries.
 MaterialArena::Material::Material(MaterialArena* arena, GLushort id,
     const Indices& indices, const osg::Vec2i& ext,
-    const std::array<std::shared_ptr<Texture>, 5>& refs) :
-    index(id), textures(indices), extended(ext), _arena(arena), _textures(refs)
+    const std::array<std::shared_ptr<Texture>, 6>& refs, int ao, const osg::Vec4& layoutAndFactors) :
+    index(id), textures(indices), extended(ext), occlusion(ao), layoutAndFactors(layoutAndFactors), _arena(arena), _textures(refs)
 {
 }
 
@@ -31,31 +32,35 @@ MaterialArena::Material::~Material()
 
 // Legacy shader IDs distinguish materials even when their texture slots match.
 MaterialArena::Key
-MaterialArena::key(const Indices& indices, const osg::Vec2i& extended)
+MaterialArena::key(const Indices& indices, const osg::Vec2i& extended, int ao, const osg::Vec4& layoutAndFactors)
 {
-    return {{indices[0], indices[1], indices[2], indices[3], indices[4], extended.x(), extended.y()}};
+    return {{{indices[0], indices[1], indices[2], indices[3], indices[4], extended.x(), extended.y(), ao}}, layoutAndFactors};
 }
 
 // Deduplicate materials across Chonks sharing a TextureArena and allocate bounded,
 // reusable IDs. Each returned owner pins both the ID and its texture references.
 MaterialArena::Material::Ptr
-MaterialArena::getOrCreate(TextureArena& textures, const Indices& indices, const osg::Vec2i& extended)
+MaterialArena::getOrCreate(TextureArena& textures, const Indices& indices, const osg::Vec2i& extended,
+    int occlusion, const osg::Vec4& layoutAndFactors)
 {
     // Acquire texture references BEFORE our lock: TextureArena::apply locks in
     // the opposite direction. These references prevent texture-slot recycling.
-    std::array<std::shared_ptr<Texture>, 5> refs;
+    std::array<std::shared_ptr<Texture>, 6> refs;
     for (unsigned i = 0; i < refs.size(); ++i)
-        if (indices[i] >= 0)
+    {
+        const int slot = i < indices.size() ? indices[i] : occlusion;
+        if (slot >= 0)
         {
-            refs[i] = textures.find(unsigned(indices[i]));
+            refs[i] = textures.find(unsigned(slot));
             if (!refs[i]) throw std::invalid_argument("Material references an unregistered texture");
         }
+    }
     std::shared_ptr<Material> material; // destroy only after unlocking
     std::lock_guard<std::mutex> lock(_mutex);
     if (_textures && _textures != &textures)
         throw std::invalid_argument("MaterialArena cannot mix TextureArenas");
     _textures = &textures;
-    const auto k = key(indices, extended);
+    const auto k = key(indices, extended, occlusion, layoutAndFactors);
     auto found = _lookup.find(k);
     if (found != _lookup.end())
     {
@@ -73,7 +78,7 @@ MaterialArena::getOrCreate(TextureArena& textures, const Indices& indices, const
         _free.reserve(std::max(std::size_t(8), _free.capacity() * 2));
     if (_materials.size() == _materials.capacity())
         _materials.reserve(std::max(std::size_t(8), _materials.capacity() * 2));
-    material.reset(new Material(this, index, indices, extended, refs));
+    material.reset(new Material(this, index, indices, extended, refs, occlusion, layoutAndFactors));
     _lookup[k] = index;
     if (_free.empty()) _materials.emplace_back();
     else _free.pop_back();
@@ -88,7 +93,7 @@ MaterialArena::getOrCreate(TextureArena& textures, const Indices& indices, const
 void MaterialArena::release(const Material& material)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    auto found = _lookup.find(key(material.textures, material.extended));
+    auto found = _lookup.find(key(material.textures, material.extended, material.occlusion, material.layoutAndFactors));
     if (found != _lookup.end() && found->second == material.index) _lookup.erase(found);
     _materials[material.index].reset();
     _free.push_back(material.index);
@@ -133,7 +138,7 @@ void MaterialArena::apply(osg::State& state, const std::vector<GLuint64>& handle
             owners.push_back(material);
             // Missing or paged-out maps resolve to zero; respect UBO padding.
             auto handle = [&](unsigned slot) {
-                int index = material->textures[slot];
+                int index = slot < material->textures.size() ? material->textures[slot] : material->occlusion;
                 const auto offset = std::size_t(index) * handleStride;
                 return index >= 0 && offset < handles.size() ? handles[offset] : GLuint64(0);
             };
@@ -141,6 +146,8 @@ void MaterialArena::apply(osg::State& state, const std::vector<GLuint64>& handle
             record.albedo = handle(0); record.normal = handle(1); record.pbr = handle(2);
             record.material1 = handle(3); record.material2 = handle(4);
             record.extended[0] = material->extended.x(); record.extended[1] = material->extended.y();
+            record.occlusion = handle(5);
+            record.layoutAndFactors = material->layoutAndFactors;
         }
         if (!gl.buffer || !gl.buffer->valid())
         {

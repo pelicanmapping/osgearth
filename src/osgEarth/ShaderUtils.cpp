@@ -537,7 +537,7 @@ DiscardAlphaFragments::install(osg::StateSet* ss, float minAlpha) const
 
             std::string code = Stringify()
                 << "void oe_discardalpha_frag(inout vec4 color) { \n"
-                << "    if ( color.a < " << std::setprecision(1) << minAlpha << ") discard;\n"
+                << "    if ( color.a < " << std::fixed << std::setprecision(4) << minAlpha << ") discard;\n"
                 << "} \n";
 
             vp->setFunction(

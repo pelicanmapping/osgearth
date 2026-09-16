@@ -102,7 +102,8 @@ set(TARGET_GLSL
     RTTPicker.glsl
     WindLayer.CS.glsl
     PBR.glsl
-    PBRMaterial.glsl)
+    PBRMaterial.glsl
+    PBRTexture.glsl)
 
 set(TARGET_IN
     BuildConfig.in    

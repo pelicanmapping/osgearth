@@ -11,6 +11,8 @@
 
 namespace osgEarth
 {
+    class VirtualProgram;
+
     /**
     * Describes a PBR (physically-based rendering) material as a collection
     * of its component rasters.
@@ -141,6 +143,31 @@ namespace osgEarth
 
         //! Populates this object from a PBRMaterial description
         Status load(const PBRMaterial& material, const osgDB::Options* options = nullptr);
+
+        //! Texture units the standard program samples. Unit 0 holds this descriptor.
+        enum StandardUnit { ALBEDO_UNIT = 1, NORMAL_UNIT = 2, PBR_UNIT = 3, OCCLUSION_UNIT = 4 };
+
+        /**
+         * Binds this material on a stateset for the standard PBR program: the
+         * descriptor itself on unit 0 (read by Chonk), the component textures on
+         * the standard units, and the factor and flag uniforms the program reads.
+         * Install the program once on an ancestor with installProgram().
+         */
+        void install(osg::StateSet* stateSet);
+
+        /**
+         * Installs the shared standard PBR program and its sampler bindings on a
+         * stateset, typically the root of a model whose materials were bound with
+         * install(). The program is created once and reused everywhere, so no
+         * shader generation happens per model.
+         */
+        static void installProgram(osg::StateSet* stateSet);
+
+        //! The shared standard PBR program, created on first use.
+        static VirtualProgram* getOrCreateProgram();
+
+        //! True for the names of the standard program's shader functions.
+        static bool isStandardProgramFunction(const std::string& name);
     };
 }
 

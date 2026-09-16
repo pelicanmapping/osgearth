@@ -736,20 +736,25 @@ namespace
                 auto* attr = entry.second.first.get();
                 if (auto* vp = dynamic_cast<VirtualProgram*>(attr))
                 {
-                    // ShaderGenerator's color and PBR functions are
-                    // represented by Chonk's material fields.
-                    // Other shader effects stay on the ordinary path.
-                    bool linearColor = false;
-                    node.getUserValue(CHONK_HINT_LINEAR_COLOR, linearColor);
-                    if (!linearColor) reject(node, "shader state lacks the supported linear-color hint");
+                    // ShaderGenerator's color and PBR functions and the
+                    // standard PBRTexture program are represented by Chonk's
+                    // material fields. Other shader effects stay on the
+                    // ordinary path. The standard program always treats
+                    // colors as linear; generated programs need the hint.
+                    bool generated = false;
                     VirtualProgram::ShaderMap shaders;
                     vp->getShaderMap(shaders);
                     for (const auto& shader : shaders)
                     {
                         const auto& name = shader.second._shader->getName();
-                        if (name != "oe_sg_vert_model" && name != "oe_sg_vert_view" && name != "oe_sg_frag")
+                        if (name == "oe_sg_vert_model" || name == "oe_sg_vert_view" || name == "oe_sg_frag")
+                            generated = true;
+                        else if (!PBRTexture::isStandardProgramFunction(name))
                             reject(node, "unsupported shader: " + name);
                     }
+                    bool linearColor = false;
+                    node.getUserValue(CHONK_HINT_LINEAR_COLOR, linearColor);
+                    if (generated && !linearColor) reject(node, "shader state lacks the supported linear-color hint");
                 }
                 else if (auto* face = dynamic_cast<osg::FrontFace*>(attr))
                 {

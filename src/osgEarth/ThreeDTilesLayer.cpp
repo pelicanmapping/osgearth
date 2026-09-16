@@ -49,7 +49,7 @@ ThreeDTilesLayer::init()
 {
     VisibleLayer::init();
 
-    // Make sure the b3dm plugin is loaded
+    // Make sure the glTF plugin is loaded
     std::string libname = osgDB::Registry::instance()->createLibraryNameForExtension("gltf");
     osgDB::Registry::instance()->loadLibrary(libname);
 }

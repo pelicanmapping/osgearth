@@ -8,6 +8,8 @@ namespace osgEarth { namespace Util
     {
         PBRMaterial = "PBRMaterial.glsl";
         _sources[PBRMaterial] = @PBRMaterial.glsl@;
+        PBRTexture = "PBRTexture.glsl";
+        _sources[PBRTexture] = @PBRTexture.glsl@;
         // Cascade Draping
         CascadeDraping = "CascadeDraping.glsl";
         _sources[CascadeDraping] = @CascadeDraping.glsl@;

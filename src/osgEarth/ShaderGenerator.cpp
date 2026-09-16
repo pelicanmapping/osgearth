@@ -907,8 +907,13 @@ ShaderGenerator::processGeometry(
                 if (!wrotePBRDecl)
                 {
                     wrotePBRDecl = true;
-                    Shaders shaders;
-                    buf._fragHead << ShaderLoader::load(shaders.PBRMaterial, shaders);
+                    // The decode library never changes; process it once.
+                    static const std::string pbrMaterialSource = []()
+                    {
+                        Shaders shaders;
+                        return ShaderLoader::load(shaders.PBRMaterial, shaders);
+                    }();
+                    buf._fragHead << pbrMaterialSource;
                     buf._viewHead << "out vec3 oe_sg_pbr_position;\n";
                     buf._viewBody << "oe_sg_pbr_position = vertex_view.xyz / vertex_view.w;\n";
                     buf._fragHead << R"(

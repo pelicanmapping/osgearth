@@ -1,573 +1,725 @@
 /* osgEarth
-* Copyright 2025 Pelican Mapping
+* Copyright 2026 Pelican Mapping
 * MIT License
 */
-#ifndef OSGEARTH_GLTF_WRITER_H
-#define OSGEARTH_GLTF_WRITER_H
+#pragma once
 
-#include <osg/Node>
+/**
+ * Writes an OSG scene graph as glTF 2.0 (JSON or GLB) with cgltf.
+ *
+ * - Every OSG node becomes a glTF node; transforms carry their local matrix
+ *   and a root node rotates OSG's Z-up into glTF's Y-up.
+ * - Each osg::Geometry becomes a mesh with POSITION (with bounds), NORMAL,
+ *   COLOR_0 (float or normalized byte/short colors), TEXCOORD_0/TEXCOORD_1
+ *   (Vec2, or the xy of Vec3 coordinates) and one primitive per DrawArrays
+ *   or DrawElements set.
+ * - The nearest texture on unit 0 (an osg::Texture, or the albedo of an
+ *   osgEarth PBRTexture) becomes a PNG-encoded base color texture with its
+ *   sampler settings. Texture coordinates pass through unchanged, so the
+ *   image is written with memory row 0 on top; OSG-native and reader-loaded
+ *   images both round-trip. Materials are metallic 0 / roughness 1,
+ *   doubleSided unless the stateset enables face culling, and BLEND when it
+ *   enables blending.
+ * - Everything is self-contained: one buffer (the GLB BIN chunk, or a base64
+ *   data URI in .gltf) holds vertex, index and image data.
+ */
+
+#include <cgltf_write.h>
+
+#include <osg/Geode>
 #include <osg/Geometry>
 #include <osg/MatrixTransform>
-#include <osgDB/FileNameUtils>
-#include <osgDB/ReaderWriter>
+#include <osg/NodeVisitor>
+#include <osg/Texture>
+#include <osgDB/ConvertBase64>
 #include <osgDB/FileUtils>
-#include <osgDB/WriteFile>
+#include <osgDB/ReaderWriter>
+#include <osgDB/Registry>
+#include <osgDB/fstream>
 #include <osgEarth/Notify>
-#include <osgEarth/StringUtils>
-#include <stack>
+#include <osgEarth/PBRMaterial>
 
-using namespace osgEarth;
-using namespace osgEarth::Util;
+#include <algorithm>
+#include <cstring>
+#include <map>
+#include <sstream>
+#include <string>
+#include <tuple>
+#include <vector>
 
 #undef LC
-#define LC "[GLTFWriter] "
-
-//! Visitor that builds a GLTF data model from an OSG scene graph.
-class OSGtoGLTF : public osg::NodeVisitor
-{
-private:
-    typedef std::map<osg::ref_ptr< const osg::Node >, int> OsgNodeSequenceMap;
-    typedef std::map<osg::ref_ptr<const osg::BufferData>, int> ArraySequenceMap;
-    typedef std::map< osg::ref_ptr<const osg::Array>, int> AccessorSequenceMap;
-    typedef std::vector< osg::ref_ptr< osg::StateSet > > StateSetStack;
-
-    std::vector< osg::ref_ptr< osg::Texture > > _textures;
-
-    tinygltf::Model& _model;
-    std::stack<tinygltf::Node*> _gltfNodeStack;
-    OsgNodeSequenceMap _osgNodeSeqMap;
-    ArraySequenceMap _buffers;
-    ArraySequenceMap _bufferViews;
-    ArraySequenceMap _accessors;
-    StateSetStack _ssStack;
-
-public:
-    OSGtoGLTF(tinygltf::Model& model) : _model(model)
-    {
-        setTraversalMode(TRAVERSE_ALL_CHILDREN);
-        setNodeMaskOverride(~0);
-
-        // default root scene:
-        _model.scenes.push_back(tinygltf::Scene());
-        tinygltf::Scene& scene = _model.scenes.back();
-        _model.defaultScene = 0;
-    }
-
-    void push(tinygltf::Node& gnode)
-    {
-        _gltfNodeStack.push(&gnode);
-    }
-
-    void pop()
-    {
-        _gltfNodeStack.pop();
-    }
-
-    bool pushStateSet(osg::StateSet* stateSet)
-    {
-        osg::Texture* osgTexture = dynamic_cast<osg::Texture*>(stateSet->getTextureAttribute(0, osg::StateAttribute::TEXTURE));
-        if (!osgTexture)
-        {
-            return false;
-        }
-
-        _ssStack.push_back(stateSet);
-        return true;
-    }
-
-    void popStateSet()
-    {
-        _ssStack.pop_back();
-    }
-
-
-    void apply(osg::Node& node)
-    {
-        bool isRoot = _model.scenes[_model.defaultScene].nodes.empty();
-        if (isRoot)
-        {
-            // put a placeholder here just to prevent any other nodes
-            // from thinking they are the root
-            _model.scenes[_model.defaultScene].nodes.push_back(-1);
-        }
-
-        bool pushedStateSet = false;
-        osg::ref_ptr< osg::StateSet > ss = node.getStateSet();
-        if (ss)
-        {
-            pushedStateSet = pushStateSet(ss.get());
-        }
-
-        traverse(node);
-
-        if (ss && pushedStateSet)
-        {
-            popStateSet();
-        }
-
-        _model.nodes.push_back(tinygltf::Node());
-        tinygltf::Node& gnode = _model.nodes.back();
-        int id = _model.nodes.size() - 1;
-        gnode.name = Strings::Stringify() << "_gltfNode_" << id;
-        _osgNodeSeqMap[&node] = id;
-
-        if (isRoot)
-        {
-            // replace the placeholder with the actual root id.
-            _model.scenes[_model.defaultScene].nodes.back() = id;
-        }
-    }
-
-    void apply(osg::Group& group)
-    {
-        apply(static_cast<osg::Node&>(group));
-
-        for (unsigned i = 0; i < group.getNumChildren(); ++i)
-        {
-            int id = _osgNodeSeqMap[group.getChild(i)];
-            _model.nodes.back().children.push_back(id);
-        }
-    }
-
-    void apply(osg::Transform& xform)
-    {
-        apply(static_cast<osg::Group&>(xform));
-
-        osg::Matrix matrix;
-        xform.computeLocalToWorldMatrix(matrix, this);
-        const double* ptr = matrix.ptr();
-        for (unsigned i = 0; i < 16; ++i)
-            _model.nodes.back().matrix.push_back(*ptr++);
-    }
-
-    unsigned getBytesInDataType(GLenum dataType)
-    {
-        return
-            dataType == GL_BYTE || dataType == GL_UNSIGNED_BYTE ? 1 :
-            dataType == GL_SHORT || dataType == GL_UNSIGNED_SHORT ? 2 :
-            dataType == GL_INT || dataType == GL_UNSIGNED_INT || dataType == GL_FLOAT ? 4 :
-            0;
-    }
-
-    unsigned getBytesPerElement(const osg::Array* data)
-    {
-        return data->getDataSize() * getBytesInDataType(data->getDataType());
-    }
-
-    unsigned getBytesPerElement(const osg::DrawElements* data)
-    {
-        return
-            dynamic_cast<const osg::DrawElementsUByte*>(data) ? 1 :
-            dynamic_cast<const osg::DrawElementsUShort*>(data) ? 2 :
-            4;
-    }
-
-    int getOrCreateBuffer(const osg::BufferData* data, GLenum type)
-    {
-        ArraySequenceMap::iterator a = _buffers.find(data);
-        if (a != _buffers.end())
-            return a->second;
-
-        _model.buffers.push_back(tinygltf::Buffer());
-        tinygltf::Buffer& buffer = _model.buffers.back();
-        int id = _model.buffers.size() - 1;
-        _buffers[data] = id;
-
-        int bytes = getBytesInDataType(type);
-        buffer.data.resize(data->getTotalDataSize());
-
-        //TODO: account for endianess
-        unsigned char* ptr = (unsigned char*)(data->getDataPointer());
-        for (unsigned i = 0; i < data->getTotalDataSize(); ++i)
-            buffer.data[i] = *ptr++;
-
-        return id;
-    }
-
-    int getOrCreateBufferView(const osg::BufferData* data, GLenum type, GLenum target)
-    {
-        ArraySequenceMap::iterator a = _bufferViews.find(data);
-        if (a != _bufferViews.end())
-            return a->second;
-
-        int bufferId = -1;
-        ArraySequenceMap::iterator buffersIter = _buffers.find(data);
-        if (buffersIter != _buffers.end())
-            bufferId = buffersIter->second;
-        else
-            bufferId = getOrCreateBuffer(data, type);
-
-        _model.bufferViews.push_back(tinygltf::BufferView());
-        tinygltf::BufferView& bv = _model.bufferViews.back();
-        int id = _model.bufferViews.size() - 1;
-        _bufferViews[data] = id;
-
-        bv.buffer = bufferId;
-        bv.byteLength = data->getTotalDataSize();
-        bv.byteOffset = 0;
-        bv.target = target;
-
-        //ONLY used for vertex attrbs, I guess:
-        //unsigned bytesPerComponent = getBytesPerComponent(data->getDataType());
-        //unsigned componentsPerElement = data->getDataSize();
-        //bv.byteStride = bytesPerComponent * componentsPerElement;
-
-        return id;
-    }
-
-    int getOrCreateAccessor(osg::Array* data, osg::PrimitiveSet* pset, tinygltf::Primitive& prim, const std::string& attr)
-    {
-        ArraySequenceMap::iterator a = _accessors.find(data);
-        if (a != _accessors.end())
-            return a->second;
-
-        ArraySequenceMap::iterator bv = _bufferViews.find(data);
-        if (bv == _bufferViews.end())
-            return -1;
-
-        _model.accessors.push_back(tinygltf::Accessor());
-        tinygltf::Accessor& accessor = _model.accessors.back();
-        int accessorId = _model.accessors.size() - 1;
-        prim.attributes[attr] = accessorId;
-
-        accessor.type =
-            data->getDataSize() == 1 ? TINYGLTF_TYPE_SCALAR :
-            data->getDataSize() == 2 ? TINYGLTF_TYPE_VEC2 :
-            data->getDataSize() == 3 ? TINYGLTF_TYPE_VEC3 :
-            data->getDataSize() == 4 ? TINYGLTF_TYPE_VEC4 :
-            TINYGLTF_TYPE_SCALAR;
-
-        accessor.bufferView = bv->second;
-        accessor.byteOffset = 0;
-        accessor.componentType = data->getDataType();
-        accessor.count = data->getNumElements();
-        accessor.normalized = data->getNormalize();
-
-        const osg::DrawArrays* da = dynamic_cast<const osg::DrawArrays*>(pset);
-        if (da)
-        {
-            accessor.byteOffset = da->getFirst() * getBytesPerElement(data);
-            accessor.count = da->getCount();
-        }
-
-        //TODO: indexed elements
-        osg::DrawElements* de = dynamic_cast<osg::DrawElements*>(pset);
-        if (de)
-        {
-            _model.accessors.push_back(tinygltf::Accessor());
-            tinygltf::Accessor& idxAccessor = _model.accessors.back();
-            prim.indices = _model.accessors.size() - 1;
-
-            idxAccessor.type = TINYGLTF_TYPE_SCALAR;
-            idxAccessor.byteOffset = 0;
-            idxAccessor.componentType = de->getDataType();
-            idxAccessor.count = de->getNumIndices();
-
-            getOrCreateBuffer(de, idxAccessor.componentType);
-            int idxBV = getOrCreateBufferView(de, idxAccessor.componentType, GL_ELEMENT_ARRAY_BUFFER_ARB);
-
-            idxAccessor.bufferView = idxBV;
-        }
-
-        return accessorId;
-    }
-
-    int getCurrentMaterial()
-    {
-        if (_ssStack.size() > 0)
-        {
-            osg::ref_ptr< osg::StateSet > stateSet = _ssStack.back();
-
-            // Try to get the current texture
-            osg::Texture* osgTexture = dynamic_cast<osg::Texture*>(stateSet->getTextureAttribute(0, osg::StateAttribute::TEXTURE));
-            if (osgTexture)
-            {
-                // Try to find the existing texture, which corresponds to a material index
-                for (unsigned int i = 0; i < _textures.size(); i++)
-                {
-                    if (_textures[i].get() == osgTexture)
-                    {
-                        return i;
-                    }
-                }
-
-                osg::ref_ptr< const osg::Image > osgImage = osgTexture->getImage(0);
-                if (osgImage)
-                {
-                    int index = _textures.size();
-
-                    _textures.push_back(osgTexture);
-
-                                     
-                    // Flip the image before writing
-                    osg::ref_ptr< osg::Image > flipped = new osg::Image(*osgImage.get());
-                    flipped->flipVertical();
-
-                    std::string filename;
-
-                    std::string ext = "png";// osgDB::getFileExtension(osgImage->getFileName());
-
-                    // If the image has a filename try to hash it so we only write out one copy of it.  
-                    if (!osgImage->getFileName().empty())
-                    {
-                        filename = Stringify() << std::hex << ::Strings::hashString(osgImage->getFileName()) << "." << ext;                        
-
-                        if (!osgDB::fileExists(filename))
-                        {
-                            osgDB::writeImageFile(*flipped.get(), filename);
-                        }                        
-                    }
-                    else
-                    {                      
-                        // Otherwise just find a filename that doesn't exist
-                        int fileNameInc = 0;
-                        do
-                        {
-                            std::stringstream ss;
-                            ss << fileNameInc << "." << ext;
-                            filename = ss.str();
-                            fileNameInc++;
-                        } while (osgDB::fileExists(filename));
-                        osgDB::writeImageFile(*flipped.get(), filename);
-                    }
-                                   
-                    // Add the image
-                    // TODO:  Find a better way to write out the image url.  Right now it's assuming a ../.. scheme.
-                    Image image;
-                    std::stringstream buf;
-                    buf << "../../" << filename;
-                    image.uri = buf.str();//filename;
-                    _model.images.push_back(image);
-
-                    // Add the sampler
-                    Sampler sampler;
-                    osg::Texture::WrapMode wrapS = osgTexture->getWrap(osg::Texture::WRAP_S);
-                    osg::Texture::WrapMode wrapT = osgTexture->getWrap(osg::Texture::WRAP_T);
-                    osg::Texture::WrapMode wrapR = osgTexture->getWrap(osg::Texture::WRAP_R);
-
-                    // Validate the clamp mode to be compatible with webgl
-                    if ((wrapS == osg::Texture::CLAMP) || (wrapS == osg::Texture::CLAMP_TO_BORDER))
-                    {                     
-                        wrapS = osg::Texture::CLAMP_TO_EDGE;
-                    }
-                    if ((wrapT == osg::Texture::CLAMP) || (wrapT == osg::Texture::CLAMP_TO_BORDER))
-                    {                     
-                        wrapT = osg::Texture::CLAMP_TO_EDGE;
-                    }
-                    if ((wrapR == osg::Texture::CLAMP) || (wrapR == osg::Texture::CLAMP_TO_BORDER))
-                    {                     
-                        wrapR = osg::Texture::CLAMP_TO_EDGE;
-                    }                    
-                    sampler.wrapS = wrapS;
-                    sampler.wrapT = wrapT;
-                    sampler.wrapR = wrapR;
-                    sampler.minFilter = osgTexture->getFilter(osg::Texture::MIN_FILTER);
-                    sampler.magFilter = osgTexture->getFilter(osg::Texture::MAG_FILTER);
-
-                    _model.samplers.push_back(sampler);
-
-                    // Add the texture
-                    tinygltf::Texture texture;
-                    texture.source = index;
-                    texture.sampler = index;
-                    _model.textures.push_back(texture);
-
-                    // Add the material
-                    Material mat;
-                    Parameter textureParam;
-                    textureParam.json_double_value["index"] = index;
-                    textureParam.json_double_value["texCoord"] = 0;
-                    mat.values["baseColorTexture"] = textureParam;
-
-                    Parameter colorFactor;
-                    colorFactor.number_array.push_back(1.0);
-                    colorFactor.number_array.push_back(1.0);
-                    colorFactor.number_array.push_back(1.0);
-                    colorFactor.number_array.push_back(1.0);
-
-                    Parameter metallicFactor;
-                    metallicFactor.has_number_value = true;
-                    metallicFactor.number_value = 0.0;
-                    mat.values["metallicFactor"] = metallicFactor;
-
-                    Parameter roughnessFactor;
-                    roughnessFactor.number_value = 1.0;
-                    roughnessFactor.has_number_value = true;
-                    mat.values["roughnessFactor"] = roughnessFactor;
-
-                    mat.doubleSided = ((stateSet->getMode(GL_CULL_FACE) & osg::StateAttribute::ON) == 0);
-
-                    if (stateSet->getMode(GL_BLEND) & osg::StateAttribute::ON) {
-                        mat.alphaMode = "BLEND";
-                    }
-                    
-                    _model.materials.push_back(mat);
-                    return index;
-                }
-            }
-        }
-        return -1;
-    }
-
-    void apply(osg::Drawable& drawable)
-    {
-        if (drawable.asGeometry())
-        {
-            apply(static_cast<osg::Node&>(drawable));
-
-            osg::ref_ptr< osg::StateSet > ss = drawable.getStateSet();
-            bool pushedStateSet = false;
-            if (ss.valid())
-            {
-                pushedStateSet = pushStateSet(ss.get());
-            }
-
-            osg::Geometry* geom = drawable.asGeometry();
-
-            _model.meshes.push_back(tinygltf::Mesh());
-            tinygltf::Mesh& mesh = _model.meshes.back();
-            _model.nodes.back().mesh = _model.meshes.size() - 1;
-
-            osg::Vec3f posMin(FLT_MAX, FLT_MAX, FLT_MAX);
-            osg::Vec3f posMax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-            osg::Vec3Array* positions = dynamic_cast<osg::Vec3Array*>(geom->getVertexArray());
-            if (positions)
-            {
-                getOrCreateBufferView(positions, GL_FLOAT, GL_ARRAY_BUFFER_ARB);
-                for (unsigned i = 0; i < positions->size(); ++i)
-                {
-                    const osg::Vec3f& v = (*positions)[i];
-                    posMin.x() = osg::minimum(posMin.x(), v.x());
-                    posMin.y() = osg::minimum(posMin.y(), v.y());
-                    posMin.z() = osg::minimum(posMin.z(), v.z());
-                    posMax.x() = osg::maximum(posMax.x(), v.x());
-                    posMax.y() = osg::maximum(posMax.y(), v.y());
-                    posMax.z() = osg::maximum(posMax.z(), v.z());
-                }
-            }
-
-            osg::Vec3Array* normals = dynamic_cast<osg::Vec3Array*>(geom->getNormalArray());
-            if (normals)
-            {
-                getOrCreateBufferView(normals, GL_FLOAT, GL_ARRAY_BUFFER_ARB);
-            }
-
-            osg::Vec4Array* colors = dynamic_cast<osg::Vec4Array*>(geom->getColorArray());
-            if (colors)
-            {
-                getOrCreateBufferView(colors, GL_FLOAT, GL_ARRAY_BUFFER_ARB);
-            }
-
-            osg::ref_ptr< osg::Vec2Array > texCoords = dynamic_cast<osg::Vec2Array*>(geom->getTexCoordArray(0));
-            if (!texCoords.valid())
-            {                
-                // See if we have 3d texture coordinates and convert them to vec2
-                osg::Vec3Array* texCoords3 = dynamic_cast<osg::Vec3Array*>(geom->getTexCoordArray(0));
-                if (texCoords3)
-                {
-                    texCoords = new osg::Vec2Array;
-                    for (unsigned int i = 0; i < texCoords3->size(); i++)
-                    {
-                        texCoords->push_back(osg::Vec2((*texCoords3)[i].x(), (*texCoords3)[i].y()));
-                    }
-                    //geom->setTexCoordArray(0, texCoords.get());
-                }
-            }
-
-            if (texCoords.valid())
-            {
-                getOrCreateBufferView(texCoords.get(), GL_FLOAT, GL_ARRAY_BUFFER_ARB);
-            }
-
-            for (unsigned i = 0; i < geom->getNumPrimitiveSets(); ++i)
-            {
-                osg::PrimitiveSet* pset = geom->getPrimitiveSet(i);
-
-                mesh.primitives.push_back(tinygltf::Primitive());
-                tinygltf::Primitive& primitive = mesh.primitives.back();
-
-                int currentMaterial = getCurrentMaterial();
-                if (currentMaterial >= 0)
-                {
-                    // Cesium may crash if using texture without texCoords
-                    // gltf_validator will report it as errors
-                    // ThreeJS seems to be fine though
-                    // TODO: check if the material actually has any texture in it
-                    // TODO: the material should not be added if not used anywhere
-                    if (texCoords.valid()) {
-                        primitive.material = currentMaterial;
-                    }
-                }
-
-                primitive.mode = pset->getMode();
-
-                int a = getOrCreateAccessor(positions, pset, primitive, "POSITION");
-
-                // record min/max for position array (required):
-                tinygltf::Accessor& posacc = _model.accessors[a];
-                posacc.minValues.push_back(posMin.x());
-                posacc.minValues.push_back(posMin.y());
-                posacc.minValues.push_back(posMin.z());
-                posacc.maxValues.push_back(posMax.x());
-                posacc.maxValues.push_back(posMax.y());
-                posacc.maxValues.push_back(posMax.z());                
-
-                getOrCreateAccessor(normals, pset, primitive, "NORMAL");
-
-                getOrCreateAccessor(colors, pset, primitive, "COLOR_0");
-                getOrCreateAccessor(texCoords.get(), pset, primitive, "TEXCOORD_0");
-            }
-
-            if (pushedStateSet)
-            {
-                popStateSet();
-            }
-        }
-    }
-};
+#define LC "[gltf] "
 
 class GLTFWriter
 {
 public:
-    osgDB::ReaderWriter::WriteResult write(const osg::Node& node,
-                                           const std::string& location,
-                                           bool isBinary,
-                                           const osgDB::Options* options) const
+    osgDB::ReaderWriter::WriteResult write(const osg::Node& node, const std::string& location, bool binary, const osgDB::Options*) const
     {
-        tinygltf::Model model;
-        convertOSGtoGLTF(node, model);
+        Builder builder;
+        // accept() is non-const, but the visitor never modifies the graph.
+        const_cast<osg::Node&>(node).accept(builder);
 
-        tinygltf::TinyGLTF writer;
+        std::string json;
+        std::vector<unsigned char> bin;
+        if (!builder.serialize(&node, binary, json, bin))
+        {
+            OE_WARN << LC << "Nothing to write to " << location << std::endl;
+            return osgDB::ReaderWriter::WriteResult::ERROR_IN_WRITING_FILE;
+        }
 
-        writer.WriteGltfSceneToFile(
-            &model,
-            location,
-            true,           // embedImages
-            true,           // embedBuffers
-            true,           // prettyPrint
-            isBinary);      // writeBinary
+        osgDB::ofstream out(location.c_str(), std::ios::out | std::ios::binary);
+        if (!out)
+            return osgDB::ReaderWriter::WriteResult::ERROR_IN_WRITING_FILE;
 
-        return osgDB::ReaderWriter::WriteResult::FILE_SAVED;
+        if (binary)
+        {
+            // GLB: 12-byte header, JSON chunk padded with spaces, BIN chunk padded with zeros.
+            while (json.size() % 4) json += ' ';
+            const std::size_t binPadded = (bin.size() + 3) & ~std::size_t(3);
+            const std::size_t total = 12 + 8 + json.size() + (bin.empty() ? 0 : 8 + binPadded);
+            writeUInt32(out, 0x46546C67u);
+            writeUInt32(out, 2u);
+            writeUInt32(out, static_cast<std::uint32_t>(total));
+            writeUInt32(out, static_cast<std::uint32_t>(json.size()));
+            writeUInt32(out, 0x4E4F534Au);
+            out.write(json.data(), json.size());
+            if (!bin.empty())
+            {
+                writeUInt32(out, static_cast<std::uint32_t>(binPadded));
+                writeUInt32(out, 0x004E4942u);
+                out.write(reinterpret_cast<const char*>(bin.data()), bin.size());
+                for (std::size_t i = bin.size(); i < binPadded; ++i) out.put('\0');
+            }
+        }
+        else
+        {
+            out.write(json.data(), json.size());
+        }
+
+        return out.good() ? osgDB::ReaderWriter::WriteResult::FILE_SAVED : osgDB::ReaderWriter::WriteResult::ERROR_IN_WRITING_FILE;
     }
 
-    void convertOSGtoGLTF(const osg::Node& node, tinygltf::Model& model) const
+private:
+    static void writeUInt32(std::ostream& out, std::uint32_t value)
     {
-        model.asset.version = "2.0";
-
-        osg::Node& nc_node = const_cast<osg::Node&>(node); // won't change it, promise :)
-        nc_node.ref();
-
-        // GLTF uses a +X=right +y=up -z=forward coordinate system
-        osg::ref_ptr<osg::MatrixTransform> transform = new osg::MatrixTransform;
-        transform->setMatrix(osg::Matrixd::rotate(osg::Vec3d(0.0, 0.0, 1.0), osg::Vec3d(0.0, 1.0, 0.0)));
-        transform->addChild(&nc_node);
-
-        OSGtoGLTF converter(model);
-        transform->accept(converter);
-
-        transform->removeChild(&nc_node);
-        nc_node.unref_nodelete();
+        const unsigned char bytes[4] = {
+            static_cast<unsigned char>(value & 0xFFu), static_cast<unsigned char>((value >> 8) & 0xFFu),
+            static_cast<unsigned char>((value >> 16) & 0xFFu), static_cast<unsigned char>((value >> 24) & 0xFFu) };
+        out.write(reinterpret_cast<const char*>(bytes), 4);
     }
+
+    /**
+     * Collects the scene into plain index-based records during traversal,
+     * then materializes cgltf's pointer-linked arrays in serialize().
+     */
+    class Builder : public osg::NodeVisitor
+    {
+    public:
+        Builder() : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+        {
+            setNodeMaskOverride(~0u);
+        }
+
+        // ------------------------------------------------------------ traversal
+
+        void apply(osg::Node& node) override
+        {
+            const bool pushed = pushState(node.getStateSet());
+            traverse(node);
+            if (pushed) _stateSets.pop_back();
+            finish(node);
+        }
+
+        void apply(osg::Group& group) override
+        {
+            apply(static_cast<osg::Node&>(group));
+            Node& record = _nodes[_nodeOf[&group]];
+            for (unsigned i = 0; i < group.getNumChildren(); ++i)
+            {
+                auto child = _nodeOf.find(group.getChild(i));
+                if (child != _nodeOf.end()) record.children.push_back(child->second);
+            }
+        }
+
+        void apply(osg::Transform& transform) override
+        {
+            apply(static_cast<osg::Group&>(transform));
+            Node& record = _nodes[_nodeOf[&transform]];
+            osg::Matrixd matrix;
+            transform.computeLocalToWorldMatrix(matrix, this);
+            if (!matrix.isIdentity())
+            {
+                record.hasMatrix = true;
+                record.matrix = matrix;
+            }
+        }
+
+        void apply(osg::Geometry& geometry) override
+        {
+            const bool pushed = pushState(geometry.getStateSet());
+            const int mesh = addMesh(geometry);
+            if (pushed) _stateSets.pop_back();
+            finish(geometry);
+            _nodes[_nodeOf[&geometry]].mesh = mesh;
+        }
+
+        // ---------------------------------------------------------- serialize
+
+        //! Builds the JSON document (and the binary buffer) for the visited graph.
+        bool serialize(const osg::Node* top, bool binary, std::string& json, std::vector<unsigned char>& bin)
+        {
+            auto topNode = _nodeOf.find(top);
+            if (topNode == _nodeOf.end()) return false;
+
+            // glTF is Y-up; OSG content is Z-up.
+            Node root;
+            root.hasMatrix = true;
+            root.matrix = osg::Matrixd::rotate(osg::Vec3d(0.0, 0.0, 1.0), osg::Vec3d(0.0, 1.0, 0.0));
+            root.children.push_back(topNode->second);
+            _nodes.push_back(root);
+            const int rootIndex = static_cast<int>(_nodes.size()) - 1;
+
+            // Images live in the buffer for GLB and in data URIs for JSON.
+            bin.swap(_bin);
+            std::vector<std::string> imageURIs(_images.size());
+            std::vector<int> imageViews(_images.size(), -1);
+            for (std::size_t i = 0; i < _images.size(); ++i)
+            {
+                if (binary)
+                {
+                    imageViews[i] = static_cast<int>(_views.size());
+                    _views.push_back(appendToBuffer(bin, _images[i].png.data(), _images[i].png.size(), 0));
+                }
+                else
+                {
+                    imageURIs[i] = "data:" + _images[i].mimeType + ";base64," + base64(_images[i].png.data(), _images[i].png.size());
+                }
+            }
+            std::string bufferURI;
+            if (!binary && !bin.empty())
+                bufferURI = "data:application/octet-stream;base64," + base64(bin.data(), bin.size());
+
+            // cgltf links records by pointer, so size every array before taking addresses.
+            cgltf_buffer buffer = {};
+            buffer.size = bin.size();
+            buffer.uri = binary ? nullptr : mutableString(bufferURI);
+
+            std::vector<cgltf_buffer_view> views(_views.size());
+            for (std::size_t i = 0; i < _views.size(); ++i)
+            {
+                views[i] = cgltf_buffer_view();
+                views[i].buffer = &buffer;
+                views[i].offset = _views[i].offset;
+                views[i].size = _views[i].size;
+                views[i].stride = _views[i].stride;
+            }
+
+            std::vector<cgltf_accessor> accessors(_accessors.size());
+            for (std::size_t i = 0; i < _accessors.size(); ++i)
+            {
+                const Accessor& source = _accessors[i];
+                cgltf_accessor& accessor = accessors[i];
+                accessor = cgltf_accessor();
+                accessor.buffer_view = &views[source.view];
+                accessor.component_type = source.component;
+                accessor.type = source.type;
+                accessor.normalized = source.normalized ? 1 : 0;
+                accessor.offset = source.offset;
+                accessor.count = source.count;
+                if (source.hasBounds)
+                {
+                    accessor.has_min = accessor.has_max = 1;
+                    for (int c = 0; c < 3; ++c) { accessor.min[c] = source.min[c]; accessor.max[c] = source.max[c]; }
+                }
+            }
+
+            std::vector<cgltf_image> images(_images.size());
+            std::vector<cgltf_sampler> samplers(_images.size());
+            std::vector<cgltf_texture> textures(_images.size());
+            for (std::size_t i = 0; i < _images.size(); ++i)
+            {
+                images[i] = cgltf_image();
+                images[i].mime_type = mutableString(_images[i].mimeType);
+                if (binary) images[i].buffer_view = &views[imageViews[i]];
+                else images[i].uri = mutableString(imageURIs[i]);
+                samplers[i] = cgltf_sampler();
+                samplers[i].wrap_s = static_cast<cgltf_wrap_mode>(_images[i].wrapS);
+                samplers[i].wrap_t = static_cast<cgltf_wrap_mode>(_images[i].wrapT);
+                samplers[i].min_filter = static_cast<cgltf_filter_type>(_images[i].minFilter);
+                samplers[i].mag_filter = static_cast<cgltf_filter_type>(_images[i].magFilter);
+                textures[i] = cgltf_texture();
+                textures[i].image = &images[i];
+                textures[i].sampler = &samplers[i];
+            }
+
+            std::vector<cgltf_material> materials(_materials.size());
+            for (std::size_t i = 0; i < _materials.size(); ++i)
+            {
+                cgltf_material& material = materials[i];
+                material = cgltf_material();
+                material.name = mutableString(_materials[i].name);
+                material.has_pbr_metallic_roughness = 1;
+                cgltf_pbr_metallic_roughness& pbr = material.pbr_metallic_roughness;
+                pbr.base_color_texture.texture = &textures[_materials[i].texture];
+                pbr.base_color_texture.scale = 1.0f;
+                for (int c = 0; c < 4; ++c) pbr.base_color_factor[c] = 1.0f;
+                pbr.metallic_factor = 0.0f;
+                pbr.roughness_factor = 1.0f;
+                material.normal_texture.scale = 1.0f;
+                material.occlusion_texture.scale = 1.0f;
+                material.emissive_texture.scale = 1.0f;
+                material.alpha_cutoff = 0.5f;
+                material.alpha_mode = _materials[i].blend ? cgltf_alpha_mode_blend : cgltf_alpha_mode_opaque;
+                material.double_sided = _materials[i].doubleSided ? 1 : 0;
+            }
+
+            std::size_t primitiveCount = 0, attributeCount = 0;
+            for (const Mesh& mesh : _meshes)
+                for (const Primitive& primitive : mesh.primitives)
+                {
+                    ++primitiveCount;
+                    attributeCount += primitive.attributes.size();
+                }
+            std::vector<cgltf_primitive> primitives(primitiveCount);
+            std::vector<cgltf_attribute> attributes(attributeCount);
+            std::vector<cgltf_mesh> meshes(_meshes.size());
+            std::size_t primitiveIndex = 0, attributeIndex = 0;
+            for (std::size_t i = 0; i < _meshes.size(); ++i)
+            {
+                meshes[i] = cgltf_mesh();
+                meshes[i].name = mutableString(_meshes[i].name);
+                meshes[i].primitives = &primitives[primitiveIndex];
+                meshes[i].primitives_count = _meshes[i].primitives.size();
+                for (const Primitive& source : _meshes[i].primitives)
+                {
+                    cgltf_primitive& primitive = primitives[primitiveIndex++];
+                    primitive = cgltf_primitive();
+                    primitive.type = source.mode;
+                    primitive.indices = source.indices >= 0 ? &accessors[source.indices] : nullptr;
+                    primitive.material = source.material >= 0 ? &materials[source.material] : nullptr;
+                    primitive.attributes = &attributes[attributeIndex];
+                    primitive.attributes_count = source.attributes.size();
+                    for (const Attribute& attribute : source.attributes)
+                    {
+                        cgltf_attribute& target = attributes[attributeIndex++];
+                        target = cgltf_attribute();
+                        target.name = mutableString(attribute.name);
+                        target.data = &accessors[attribute.accessor];
+                    }
+                }
+            }
+
+            std::size_t childCount = 0;
+            for (const Node& node : _nodes) childCount += node.children.size();
+            std::vector<cgltf_node*> children(childCount);
+            std::vector<cgltf_node> nodes(_nodes.size());
+            std::size_t childIndex = 0;
+            for (std::size_t i = 0; i < _nodes.size(); ++i)
+            {
+                const Node& source = _nodes[i];
+                cgltf_node& node = nodes[i];
+                node = cgltf_node();
+                node.name = mutableString(source.name);
+                node.mesh = source.mesh >= 0 ? &meshes[source.mesh] : nullptr;
+                node.children = &children[childIndex];
+                node.children_count = source.children.size();
+                for (int child : source.children) children[childIndex++] = &nodes[child];
+                node.rotation[3] = 1.0f;
+                node.scale[0] = node.scale[1] = node.scale[2] = 1.0f;
+                if (source.hasMatrix)
+                {
+                    node.has_matrix = 1;
+                    for (int c = 0; c < 16; ++c) node.matrix[c] = static_cast<cgltf_float>(source.matrix.ptr()[c]);
+                }
+                else
+                {
+                    node.matrix[0] = node.matrix[5] = node.matrix[10] = node.matrix[15] = 1.0f;
+                }
+            }
+
+            cgltf_node* sceneRoot = &nodes[rootIndex];
+            cgltf_scene scene = {};
+            scene.nodes = &sceneRoot;
+            scene.nodes_count = 1;
+
+            std::string version = "2.0", generator = "osgEarth";
+            cgltf_data data = {};
+            data.asset.version = mutableString(version);
+            data.asset.generator = mutableString(generator);
+            data.buffers = &buffer; data.buffers_count = 1;
+            data.buffer_views = views.data(); data.buffer_views_count = views.size();
+            data.accessors = accessors.data(); data.accessors_count = accessors.size();
+            data.images = images.data(); data.images_count = images.size();
+            data.samplers = samplers.data(); data.samplers_count = samplers.size();
+            data.textures = textures.data(); data.textures_count = textures.size();
+            data.materials = materials.data(); data.materials_count = materials.size();
+            data.meshes = meshes.data(); data.meshes_count = meshes.size();
+            data.nodes = nodes.data(); data.nodes_count = nodes.size();
+            data.scenes = &scene; data.scenes_count = 1;
+            data.scene = &scene;
+
+            cgltf_options options = {};
+            options.type = binary ? cgltf_file_type_glb : cgltf_file_type_gltf;
+            const cgltf_size size = cgltf_write(&options, nullptr, 0, &data);
+            if (size == 0) return false;
+            json.assign(size, '\0');
+            const cgltf_size written = cgltf_write(&options, &json[0], size, &data);
+            if (written == 0) return false;
+            json.resize(written - 1); // drop the terminator
+            return true;
+        }
+
+    private:
+        struct View { std::size_t offset = 0, size = 0, stride = 0; };
+        struct Accessor
+        {
+            int view = -1;
+            cgltf_component_type component = cgltf_component_type_invalid;
+            cgltf_type type = cgltf_type_invalid;
+            bool normalized = false;
+            std::size_t offset = 0, count = 0;
+            bool hasBounds = false;
+            osg::Vec3f min, max;
+        };
+        struct Attribute { std::string name; int accessor = -1; };
+        struct Primitive
+        {
+            cgltf_primitive_type mode = cgltf_primitive_type_triangles;
+            int indices = -1, material = -1;
+            std::vector<Attribute> attributes;
+        };
+        struct Mesh { std::string name; std::vector<Primitive> primitives; };
+        struct Node
+        {
+            std::string name;
+            bool hasMatrix = false;
+            osg::Matrixd matrix;
+            int mesh = -1;
+            std::vector<int> children;
+        };
+        struct Image
+        {
+            std::vector<unsigned char> png;
+            std::string mimeType = "image/png";
+            int wrapS = 10497, wrapT = 10497, minFilter = 0, magFilter = 0;
+        };
+        struct Material { std::string name; int texture = -1; bool doubleSided = false, blend = false; };
+
+        std::vector<unsigned char> _bin;
+        std::vector<View> _views;
+        std::vector<Accessor> _accessors;
+        std::vector<Mesh> _meshes;
+        std::vector<Node> _nodes;
+        std::vector<Image> _images;
+        std::vector<Material> _materials;
+        std::vector<osg::StateSet*> _stateSets;
+        std::vector<osg::ref_ptr<osg::Array>> _converted; // Vec3 texcoords converted to Vec2
+
+        std::map<const osg::Node*, int> _nodeOf;
+        std::map<const osg::BufferData*, int> _viewOf;
+        std::map<std::tuple<const osg::Array*, std::size_t, std::size_t>, int> _accessorOf;
+        std::map<const osg::DrawElements*, int> _indexAccessorOf;
+        std::map<const osg::StateAttribute*, int> _materialOf;
+
+        static char* mutableString(const std::string& value)
+        {
+            // cgltf_write only reads these; the storage outlives the write call.
+            return value.empty() ? nullptr : const_cast<char*>(value.c_str());
+        }
+
+        static std::string base64(const unsigned char* data, std::size_t size)
+        {
+            std::string encoded;
+            osgDB::Base64encoder().encode(reinterpret_cast<const char*>(data), static_cast<int>(size), encoded);
+            encoded.erase(std::remove(encoded.begin(), encoded.end(), '\n'), encoded.end());
+            encoded.erase(std::remove(encoded.begin(), encoded.end(), '\r'), encoded.end());
+            return encoded;
+        }
+
+        //! Only statesets that carry a unit-0 texture take part in material lookup.
+        bool pushState(osg::StateSet* stateSet)
+        {
+            if (!stateSet || !stateSet->getTextureAttribute(0, osg::StateAttribute::TEXTURE)) return false;
+            _stateSets.push_back(stateSet);
+            return true;
+        }
+
+        void finish(osg::Node& node)
+        {
+            Node record;
+            record.name = node.getName();
+            _nodes.push_back(record);
+            _nodeOf[&node] = static_cast<int>(_nodes.size()) - 1;
+        }
+
+        // ------------------------------------------------------------ buffers
+
+        static View appendToBuffer(std::vector<unsigned char>& bin, const void* data, std::size_t size, std::size_t stride)
+        {
+            while (bin.size() % 4) bin.push_back(0);
+            View view;
+            view.offset = bin.size();
+            view.size = size;
+            view.stride = stride;
+            bin.insert(bin.end(), static_cast<const unsigned char*>(data), static_cast<const unsigned char*>(data) + size);
+            return view;
+        }
+
+        int viewOf(const osg::BufferData* data, std::size_t stride)
+        {
+            auto found = _viewOf.find(data);
+            if (found != _viewOf.end()) return found->second;
+            _views.push_back(appendToBuffer(_bin, data->getDataPointer(), data->getTotalDataSize(), stride));
+            return _viewOf[data] = static_cast<int>(_views.size()) - 1;
+        }
+
+        //! Maps an OSG array to a glTF accessor layout; returns false for unsupported arrays.
+        static bool layout(const osg::Array* array, cgltf_component_type& component, cgltf_type& type)
+        {
+            switch (array->getDataType())
+            {
+            case GL_FLOAT: component = cgltf_component_type_r_32f; break;
+            case GL_UNSIGNED_BYTE: component = cgltf_component_type_r_8u; break;
+            case GL_UNSIGNED_SHORT: component = cgltf_component_type_r_16u; break;
+            case GL_UNSIGNED_INT: component = cgltf_component_type_r_32u; break;
+            case GL_BYTE: component = cgltf_component_type_r_8; break;
+            case GL_SHORT: component = cgltf_component_type_r_16; break;
+            default: return false;
+            }
+            switch (array->getDataSize())
+            {
+            case 1: type = cgltf_type_scalar; break;
+            case 2: type = cgltf_type_vec2; break;
+            case 3: type = cgltf_type_vec3; break;
+            case 4: type = cgltf_type_vec4; break;
+            default: return false;
+            }
+            return true;
+        }
+
+        int accessorOf(const osg::Array* array, std::size_t first, std::size_t count, bool bounds)
+        {
+            const auto key = std::make_tuple(array, first, count);
+            auto found = _accessorOf.find(key);
+            if (found != _accessorOf.end()) return found->second;
+
+            Accessor accessor;
+            if (!layout(array, accessor.component, accessor.type)) return -1;
+            const std::size_t elementSize = array->getElementSize();
+            // A stride lets several accessors slice one view; glTF requires a multiple of 4.
+            accessor.view = viewOf(array, elementSize % 4 == 0 ? elementSize : 0);
+            accessor.normalized = array->getNormalize();
+            accessor.offset = first * elementSize;
+            accessor.count = count;
+            if (bounds && array->getType() == osg::Array::Vec3ArrayType && count > 0)
+            {
+                const auto& positions = *static_cast<const osg::Vec3Array*>(array);
+                accessor.hasBounds = true;
+                accessor.min = accessor.max = positions[first];
+                for (std::size_t i = first; i < first + count; ++i)
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        accessor.min[c] = std::min(accessor.min[c], positions[i][c]);
+                        accessor.max[c] = std::max(accessor.max[c], positions[i][c]);
+                    }
+            }
+            _accessors.push_back(accessor);
+            return _accessorOf[key] = static_cast<int>(_accessors.size()) - 1;
+        }
+
+        int indexAccessorOf(const osg::DrawElements* elements)
+        {
+            auto found = _indexAccessorOf.find(elements);
+            if (found != _indexAccessorOf.end()) return found->second;
+
+            Accessor accessor;
+            accessor.type = cgltf_type_scalar;
+            if (dynamic_cast<const osg::DrawElementsUByte*>(elements)) accessor.component = cgltf_component_type_r_8u;
+            else if (dynamic_cast<const osg::DrawElementsUShort*>(elements)) accessor.component = cgltf_component_type_r_16u;
+            else if (dynamic_cast<const osg::DrawElementsUInt*>(elements)) accessor.component = cgltf_component_type_r_32u;
+            else return -1;
+            accessor.view = viewOf(elements, 0);
+            accessor.count = elements->getNumIndices();
+            _accessors.push_back(accessor);
+            return _indexAccessorOf[elements] = static_cast<int>(_accessors.size()) - 1;
+        }
+
+        // ------------------------------------------------------------- meshes
+
+        static cgltf_primitive_type primitiveType(GLenum mode)
+        {
+            switch (mode)
+            {
+            case GL_POINTS: return cgltf_primitive_type_points;
+            case GL_LINES: return cgltf_primitive_type_lines;
+            case GL_LINE_LOOP: return cgltf_primitive_type_line_loop;
+            case GL_LINE_STRIP: return cgltf_primitive_type_line_strip;
+            case GL_TRIANGLES: return cgltf_primitive_type_triangles;
+            case GL_TRIANGLE_STRIP: return cgltf_primitive_type_triangle_strip;
+            case GL_TRIANGLE_FAN: return cgltf_primitive_type_triangle_fan;
+            default: return cgltf_primitive_type_invalid;
+            }
+        }
+
+        //! A per-vertex array usable as the named attribute, or null.
+        const osg::Array* vertexAttribute(const osg::Array* array, unsigned vertexCount, bool floatOnly)
+        {
+            if (!array || array->getNumElements() != vertexCount) return nullptr;
+            if (floatOnly && array->getDataType() != GL_FLOAT) return nullptr;
+            cgltf_component_type component; cgltf_type type;
+            return layout(array, component, type) ? array : nullptr;
+        }
+
+        int addMesh(osg::Geometry& geometry)
+        {
+            const auto* positions = dynamic_cast<const osg::Vec3Array*>(geometry.getVertexArray());
+            if (!positions || positions->empty())
+            {
+                OE_WARN << LC << "Skipping geometry \"" << geometry.getName() << "\" without Vec3 vertices" << std::endl;
+                return -1;
+            }
+            const unsigned vertexCount = positions->size();
+            const osg::Array* normals = vertexAttribute(geometry.getNormalArray(), vertexCount, true);
+            if (normals && normals->getDataSize() != 3) normals = nullptr;
+            const osg::Array* colors = vertexAttribute(geometry.getColorArray(), vertexCount, false);
+            if (colors && (colors->getDataSize() < 3 || colors->getDataType() == GL_UNSIGNED_INT ||
+                colors->getDataType() == GL_BYTE || colors->getDataType() == GL_SHORT))
+                colors = nullptr;
+            const osg::Array* texcoords[2] = { nullptr, nullptr };
+            for (unsigned unit = 0; unit < 2; ++unit)
+            {
+                const osg::Array* source = geometry.getTexCoordArray(unit);
+                if (auto* xyz = dynamic_cast<const osg::Vec3Array*>(source))
+                {
+                    osg::ref_ptr<osg::Vec2Array> xy = new osg::Vec2Array(xyz->size());
+                    for (unsigned i = 0; i < xyz->size(); ++i) (*xy)[i].set((*xyz)[i].x(), (*xyz)[i].y());
+                    _converted.push_back(xy);
+                    source = xy.get();
+                }
+                texcoords[unit] = vertexAttribute(source, vertexCount, true);
+                if (texcoords[unit] && texcoords[unit]->getDataSize() != 2) texcoords[unit] = nullptr;
+            }
+
+            const int material = currentMaterial();
+            Mesh mesh;
+            mesh.name = geometry.getName();
+            for (unsigned i = 0; i < geometry.getNumPrimitiveSets(); ++i)
+            {
+                const osg::PrimitiveSet* set = geometry.getPrimitiveSet(i);
+                Primitive primitive;
+                primitive.mode = primitiveType(set->getMode());
+                std::size_t first = 0, count = vertexCount;
+                if (const auto* elements = dynamic_cast<const osg::DrawElements*>(set))
+                {
+                    primitive.indices = indexAccessorOf(elements);
+                    if (primitive.indices < 0) primitive.mode = cgltf_primitive_type_invalid;
+                }
+                else if (const auto* arrays = dynamic_cast<const osg::DrawArrays*>(set))
+                {
+                    first = static_cast<std::size_t>(std::max(0, arrays->getFirst()));
+                    count = static_cast<std::size_t>(std::max(0, arrays->getCount()));
+                    if (first + count > vertexCount) primitive.mode = cgltf_primitive_type_invalid;
+                }
+                else primitive.mode = cgltf_primitive_type_invalid;
+
+                if (primitive.mode == cgltf_primitive_type_invalid)
+                {
+                    OE_WARN << LC << "Skipping unsupported primitive set in \"" << geometry.getName() << "\"" << std::endl;
+                    continue;
+                }
+
+                primitive.attributes.push_back({ "POSITION", accessorOf(positions, first, count, true) });
+                if (normals) primitive.attributes.push_back({ "NORMAL", accessorOf(normals, first, count, false) });
+                if (colors) primitive.attributes.push_back({ "COLOR_0", accessorOf(colors, first, count, false) });
+                for (unsigned unit = 0; unit < 2; ++unit)
+                    if (texcoords[unit])
+                        primitive.attributes.push_back({ unit == 0 ? "TEXCOORD_0" : "TEXCOORD_1", accessorOf(texcoords[unit], first, count, false) });
+                // A textured material needs texture coordinates to sample with.
+                if (material >= 0 && texcoords[0]) primitive.material = material;
+                mesh.primitives.push_back(primitive);
+            }
+            if (mesh.primitives.empty()) return -1;
+            _meshes.push_back(mesh);
+            return static_cast<int>(_meshes.size()) - 1;
+        }
+
+        // ---------------------------------------------------------- materials
+
+        //! Material for the nearest stateset with a unit-0 texture, or -1.
+        int currentMaterial()
+        {
+            if (_stateSets.empty()) return -1;
+            osg::StateSet* stateSet = _stateSets.back();
+            osg::StateAttribute* attribute = stateSet->getTextureAttribute(0, osg::StateAttribute::TEXTURE);
+            auto found = _materialOf.find(attribute);
+            if (found != _materialOf.end()) return found->second;
+
+            osg::Texture* texture = dynamic_cast<osg::Texture*>(attribute);
+            if (!texture)
+                if (auto* pbr = dynamic_cast<osgEarth::PBRTexture*>(attribute)) texture = pbr->albedo.get();
+            const osg::Image* image = texture ? texture->getImage(0) : nullptr;
+
+            int index = -1;
+            Image record;
+            if (image && encodePNG(*image, record.png))
+            {
+                record.wrapS = wrapMode(texture->getWrap(osg::Texture::WRAP_S));
+                record.wrapT = wrapMode(texture->getWrap(osg::Texture::WRAP_T));
+                record.minFilter = texture->getFilter(osg::Texture::MIN_FILTER);
+                record.magFilter = texture->getFilter(osg::Texture::MAG_FILTER);
+                _images.push_back(record);
+
+                Material material;
+                material.name = texture->getName();
+                material.texture = static_cast<int>(_images.size()) - 1;
+                material.doubleSided = (stateSet->getMode(GL_CULL_FACE) & osg::StateAttribute::ON) == 0;
+                material.blend = (stateSet->getMode(GL_BLEND) & osg::StateAttribute::ON) != 0;
+                _materials.push_back(material);
+                index = static_cast<int>(_materials.size()) - 1;
+            }
+            return _materialOf[attribute] = index;
+        }
+
+        static int wrapMode(osg::Texture::WrapMode mode)
+        {
+            switch (mode)
+            {
+            case osg::Texture::REPEAT: return 10497;
+            case osg::Texture::MIRROR: return 33648;
+            default: return 33071; // every clamp variant becomes CLAMP_TO_EDGE
+            }
+        }
+
+        /**
+         * Encodes an 8-bit image as PNG. Texture coordinates are written
+         * unchanged, and both OSG (t = 0) and glTF (v = 0) sample memory row 0,
+         * so the PNG's top row must be memory row 0. OSG's PNG plugin writes
+         * the last row first, hence the flip before encoding.
+         */
+        static bool encodePNG(const osg::Image& image, std::vector<unsigned char>& png)
+        {
+            osgDB::ReaderWriter* writer = osgDB::Registry::instance()->getReaderWriterForExtension("png");
+            if (!writer)
+            {
+                OE_WARN << LC << "PNG plugin unavailable; texture not written" << std::endl;
+                return false;
+            }
+            if (image.isCompressed() || image.getDataType() != GL_UNSIGNED_BYTE || image.r() != 1)
+            {
+                OE_WARN << LC << "Texture \"" << image.getFileName() << "\" is not an 8-bit image; not written" << std::endl;
+                return false;
+            }
+            osg::ref_ptr<osg::Image> flipped = new osg::Image(image, osg::CopyOp::DEEP_COPY_ALL);
+            flipped->flipVertical();
+            std::ostringstream out(std::ios::out | std::ios::binary);
+            if (!writer->writeImage(*flipped, out, nullptr).success())
+            {
+                OE_WARN << LC << "Cannot encode texture \"" << image.getFileName() << "\" as PNG" << std::endl;
+                return false;
+            }
+            const std::string bytes = out.str();
+            png.assign(bytes.begin(), bytes.end());
+            return true;
+        }
+    };
 };
-
-#endif // OSGEARTH_GLTF_WRITER_H

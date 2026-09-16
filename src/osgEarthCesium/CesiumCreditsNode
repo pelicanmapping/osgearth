@@ -26,7 +26,6 @@ namespace osgEarth {
 
         private:
 
-            void nextFrame();
             void updateCredits();
 
             osg::Texture2D* getOrCreateTexture(const std::string& url);
@@ -34,6 +33,7 @@ namespace osgEarth {
 
 
             std::vector< std::string > _credits;
+            size_t _lastCreditsCount;
             osg::Camera* _camera;
             osg::observer_ptr< osg::View > _view;
             std::shared_ptr< CesiumUtility::CreditSystem > _creditSystem;

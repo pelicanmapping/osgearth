@@ -49,6 +49,7 @@ Texture::create(osg::Image* image, GLenum target)
 #else
         object->osgTexture()->setImage(0, image);
 #endif
+        ImageUtils::fixTextureForGlCoreProfile(object->osgTexture());
     }
     return object;
 }
@@ -276,6 +277,9 @@ Texture::compileGLObjects(osg::State& state) const
                 numMipLevelsToAllocate = osg::Image::computeNumberOfMipmapLevels(
                     image->s(), image->t(), image->r());
             }
+
+            // Apply any necessary format corrections before checking image's format here
+            ImageUtils::fixTextureForGlCoreProfile(osgTexture());
 
             pixelFormat = image->getPixelFormat();
             dataType = image->getDataType();

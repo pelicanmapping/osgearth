@@ -796,15 +796,9 @@ TerrainTileModelFactory::createImageTexture(
 
     tex->setUnRefImageDataAfterApply(Registry::instance()->unRefImageDataAfterApply().get());
 
-    // For GL_RED, swizzle the RGBA all to RED in order to match old GL_LUMINANCE behavior
-    for(unsigned i=0; i< tex->getNumImages(); ++i)
-    {
-        if (tex->getImage(i) && tex->getImage(i)->getPixelFormat() == GL_RED)
-        {
-            tex->setSwizzle(osg::Vec4i(GL_RED, GL_RED, GL_RED, GL_RED));
-            break;
-        }
-    }
+    // Apply corrections for GL_LUMINANCE/GL_LUMINANCE_ALPHA as PixelFormat, if necessary.
+    // Not sure if this should happen before tex2dArray->setSourceFormat() call above.
+    ImageUtils::fixTextureForGlCoreProfile(tex);
 
     return Texture::create(tex);
 }

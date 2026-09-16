@@ -351,9 +351,14 @@ namespace osgEarth { namespace Util
         //! Make an empty 2D texture array
         static osg::Texture2DArray* makeTexture2DArray(osg::Image* image);
 
-        //! If a max texture size is stipulated in the options, and it
+        //! If a max texture size is stipulated in the options, and if
         //! the image supports it, return the size.
         static optional<int> getMaxTextureSize(const osg::Image*, const osgDB::Options*);
+
+        //! Correct textures for image formats unsupported by the GL Core profile,
+        //! such as a PixelFormat of GL_LUMINANCE.
+        //! Should only be called after an osg::Image has been applied to a texture.
+        static void fixTextureForGlCoreProfile(osg::Texture* texture);
 
         //! Convert u,v [0..1] into s,t [pixels] with nearest neighbor sampling.
         template<typename NDCTYPE, typename INDEXTYPE>

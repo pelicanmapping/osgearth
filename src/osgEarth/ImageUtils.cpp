@@ -3200,8 +3200,9 @@ ImageUtils::fixTextureForGlCoreProfile(osg::Texture* texture)
   if (!texture)
     return;
 
-  // No change is required if we're not supporting core profile
-#ifndef OSG_GL_FIXED_FUNCTION_AVAILABLE
+  // No change required for GLES2.x and below changes (GL_RED, GL_RG, and swizzle) are unsupported.
+  // While GLES3.x still supports GL_LUMINANCE, below changes will not break images.
+#if !defined(OSG_GLES2_AVAILABLE)
   for (unsigned int k = 0; k < texture->getNumImages(); ++k)
   {
     // Get a pointer to the image, continuing if none

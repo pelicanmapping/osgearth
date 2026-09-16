@@ -28,6 +28,10 @@ namespace osgEarth { namespace Util
      * Gets the full path of a file relative to a file
      * For example, getFullPath("c:\images\vacation.jpg", "..") would return "c:\images".
      * If relativePath is an absolute path, it is returned
+     * On Windows, local referrers are resolved lexically without querying the
+     * filesystem. Path casing and short (8.3) names are preserved, except that
+     * a resolved referrer's drive letter is uppercased. On other platforms,
+     * referrers retain osgDB::getRealPath's symbolic-link resolution.
      *
      * @param relativeTo
      *       The name of the file to make the path relative to

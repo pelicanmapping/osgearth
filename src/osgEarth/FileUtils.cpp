@@ -12,6 +12,9 @@
 #include <osg/Object>
 #include <osgDB/ConvertUTF>
 #include <stack>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -140,6 +143,49 @@ namespace osgEarth
 #endif
 }
 
+namespace
+{
+    // getFullPath needs an absolute referrer, not filesystem canonicalization.
+    // In particular, do not query the file or expand 8.3 names on Windows.
+    std::string resolveReferrer(const std::string& path)
+    {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        const filenamestring& nativePath = OSGDB_STRING_TO_FILENAME(path);
+        filenamechar stackBuffer[MAX_PATH + 1];
+        filenamechar* buffer = stackBuffer;
+        DWORD capacity = MAX_PATH + 1;
+        std::vector<filenamechar> storage;
+
+        DWORD length = OSGDB_WINDOWS_FUNCT(GetFullPathName)(
+            nativePath.c_str(), capacity, buffer, nullptr);
+        while (length >= capacity)
+        {
+            // An insufficient-buffer result includes the terminating null.
+            // Never consume a truncated or uninitialized path.
+            capacity = length;
+            storage.resize(capacity);
+            buffer = storage.data();
+            length = OSGDB_WINDOWS_FUNCT(GetFullPathName)(
+                nativePath.c_str(), capacity, buffer, nullptr);
+        }
+        if (length == 0)
+            return path;
+
+        // Preserve OSG's drive-letter convention without changing path casing.
+        if (length >= 2 && buffer[1] == ':' && buffer[0] >= 'a' && buffer[0] <= 'z')
+            buffer[0] = static_cast<filenamechar>(buffer[0] - ('a' - 'A'));
+#ifdef OSG_USE_UTF8_FILENAME
+        return osgDB::convertUTF16toUTF8(buffer, length);
+#else
+        return std::string(buffer, length);
+#endif
+#else
+        // POSIX realpath also resolves symbolic links; retain that behavior.
+        return osgDB::getRealPath(path);
+#endif
+    }
+}
+
 
 std::string
 osgEarth::Util::getAbsolutePath(const std::string& path)
@@ -196,25 +242,19 @@ osgEarth::Util::getFullPath(const std::string& relativeTo, const std::string &re
 {
     static std::unordered_map<std::string, std::string> s_cache;
     static std::mutex s_cache_mutex;
-    //static float tries = 0, hits = 0;
 
-    std::string cacheKey = relativeTo + "&" + relativePath;
-
-    std::lock_guard<std::mutex> lock(s_cache_mutex);
-
-    //tries += 1.0f;
-
-    auto i = s_cache.find(cacheKey);
-    if (i != s_cache.end())
+    // A length prefix distinguishes inputs containing the old '&' delimiter.
+    std::string cacheKey = std::to_string(relativeTo.size());
+    cacheKey.reserve(cacheKey.size() + 1 + relativeTo.size() + relativePath.size());
+    cacheKey += ':';
+    cacheKey += relativeTo;
+    cacheKey += relativePath;
     {
-        //hits += 1.0f;
-        //OE_INFO << "size=" << s_cache.size() <<  " tries=" << tries << " hits=" << (100.*hits/tries) << std::endl;
-        return i->second;
+        std::lock_guard<std::mutex> lock(s_cache_mutex);
+        auto i = s_cache.find(cacheKey);
+        if (i != s_cache.end())
+            return i->second;
     }
-
-    // prevent the cache from growing unbounded
-    if (s_cache.size() >= 20000)
-        s_cache.clear();
 
     // result that will go into the cache:
     std::string result;
@@ -272,7 +312,7 @@ osgEarth::Util::getFullPath(const std::string& relativeTo, const std::string &re
         //Concatinate the paths together
         std::string filename;
         if ( !osgDB::containsServerAddress(relativeToMinusQueryParams) )
-            filename = osgDB::concatPaths( osgDB::getFilePath( osgDB::getRealPath(relativeToMinusQueryParams)), relativePathMinusQueryParams);
+            filename = osgDB::concatPaths( osgDB::getFilePath( resolveReferrer(relativeToMinusQueryParams)), relativePathMinusQueryParams);
         else
             filename = osgDB::concatPaths( osgDB::getFilePath(relativeToMinusQueryParams), relativePathMinusQueryParams);
 
@@ -305,7 +345,14 @@ osgEarth::Util::getFullPath(const std::string& relativeTo, const std::string &re
     }
 
     // cache the result and return it.
-    s_cache[cacheKey] = result;
+    {
+        std::lock_guard<std::mutex> lock(s_cache_mutex);
+        // Keep path resolution outside the lock, and enforce the limit here
+        // since another caller may have inserted entries during resolution.
+        if (s_cache.size() >= 20000)
+            s_cache.clear();
+        s_cache.emplace(std::move(cacheKey), result);
+    }
     return result;
 }
 

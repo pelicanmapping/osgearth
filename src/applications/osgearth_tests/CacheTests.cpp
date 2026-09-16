@@ -886,26 +886,26 @@ TEST_CASE("LRUCache")
         osgEarth::LRUCache<int, std::string> cache(2u);
 
         // Insert a value using get_or_insert for a missing key
-        auto v1 = cache.get_or_insert(1, [](std::optional<std::string>& out) { out = std::string("one"); });
+        auto v1 = cache.get_or_insert(1, [](osgEarth_std::optional<std::string>& out) { out = std::string("one"); });
         REQUIRE(v1.has_value());
         REQUIRE(v1.value() == "one");
         REQUIRE(cache.get(1).has_value());
         REQUIRE(cache.get(1).value() == "one");
 
         // get_or_insert for an existing key should not call the functor, should return the cached value
-        auto v2 = cache.get_or_insert(1, [](std::optional<std::string>& out) { out = std::string("should_not_be_used"); });
+        auto v2 = cache.get_or_insert(1, [](osgEarth_std::optional<std::string>& out) { out = std::string("should_not_be_used"); });
         REQUIRE(v2.has_value());
         REQUIRE(v2.value() == "one");
 
         // Insert another value
-        auto v3 = cache.get_or_insert(2, [](std::optional<std::string>& out) { out = std::string("two"); });
+        auto v3 = cache.get_or_insert(2, [](osgEarth_std::optional<std::string>& out) { out = std::string("two"); });
         REQUIRE(v3.has_value());
         REQUIRE(v3.value() == "two");
         REQUIRE(cache.get(2).has_value());
         REQUIRE(cache.get(2).value() == "two");
 
         // Insert a third value, which should evict the least recently used (key 1)
-        auto v4 = cache.get_or_insert(3, [](std::optional<std::string>& out) { out = std::string("three"); });
+        auto v4 = cache.get_or_insert(3, [](osgEarth_std::optional<std::string>& out) { out = std::string("three"); });
         REQUIRE(v4.has_value());
         REQUIRE(v4.value() == "three");
         REQUIRE(cache.get(3).has_value());
@@ -913,14 +913,14 @@ TEST_CASE("LRUCache")
         REQUIRE_FALSE(cache.touch(1)); // key 1 should be evicted
 
         // get_or_insert for an evicted key should call the functor again
-        auto v5 = cache.get_or_insert(1, [](std::optional<std::string>& out) { out = std::string("one-again"); });
+        auto v5 = cache.get_or_insert(1, [](osgEarth_std::optional<std::string>& out) { out = std::string("one-again"); });
         REQUIRE(v5.has_value());
         REQUIRE(v5.value() == "one-again");
         REQUIRE(cache.get(1).has_value());
         REQUIRE(cache.get(1).value() == "one-again");
 
         // Test that if the functor does not set the value, nothing is inserted
-        auto v6 = cache.get_or_insert(4, [](std::optional<std::string>&) { /* do not set */ });
+        auto v6 = cache.get_or_insert(4, [](osgEarth_std::optional<std::string>&) { /* do not set */ });
         REQUIRE_FALSE(v6.has_value());
         REQUIRE_FALSE(cache.touch(4));
     }

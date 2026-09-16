@@ -220,7 +220,7 @@ namespace osgEarth { namespace Util
         bool enabled = true;
 
     public:
-        using ValueType = typename std::optional<V>;
+        using ValueType = typename osgEarth_std::optional<V>;
         mutable int hits = 0;
         mutable int get_count = 0;
 
@@ -235,7 +235,7 @@ namespace osgEarth { namespace Util
         //! @param value The new maximum number of items the cache can hold.
         inline void setCapacity(unsigned value)
         {
-            std::scoped_lock L(mutex);
+            osgEarth_std::scoped_lock L(mutex);
             cache.clear();
             map.clear();
             hits = 0;
@@ -251,7 +251,7 @@ namespace osgEarth { namespace Util
         {
             if (capacity == 0)
                 return {};
-            std::scoped_lock L(mutex);
+            osgEarth_std::scoped_lock L(mutex);
             ++get_count;
             auto it = map.find(key);
             if (it == map.end())
@@ -269,7 +269,7 @@ namespace osgEarth { namespace Util
         {
             if (capacity == 0)
                 return false;
-            std::scoped_lock L(mutex);
+            osgEarth_std::scoped_lock L(mutex);
             auto it = map.find(key);
             if (it != map.end()) {
                 if (it->second != std::prev(cache.end()))
@@ -288,7 +288,7 @@ namespace osgEarth { namespace Util
         {
             if (capacity == 0 || !enabled)
                 return;
-            std::scoped_lock L(mutex);
+            osgEarth_std::scoped_lock L(mutex);
             auto it = map.find(key);
             if (it != map.end()) {
                 // Update value and move to back
@@ -320,7 +320,7 @@ namespace osgEarth { namespace Util
                 return v;
             }
 
-            std::scoped_lock L(mutex);
+            osgEarth_std::scoped_lock L(mutex);
             ++get_count;
             auto it = map.find(key);
             if (it != map.end()) {
@@ -351,7 +351,7 @@ namespace osgEarth { namespace Util
         {
             if (capacity == 0)
                 return;
-            std::scoped_lock L(mutex);
+            osgEarth_std::scoped_lock L(mutex);
             auto it = map.find(key);
             if (it != map.end()) {
                 cache.erase(it->second);
@@ -362,7 +362,7 @@ namespace osgEarth { namespace Util
         //! Clears all entries from the cache and resets statistics.
         inline void clear()
         {
-            std::scoped_lock L(mutex);
+            osgEarth_std::scoped_lock L(mutex);
             cache.clear();
             map.clear();
             get_count = 0, hits = 0;
@@ -371,7 +371,7 @@ namespace osgEarth { namespace Util
         //! Num of elements
         inline std::size_t size() const
         {
-            std::scoped_lock L(mutex);
+            osgEarth_std::scoped_lock L(mutex);
             return map.size();
         }
     };

@@ -6,7 +6,6 @@
   "homepage": "https://github.com/gwaldron/osgearth",
   "supports": "!(x86 | wasm32)",
   "dependencies": [
-    "benchmark",
     "blend2d",
     "draco",
     "lerc",
@@ -34,5 +33,13 @@
         "s3"
       ]
     }
-  ]
+  ],
+  "features": {
+    "benchmarks": {
+      "description": "Dependencies required to build the osgEarth benchmarks",
+      "dependencies": [
+        "benchmark"
+      ]
+    }
+  }
 }

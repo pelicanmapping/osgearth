@@ -61,6 +61,9 @@ namespace osgEarth { namespace Util
         GPUClampingLib = "GPUClamping.lib.glsl";
         _sources[GPUClampingLib] = @GPUClamping.lib.glsl@;
 
+        GrimeLayer = "GrimeLayer.glsl";
+        _sources[GrimeLayer] = @GrimeLayer.glsl@;
+
         HexTilingLib = "HexTiling.glsl";
         _sources[HexTilingLib] = @HexTiling.glsl@;
 

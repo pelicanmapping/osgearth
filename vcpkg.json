@@ -6,6 +6,7 @@
   "homepage": "https://github.com/gwaldron/osgearth",
   "supports": "!(x86 | wasm32)",
   "dependencies": [
+    "basisu",
     "benchmark",
     "blend2d",
     "draco",

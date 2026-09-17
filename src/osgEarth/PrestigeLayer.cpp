@@ -26,10 +26,6 @@ REGISTER_OSGEARTH_LAYER(Prestige, PrestigeLayer);
 
 namespace
 {
-    // Demo hack: repeat this one generated tile at every requested tile location.
-    constexpr unsigned PRESTIGE_DEMO_Z = 14u;
-    constexpr unsigned PRESTIGE_DEMO_X = 4823u;
-    constexpr unsigned PRESTIGE_DEMO_Y = 6160u;
 
     std::string makeTileStem(unsigned z, unsigned x, unsigned y)
     {
@@ -454,8 +450,6 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
         y = rows - y - 1u;
     }
 
-    //x = PRESTIGE_DEMO_X;
-    //y = PRESTIGE_DEMO_Y;
     const unsigned z = key.getLOD();
     const TileKey sourceKey(z, x, y, key.getProfile());
     const osg::ref_ptr<const Map> map = getMap();
@@ -480,9 +474,6 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
         return {};
 
     //ImageUtils::compressAndMipmapTextures(lod2.get());
-
-
-
 
     osg::ref_ptr<PagedNode2> lod2Pager = new PagedNode2();
     lod2Pager->setName(lod2Name);

@@ -1511,7 +1511,11 @@ GLTexture::bind(osg::State& state)
     // Inform OSG of the state change
     state.haveAppliedTextureAttribute(state.getActiveTextureUnit(), osg::StateAttribute::TEXTURE);
 
-    // account for the FFP version of the mode
+#ifdef OSG_GL_FIXED_FUNCTION_AVAILABLE
+    // Account for the FFP version of the mode. Without fixed function the
+    // texture-target modes do not exist; telling OSG one was applied makes
+    // it restore that mode on the next State::apply, which a core profile
+    // rejects with GL_INVALID_ENUM.
     GLenum fixed_function_target = _target;
     if (_target == GL_TEXTURE_2D_ARRAY)
     {
@@ -1519,6 +1523,7 @@ GLTexture::bind(osg::State& state)
     }
 
     state.haveAppliedTextureMode(state.getActiveTextureUnit(), fixed_function_target);
+#endif
 }
 
 GLuint64

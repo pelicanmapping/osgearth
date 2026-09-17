@@ -83,7 +83,7 @@ namespace osgEarth
     };
 
     /** Union of attribute values. The order here must match that of AttributeType. */
-    using AttributeUnion = std::variant<std::monostate, std::string, double, std::int64_t, bool>;
+    using AttributeUnion = osgEarth_std::variant<osgEarth_std::monostate, std::string, double, std::int64_t, bool>;
 
     /**
     * A value of an attribute in a feature.
@@ -154,11 +154,11 @@ namespace osgEarth
         }
 
         template<class T> inline bool is() const {
-            return std::holds_alternative<T>(*this);
+            return osgEarth_std::holds_alternative<T>(*this);
         }
 
         template<class T> inline const T& get() const {
-            return std::get<T>(*this);
+            return osgEarth_std::get<T>(*this);
         }
     };
 

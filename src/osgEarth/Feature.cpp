@@ -191,7 +191,7 @@ Feature::set(const std::string& name, const AttributeValue& value)
 void
 Feature::setNull(const std::string& name)
 {
-    _attrs[toLower(name)].emplace<std::monostate>();
+    _attrs[toLower(name)].emplace<osgEarth_std::monostate>();
 }
 
 void

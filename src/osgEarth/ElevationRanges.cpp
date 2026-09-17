@@ -16,7 +16,9 @@ unsigned int ElevationRanges::getMaxLevel()
 
 osg::ref_ptr<const Profile> ElevationRanges::getProfile()
 {
-    return Profile::create(Profile::GLOBAL_GEODETIC);
+    // Cache the immutable GLOBAL_GEODETIC profile; construction runs Config::toJSON twice.
+    static osg::ref_ptr<const Profile> s_profile = Profile::create(Profile::GLOBAL_GEODETIC);
+    return s_profile;
 }
 
 bool ElevationRanges::getDefaultElevationRange(short& min, short& max)

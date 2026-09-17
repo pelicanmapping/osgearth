@@ -786,9 +786,9 @@ FeatureModelGraph::getBoundInWorldCoords(const GeoExtent& extent, const Profile*
             {
                 // Get the approximate elevation range if we have elevation data in the map
                 lod = osg::clampBetween(lod, 0u, ElevationRanges::getMaxLevel());
-                GeoPoint centerWGS84 = center.transform(ElevationRanges::getProfile()->getSRS());
-
-                TileKey rangeKey = ElevationRanges::getProfile()->createTileKey(centerWGS84.x(), centerWGS84.y(), lod);
+                auto rangeProfile = ElevationRanges::getProfile();
+                GeoPoint centerWGS84 = center.transform(rangeProfile->getSRS());
+                TileKey rangeKey = rangeProfile->createTileKey(centerWGS84.x(), centerWGS84.y(), lod);
                 short min, max;
                 if (!*map->options().disableElevationRanges())
                 {

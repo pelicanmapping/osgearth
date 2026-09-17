@@ -144,7 +144,9 @@ namespace osgEarth
         //! Populates this object from a PBRMaterial description
         Status load(const PBRMaterial& material, const osgDB::Options* options = nullptr);
 
-        //! Texture units the standard program samples. Unit 0 holds this descriptor.
+        //! Texture units the standard program samples; unit 0 holds this descriptor.
+        //! The Registry marks them off-limits to terrain unit reservations so no
+        //! scene-wide sampler of another type can share them.
         enum StandardUnit { ALBEDO_UNIT = 1, NORMAL_UNIT = 2, PBR_UNIT = 3, OCCLUSION_UNIT = 4 };
 
         /**

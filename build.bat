@@ -1,1 +1,1 @@
-cmake --build ../build --config RelWithDebInfo --parallel --target install
+cmake --build build --config RelWithDebInfo --parallel --target install

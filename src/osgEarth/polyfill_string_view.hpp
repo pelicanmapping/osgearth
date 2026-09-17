@@ -7,10 +7,6 @@
 #include <algorithm>
 #include <type_traits>
 
-#if __cplusplus >= 201703L
-#error Only for C++14 polyfill
-#endif
-
 namespace polyfillcpp14 {
 
 template<class CharT, class Traits = std::char_traits<CharT>>

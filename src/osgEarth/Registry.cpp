@@ -10,6 +10,7 @@
 #include "TerrainEngineNode"
 #include "GLUtils"
 #include "Chonk"
+#include "PBRMaterial"
 #include "MemoryUtils"
 #include "ScriptEngine"
 
@@ -129,6 +130,13 @@ Registry::Registry() :
 
     // global initialization for CURL (not thread safe)
     HTTPClient::globalInit();
+
+    // The standard PBR texture program (PBRTexture::installProgram) samples
+    // fixed texture units. Keep terrain-managed unit reservations off them so
+    // scene-wide samplers of other types (sky lookup tables, shadow maps) never
+    // share a unit with them, which GL rejects at draw time.
+    for (int unit : { PBRTexture::ALBEDO_UNIT, PBRTexture::NORMAL_UNIT, PBRTexture::PBR_UNIT, PBRTexture::OCCLUSION_UNIT })
+        setTextureImageUnitOffLimits(unit);
 
     // GL debugging environment variables
     if (::getenv("OSGEARTH_GL_DEBUG"))

@@ -34,7 +34,7 @@ namespace osgEarth
         osg::Vec3f size = osg::Vec3f{ 1.0f, 1.0f, 10.0f };
 
         //! Texture dimensions in world units (meters). If not set, defaults to 'size'.
-        std::optional<osg::Vec2f> textureSize;
+        osgEarth_std::optional<osg::Vec2f> textureSize;
 
         //! Opacity (alpha)
         float opacity = 1.0f;

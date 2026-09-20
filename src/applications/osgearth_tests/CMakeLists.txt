@@ -1,6 +1,7 @@
 set(TARGET_SRC
     main.cpp
     CacheTests.cpp
+    CompressedURITests.cpp
     ConfigTests.cpp
     CoverageTests.cpp
     EndianTests.cpp

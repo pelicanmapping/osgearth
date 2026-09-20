@@ -12,6 +12,7 @@
 #include <osgDB/FileNameUtils>
 #include <osgDB/ReadFile>
 #include <osgDB/Archive>
+#include <osgDB/ObjectWrapper>
 
 #ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
 #include <Superluminal/PerformanceAPI.h>
@@ -314,11 +315,38 @@ namespace
         std::ifstream input( uri.c_str(), std::ios::binary );
         if ( input.is_open() )
         {
-            input >> std::noskipws;
-            std::stringstream buf;
-            buf << input.rdbuf();
             std::string bufStr;
-            bufStr = buf.str();
+            // Detect gzip by its header, since compressed assets may retain
+            // their original extension (e.g. .gltf, .glb, or external .bin).
+            unsigned char magic[2] = {};
+            input.read(reinterpret_cast<char*>(magic), sizeof(magic));
+            const bool gzip = input.gcount() == 2 && magic[0] == 0x1f && magic[1] == 0x8b;
+            input.clear();
+            input.seekg(0, std::ios::beg);
+
+            if (gzip)
+            {
+                osg::ref_ptr<osgDB::BaseCompressor> compressor =
+                    osgDB::Registry::instance()->getObjectWrapperManager()->findCompressor("zlib");
+                if (!compressor.valid())
+                {
+                    ReadResult error(ReadResult::RESULT_NO_READER);
+                    error.setErrorDetail("Gzip decompression is unavailable");
+                    return error;
+                }
+                if (!compressor->decompress(input, bufStr))
+                {
+                    ReadResult error(ReadResult::RESULT_READER_ERROR);
+                    error.setErrorDetail("Failed to decompress gzip data");
+                    return error;
+                }
+            }
+            else
+            {
+                std::stringstream buf;
+                buf << input.rdbuf();
+                bufStr = buf.str();
+            }
             ReadResult result( new StringObject(bufStr) );
             result.setLastModifiedTime( osgEarth::getLastModifiedTime(uri) );
             return result;

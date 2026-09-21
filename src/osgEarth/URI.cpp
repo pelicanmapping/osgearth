@@ -12,6 +12,7 @@
 #include <osgDB/FileNameUtils>
 #include <osgDB/ReadFile>
 #include <osgDB/Archive>
+#include <osgDB/ObjectWrapper>
 #include <limits>
 
 #ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
@@ -315,21 +316,12 @@ namespace
         std::ifstream input( uri.c_str(), std::ios::binary );
         if ( input.is_open() )
         {
+            input >> std::noskipws;
+            std::stringstream buf;
+            buf << input.rdbuf();
             std::string bufStr;
-            const auto size = osgEarth::getFileSize(uri);
-            if (size > bufStr.max_size() ||
-                size > static_cast<std::uint64_t>((std::numeric_limits<std::streamsize>::max)()))
-                return ReadResult();
-
-            // Allocate once and read directly into
-            // the string instead of copying through an intermediate stream.
-            bufStr.resize(static_cast<std::size_t>(size));
-            if (size > 0)
-            {
-                if (!input.read(&bufStr[0], static_cast<std::streamsize>(size)))
-                    return ReadResult(ReadResult::RESULT_READER_ERROR);
-            }
-            ReadResult result( new StringObject(std::move(bufStr)) );
+            bufStr = buf.str();
+            ReadResult result( new StringObject(bufStr) );
             result.setLastModifiedTime( osgEarth::getLastModifiedTime(uri) );
             return result;
         }

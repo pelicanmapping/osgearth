@@ -2,6 +2,7 @@ set(TARGET_SRC
     main.cpp
     CacheTests.cpp
     ChonkTests.cpp
+    ChonkPageTests.cpp
     ChonkMaterialTests.cpp
     ConfigTests.cpp
     CoverageTests.cpp

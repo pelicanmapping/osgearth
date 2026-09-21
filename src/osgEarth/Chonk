@@ -28,6 +28,7 @@ namespace osgEarth
 
     class ChonkFactory;
     class ChonkDrawable;
+    class ChonkGeometryPageBuilder;
 
     /**
      * A bindless rendering unit comprised of one VBO and one EBO.
@@ -87,6 +88,7 @@ namespace osgEarth
             std::size_t length;
             float far_pixel_scale;
             float near_pixel_scale;
+            GLuint base_vertex = 0; // page-relative vertex block; indices stay mesh-local
         };
 
     public:
@@ -128,6 +130,81 @@ namespace osgEarth
         friend class ChonkDrawable;
     };
 
+    /** Immutable geometry storage shared by independently culled meshes.
+     * Build on one CPU thread, then retain the page in any number of drawables.
+     * All meshes use the caller's common inherited Chonk render state and arena.
+     */
+    class OSGEARTH_EXPORT ChonkGeometryPage
+    {
+    public:
+        using Ptr = std::shared_ptr<const ChonkGeometryPage>;
+        using MeshId = unsigned;
+        static constexpr MeshId INVALID_MESH = ~0u;
+
+        struct Mesh
+        {
+            unsigned firstVertex = 0, vertexCount = 0;
+            unsigned firstIndex = 0, indexCount = 0;
+            osg::BoundingBoxf bounds;
+        };
+
+        //! Immutable mesh descriptors, indexed by IDs returned by the builder.
+        const std::vector<Mesh>& meshes() const { return _meshes; }
+        //! Packed CPU vertices, retained for context recreation and intersections.
+        const std::vector<Chonk::VertexGPU>& vertices() const { return _storage->_vbo_store; }
+        //! Mesh-local indices; add Mesh::firstVertex when accessing CPU vertices.
+        const std::vector<Chonk::element_t>& indices() const { return _storage->_ebo_store; }
+        //! Allocate/upload the page once per share group and establish residency
+        //! in the current context. Commands correspond one-to-one with meshes.
+        const Chonk::DrawCommands& getOrCreateCommands(osg::State& state) const;
+
+    private:
+        //! Only builders create mutable pages; finish publishes const ownership.
+        ChonkGeometryPage();
+        Chonk::Ptr _storage;
+        std::vector<Mesh> _meshes;
+        friend class ChonkGeometryPageBuilder;
+        friend class ChonkDrawable;
+        friend class ChonkFactory;
+    };
+
+    /** CPU-only, single-threaded page builder. Inputs are read without mutation.
+     * Unsupported local render state is rejected; place common shader/uniform/
+     * raster state above the consuming drawable. No geometry may change after finish.
+     */
+    class OSGEARTH_EXPORT ChonkGeometryPageBuilder
+    {
+    public:
+        //! Retain the factory's arena and texture resolver, with a configurable
+        //! total geometry-byte cap. A full page rejects appends without changing it.
+        //! The factory must outlive this builder because its resolver may capture it.
+        ChonkGeometryPageBuilder(ChonkFactory& factory, std::size_t maxBytes = 64u*1024u*1024u);
+        ChonkGeometryPageBuilder(const ChonkGeometryPageBuilder&) = delete;
+        ChonkGeometryPageBuilder& operator=(const ChonkGeometryPageBuilder&) = delete;
+        //! Move exclusive ownership of unfinished CPU geometry.
+        ChonkGeometryPageBuilder(ChonkGeometryPageBuilder&&) = default;
+
+        //! Append one static object as one cullable mesh. Returns INVALID_MESH on
+        //! unsupported content, invalid indices, exhaustion, or a finished builder.
+        //! Pixel limits affect this mesh only. Failure rolls back the append.
+        ChonkGeometryPage::MeshId addMesh(osg::Node* node,
+            float farPixelScale = 0.0f, float nearPixelScale = FLT_MAX);
+        //! Consume this builder and publish initialized bounds/immutable storage;
+        //! returns empty for an empty or previously finished builder. No GL calls.
+        ChonkGeometryPage::Ptr finish();
+
+    private:
+        osg::ref_ptr<TextureArena> _textures;
+        std::function<Texture::Ptr(osg::Texture*, bool&)> _getOrCreateTexture;
+        std::shared_ptr<ChonkGeometryPage> _page;
+        std::size_t _maxBytes;
+        //! Append directly through a Ripper writer, then finalize one mesh range.
+        //! Roll back geometry/material ownership on failure; writer may throw.
+        ChonkGeometryPage::MeshId append(const std::function<bool(Chonk*)>& writer,
+            float farPixelScale, float nearPixelScale);
+        friend class ChonkFactory;
+    };
+
     /**
      * Converts OSG geometry into Chonk data.
      */
@@ -143,6 +220,10 @@ namespace osgEarth
         //! Texture caching function
         GetOrCreateFunction getOrCreateTexture;
 
+        //! Maximum vertex/index payload per page for subtree extraction. Oversize
+        //! individual meshes fail conversion; full pages roll over automatically.
+        std::size_t geometryPageSize = 64u*1024u*1024u;
+
     public:
         //! Default, user should supply a TextureArena.
         ChonkFactory();
@@ -154,6 +235,11 @@ namespace osgEarth
         //! creating new ones. Good for sharing data across invocations, and
         //! for preventint duplicate textures in the arena.
         void setGetOrCreateFunction(GetOrCreateFunction);
+
+        //! Create a single-threaded, CPU-only builder; inputs must share common
+        //! inherited rendering state. A full page can be finished and replaced.
+        //! A zero maxBytes selects geometryPageSize.
+        ChonkGeometryPageBuilder createGeometryPageBuilder(std::size_t maxBytes = 0);
 
         //! Read-only conversion of a static asset, shared across cells. The
         //! cache is weak and keyed by the source graph and pixel limits.
@@ -171,9 +257,20 @@ namespace osgEarth
         static osg::ref_ptr<osg::Node> convertExternalInstances(
             osg::Node* node, std::shared_ptr<ChonkFactory> factory);
 
-        //! For the given node, this method populates the provided Chonk wit
-        //! its geometry. If the factory finds any InstancedGeometry's along
-        //! the way it will create a Chonk for each one in out_instances.
+        //! Convert a loaded model/cell, packing compatible static ordinary meshes
+        //! as well as external instances. Preserve unsupported branches and track
+        //! external reloads on update traversal; never flatten paging boundaries.
+        //! Leave a lone ordinary primitive set on its original draw path unless
+        //! the model also contains an instance batch. Multiple primitive sets can
+        //! still benefit from packing, even within one Geometry. Reloads recheck
+        //! this policy; explicit load/add/page-builder calls are unaffected.
+        //! The factory's arena must be installed above the result. Setting
+        //! OSGEARTH_CHONK_GEOMETRY_PAGES=0 retains instance-only conversion.
+        static osg::ref_ptr<osg::Node> convertScene(
+            osg::Node* node, std::shared_ptr<ChonkFactory> factory);
+
+        //! Append the node's geometry as another LOD in the provided Chonk.
+        //! Use the drawable overload to preserve InstanceGeometry placements.
         //! Returns false if the node contained no geometry, the material arena
         //! is full, or this Chonk already uses a different arena.
         bool load(
@@ -182,6 +279,9 @@ namespace osgEarth
             float far_pixel_scale,
             float near_pixel_scale);
 
+        //! Pack ordinary geometry into pages with one culling bound per geometry,
+        //! retaining explicit InstanceGeometry placements. Common render state
+        //! must be installed above the drawable, as for legacy Chonk conversion.
         bool load(
             osg::Node* node,
             ChonkDrawable* drawable,
@@ -247,6 +347,22 @@ namespace osgEarth
             const osg::Matrixf& xform,
             const osg::Vec2f& local_uv);
 
+        struct PagePlacement
+        {
+            ChonkGeometryPage::MeshId mesh = ChonkGeometryPage::INVALID_MESH;
+            osg::Matrixf transform;
+            osg::Vec2f tileUV;
+        };
+
+        //! Append a placement, retaining its immutable page. Returns false for
+        //! an invalid mesh, incompatible arena, or non-finite/singular/reflected
+        //! transform. Call during scene updates, never concurrently with drawing.
+        bool add(ChonkGeometryPage::Ptr page, ChonkGeometryPage::MeshId mesh,
+            const osg::Matrixf& transform = osg::Matrixf(), const osg::Vec2f& tileUV = osg::Vec2f());
+        //! Validate and append a page's placements together, retaining the page
+        //! once and dirtying GPU tables/bounds once. Validation failure is atomic.
+        bool add(ChonkGeometryPage::Ptr page, const std::vector<PagePlacement>& placements);
+
         //! The timestamp at which this drawable was first created.
         //! Used for new data fade-in.
         void setBirthday(double value);
@@ -271,7 +387,7 @@ namespace osgEarth
 
         //! Whether this drawable contains any geometry
         bool empty() const {
-            return _batches.empty();
+            return _batches.empty() && _pageBatches.empty();
         }
 
         //! Logical counts, excluding GPU workgroup padding and LOD duplication.
@@ -322,6 +438,14 @@ namespace osgEarth
         using Instances = std::vector<Instance>;
         using Batches = std::unordered_map<Chonk::Ptr, Instances>;
         Batches _batches;
+        struct PageInstance { ChonkGeometryPage::MeshId mesh; Instance instance; };
+        using PageBatches = std::unordered_map<ChonkGeometryPage::Ptr, std::vector<PageInstance>>;
+        PageBatches _pageBatches;
+        osg::ref_ptr<MaterialArena> _materialArena;
+        //! Encode a placement with a conservative radius, shared by both paths.
+        static Instance makeInstance(const osg::BoundingBoxf&, const osg::Matrixf&, const osg::Vec2f&);
+        //! Check the common arena with _m held; empty drawables accept any.
+        bool acceptsArena(const MaterialArena*) const;
         bool _gpucull = true;
         float _fadeNear = 0.0f, _fadeFar = 0.0f;
         double _birthday = -1.0;
@@ -371,7 +495,7 @@ namespace osgEarth
             void initialize(
                 const osg::Object* host, osg::State& state);
             void update(
-                const Batches&, const osg::Object* host,
+                const Batches&, const PageBatches&, const osg::Object* host,
                 float fadeNear, float fadeFar,
                 double birthday, float alphaCutoff,
                 osg::State&);
@@ -406,6 +530,7 @@ namespace osgEarth
         ChonkDrawable(const ChonkDrawable& rhs, const osg::CopyOp&) { }
 
         friend class ChonkRenderBin;
+        friend class ChonkFactory;
     };
 
     /**

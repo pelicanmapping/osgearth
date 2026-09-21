@@ -16,11 +16,14 @@
 #include "ImageUtils"
 #include "Math"
 #include "InstancedExternalNode"
+#include "ExternalNode"
 #include <osg/MatrixTransform>
 #include <osg/CullFace>
 #include <osg/FrontFace>
 #include <cstdlib>
 #include <stdexcept>
+#include <limits>
+#include <algorithm>
 
 #include <osgUtil/Optimizer>
 
@@ -51,6 +54,31 @@ static_assert(offsetof(Chonk::VertexGPU, material_index) == 30, "Material ID occ
 
 namespace
 {
+    // Read the diagnostic storage policy once, before the first subtree load.
+    // Only an explicit zero restores the original merged-geometry Ripper path.
+    bool useChonkGeometryPages()
+    {
+        static const bool enabled = []()
+        {
+            const char* value = std::getenv("OSGEARTH_CHONK_GEOMETRY_PAGES");
+            return !value || std::string(value) != "0";
+        }();
+        return enabled;
+    }
+
+    // Packed placements use affine, orientation-preserving transforms. Reject
+    // singular/projective/mirrored matrices so normal and face semantics survive.
+    bool validPageTransform(const osg::Matrixd& matrix)
+    {
+        for (unsigned i = 0; i < 16; ++i)
+            if (!std::isfinite(matrix.ptr()[i])) return false;
+        const osg::Vec3d a(matrix(0,0), matrix(0,1), matrix(0,2));
+        const osg::Vec3d b(matrix(1,0), matrix(1,1), matrix(1,2));
+        const osg::Vec3d c(matrix(2,0), matrix(2,1), matrix(2,2));
+        return (a ^ b)*c > 1e-12 && matrix(0,3) == 0 && matrix(1,3) == 0 &&
+            matrix(2,3) == 0 && matrix(3,3) == 1;
+    }
+
     struct SendIndices
     {
         std::function<void(unsigned i0, unsigned i1, unsigned i2)> func;
@@ -118,15 +146,14 @@ namespace
     struct Ripper : public osg::NodeVisitor
     {
         Chonk* _chonk = nullptr;
-        ChonkDrawable* _drawable = nullptr; // optional.
-        float _far_pixel_scale = 0.0f;
-        float _near_pixel_scale = MAX_NEAR_PIXEL_SCALE;
         TextureArena* _textures = nullptr;
         ChonkFactory::GetOrCreateFunction _getOrCreateTexture;
         std::stack<ChonkMaterial::Ptr> _materialStack;
         std::stack<osg::Matrix> _transformStack;
         std::unordered_map<osg::Texture*, Texture::Ptr> _textureLUT;
-        std::vector<std::pair<Chonk::Ptr, osg::Matrixf>> _instances;
+        // Optional page writer runs with the current inherited material stack.
+        std::function<void(osg::Geometry&, const osg::Matrixd&)> writeMesh;
+        std::size_t maxBytes = std::numeric_limits<GLsizei>::max();
 
         const unsigned ALBEDO_UNIT = 0;
         const unsigned NORMAL_UNIT = 1;
@@ -169,18 +196,12 @@ namespace
                 chonk->_materials.push_back(material);
         }
 
-        // Constructor.
-        // Pointer to the "current base chonk" is required.
-        // Pointer to the IG chonk vector is optional; populate this if you want the ripper to rip InstanceGeometry nodes
-        //   and add them to the vector.
-        Ripper(Chonk* chonk, ChonkDrawable* drawable, TextureArena* textures, ChonkFactory::GetOrCreateFunction func,
-            float far_pixel_scale, float near_pixel_scale) :
+        // Route geometry to one legacy asset or an optional page callback.
+        // The texture arena and resolver must remain valid for this traversal.
+        Ripper(Chonk* chonk, TextureArena* textures, ChonkFactory::GetOrCreateFunction func) :
             _chonk(chonk),
-            _drawable(drawable),
             _textures(textures),
-            _getOrCreateTexture(func),
-            _far_pixel_scale(far_pixel_scale),
-            _near_pixel_scale(near_pixel_scale)
+            _getOrCreateTexture(func)
         {
             // Use the "active chidren" mode to only bring in default switch
             // and osgSim::MultiSwitch children for now. -gw
@@ -190,9 +211,8 @@ namespace
             _transformStack.push(osg::Matrix());
         }
 
-        // Append geometry and stage instanced placements. On material-ID
-        // exhaustion, roll back this append and leave existing destinations intact;
-        // publish staged instances only after the entire traversal succeeds.
+        // Append to legacy storage transactionally. A page callback owns its
+        // separate transaction; failures propagate as false without publishing it.
         bool rip(osg::Node& node)
         {
             const auto vertices = _chonk ? _chonk->_vbo_store.size() : 0;
@@ -204,7 +224,7 @@ namespace
                 _materialStack.push(reuseOrCreateMaterial(nullptr, nullptr, nullptr, nullptr, nullptr));
                 node.accept(*this);
             }
-            catch (const std::length_error& error)
+            catch (const std::exception& error)
             {
                 // A full arena must not publish truncated geometry or wrap a
                 // 16-bit ID. Leave an existing Chonk/Drawable intact.
@@ -218,8 +238,6 @@ namespace
                 OE_WARN << LC << error.what() << std::endl;
                 return false;
             }
-            for (const auto& instance : _instances)
-                _drawable->add(instance.first, instance.second);
             return true;
         }
 
@@ -360,46 +378,24 @@ namespace
             _transformStack.pop();
         }
 
-        void apply(osg::Geometry& node)
+        // Encode directly into destination arrays using the inherited material.
+        // Throws on invalid arrays/indices or overflow; the caller owns rollback.
+        void appendGeometry(osg::Geometry& node, Chonk* chonk, const osg::Matrixd& matrix)
         {
-            bool pushed = pushStateSet(node.getStateSet());
-
-            Chonk* chonk = _chonk;
-            osg::Matrixd matrix = _transformStack.top();
-
-            // If this an instanced geometry, create a new chonk for it and
-            // let the code below rip to that new chonk. Afterwards we will add that
-            // new chonk to the drawable with each instance matrix.
-            Chonk::Ptr ig_chonk;
-            auto ig = dynamic_cast<DrawInstanced::InstanceGeometry*>(&node);
-            if (_drawable && ig)
-            {
-                ig_chonk = Chonk::create();
-
-                // preallocate for speed:
-                Counter counter;
-                node.accept(counter);
-                if (counter._numElements > 0 && counter._numVerts > 0)
-                {
-                    ig_chonk->_vbo_store.reserve(counter._numVerts);
-                    ig_chonk->_ebo_store.reserve(counter._numElements);
-                }
-
-                chonk = ig_chonk.get();
-                matrix = osg::Matrixd::identity();
-            }
-
-            // rip the geometry into our chonk.
             if (chonk)
             {
                 if (chonk->_materialArena && chonk->_materialArena != _textures->getMaterialArena())
                     throw std::invalid_argument("A Chonk cannot mix MaterialArenas");
                 chonk->_materialArena = _textures->getMaterialArena();
-                unsigned numVerts = node.getVertexArray()->getNumElements();
+                auto verts = dynamic_cast<osg::Vec3Array*>(node.getVertexArray());
+                if (!verts) throw std::invalid_argument("Chonk requires Vec3 vertices");
+                const std::size_t numVerts = verts->size();
+                if ((chonk->_vbo_store.size() + numVerts) >
+                    (maxBytes - chonk->_ebo_store.size()*sizeof(Chonk::element_t))/sizeof(Chonk::VertexGPU))
+                    throw std::length_error("Chonk geometry page is full");
 
                 unsigned vbo_offset = chonk->_vbo_store.size();
 
-                auto verts = dynamic_cast<osg::Vec3Array*>(node.getVertexArray());
                 auto colors = dynamic_cast<osg::Vec4Array*>(node.getColorArray());
                 auto packed_colors = dynamic_cast<osg::Vec4ubArray*>(node.getColorArray());
                 bool color_is_linear = false;
@@ -412,6 +408,14 @@ namespace
                 // support either 2- or 3-component tex coords, but only read the xy components!
                 auto uv2s = dynamic_cast<osg::Vec2Array*>(node.getTexCoordArray(0));
                 auto uv3s = dynamic_cast<osg::Vec3Array*>(node.getTexCoordArray(0));
+
+                // Validate attribute lengths before indexing source arrays.
+                const osg::Array* arrays[] = { colors, packed_colors, normals,
+                    normal_techniques, flexors, extended_material, uv2s, uv3s };
+                for (const auto* array : arrays)
+                    if (array && array->getNumElements() <
+                        (array->getBinding() == osg::Array::BIND_PER_VERTEX ? numVerts : 1u))
+                        throw std::invalid_argument("Chonk attribute array is too short");
 
                 auto& material = _materialStack.top();
                 retainMaterial(chonk, material);
@@ -514,15 +518,15 @@ namespace
                 }
 
                 // assemble the elements set
-                auto copy_indices = [this, chonk, vbo_offset](unsigned i0, unsigned i1, unsigned i2)
+                // Check mesh-local indices before rebasing, avoiding overflow
+                // that could incorrectly address a previous mesh in this page.
+                auto copy_indices = [this, chonk, vbo_offset, numVerts](unsigned i0, unsigned i1, unsigned i2)
                     {
-                        if (vbo_offset + i0 >= chonk->_vbo_store.size() ||
-                            vbo_offset + i1 >= chonk->_vbo_store.size() ||
-                            vbo_offset + i2 >= chonk->_vbo_store.size())
-                        {
-                            OE_WARN << LC << "Index out of range" << std::endl;
-                            return;
-                        }
+                        if (i0 >= numVerts || i1 >= numVerts || i2 >= numVerts)
+                            throw std::invalid_argument("Chonk index out of range");
+                        if (chonk->_ebo_store.size() + 3 >
+                            (maxBytes - chonk->_vbo_store.size()*sizeof(Chonk::VertexGPU))/sizeof(Chonk::element_t))
+                            throw std::length_error("Chonk geometry page is full");
 
                         chonk->_ebo_store.emplace_back(vbo_offset + i0);
                         chonk->_ebo_store.emplace_back(vbo_offset + i1);
@@ -536,19 +540,16 @@ namespace
                 simple->accept(sender);
             }
 
-            if (_drawable && ig_chonk && ig)
-            {
-                ig_chonk->_lods.push_back({ 0u, ig_chonk->_ebo_store.size(), 
-                    _far_pixel_scale, std::min(_near_pixel_scale, MAX_NEAR_PIXEL_SCALE) });
+        }
 
-                ig_chonk->_box.init();
-
-                for(const auto& encoded_matrix : ig->getMatrices())
-                {
-                    auto matrix = ig->decodeMatrix(encoded_matrix);
-                    _instances.emplace_back(ig_chonk, matrix * _transformStack.top());
-                }
-            }
+        // Route each mesh to legacy storage or a page, with inherited materials.
+        void apply(osg::Geometry& node)
+        {
+            bool pushed = pushStateSet(node.getStateSet());
+            if (writeMesh)
+                writeMesh(node, _transformStack.top());
+            else
+                appendGeometry(node, _chonk, _transformStack.top());
 
             if (pushed) popStateSet();
         }
@@ -617,6 +618,7 @@ Chonk::getOrCreateCommands(osg::State& state) const
         gs.ebo->debugLabel("Chonk geometry", "EBO " + _name);
         gs.ebo->bufferStorage(_ebo_store.size() * sizeof(element_t), _ebo_store.data(), IMMUTABLE);
 
+        gs.commands.clear();
         gs.commands.reserve(_lods.size());
 
         // for each variant:
@@ -630,7 +632,7 @@ Chonk::getOrCreateCommands(osg::State& state) const
                 command.cmd.firstIndex = lod.offset;
                 command.cmd.instanceCount = 1;
                 command.cmd.baseInstance = 0;
-                command.cmd.baseVertex = 0;
+                command.cmd.baseVertex = lod.base_vertex;
                 command.indexBuffer.address = gs.ebo->address();
                 command.indexBuffer.length = gs.ebo->size();
                 command.vertexBuffer.address = gs.vbo->address();
@@ -799,15 +801,272 @@ namespace
         }
     };
 
+    // Pages require an explicit static subset irrespective of the legacy opt-in
+    // policy. Reject state whose inheritance the material-only Ripper cannot encode.
+    struct PageEligibility : ChonkEligibility
+    {
+        // Validate local state while leaving the common ancestor state untouched.
+        void inspectPage(osg::Node& node)
+        {
+            inspect(node);
+            auto* ss = node.getStateSet();
+            if (!ss) return;
+            if (!ss->getUniformList().empty() || !ss->getDefineList().empty() ||
+                ss->getRenderBinMode() != osg::StateSet::INHERIT_RENDERBIN_DETAILS)
+                reject(node, "local uniforms, defines, or render bin");
+            for (const auto& mode : ss->getModeList())
+                if ((mode.second & (osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED)) ||
+                    !((mode.first == GL_BLEND && !(mode.second & osg::StateAttribute::ON)) ||
+                      (mode.first == GL_CULL_FACE && (mode.second & osg::StateAttribute::ON))))
+                    reject(node, "local rendering mode");
+            for (unsigned unit = 0; unit < ss->getTextureAttributeList().size(); ++unit)
+                for (const auto& attribute : ss->getTextureAttributeList()[unit])
+                {
+                    if (attribute.second.second & (osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED))
+                        reject(node, "texture override/protected inheritance");
+                    auto* texture = dynamic_cast<osg::Texture2D*>(attribute.second.first.get());
+                    auto* pbr = dynamic_cast<PBRTexture*>(attribute.second.first.get());
+                    int extendedSlot = -1;
+                    if (texture) texture->getUserValue(CHONK_HINT_EXTENDED_MATERIAL_SLOT, extendedSlot);
+                    if ((!texture && !pbr) || (pbr && unit != 0) ||
+                        (unit > 2 && extendedSlot != 0 && extendedSlot != 1))
+                        reject(node, "unsupported texture state attribute");
+                }
+            for (const auto& unit : ss->getTextureModeList())
+                for (const auto& mode : unit)
+                    if (mode.first != GL_TEXTURE_2D || mode.second != osg::StateAttribute::ON)
+                        reject(node, "unsupported texture mode");
+        }
+
+        // Only ordinary static containers are safe to flatten inside a mesh.
+        void apply(osg::Node& node) override
+        {
+            inspectPage(node);
+            if (typeid(node) != typeid(osg::Group) && typeid(node) != typeid(osg::Geode) &&
+                typeid(node) != typeid(osg::Node)) reject(node, "specialized node type");
+            if (valid) traverse(node);
+        }
+
+        // Preserve affine normal and winding semantics for transforms baked by Ripper.
+        void apply(osg::Transform& node) override
+        {
+            inspectPage(node);
+            auto* transform = dynamic_cast<osg::MatrixTransform*>(&node);
+            if (typeid(node) != typeid(osg::MatrixTransform) ||
+                node.getReferenceFrame() != osg::Transform::RELATIVE_RF ||
+                !transform || !validPageTransform(transform->getMatrix()))
+                reject(node, "unsupported mesh transform");
+            if (valid) traverse(node);
+        }
+
+        // Defer detailed vertex/index checks to the transactional append writer.
+        void apply(osg::Geometry& node) override
+        {
+            inspectPage(node);
+            ChonkEligibility::apply(node);
+            // The encoder supports overall or per-vertex values only. Other
+            // bindings and custom attributes would silently change shading.
+            const osg::Array* arrays[] = { node.getNormalArray(), node.getColorArray(),
+                node.getTexCoordArray(0), node.getTexCoordArray(3),
+                node.getVertexAttribArray(6), node.getVertexAttribArray(Chonk::MATERIAL_VERTEX_SLOT) };
+            for (auto* array : arrays)
+                if (array && (array->getDataVariance() == osg::Object::DYNAMIC ||
+                    (array->getBinding() != osg::Array::BIND_OVERALL &&
+                     array->getBinding() != osg::Array::BIND_PER_VERTEX)))
+                    reject(node, "unsupported attribute binding or dynamic array");
+            if ((node.getNormalArray() && !dynamic_cast<osg::Vec3Array*>(node.getNormalArray())) ||
+                (node.getColorArray() && !dynamic_cast<osg::Vec4Array*>(node.getColorArray()) &&
+                    !dynamic_cast<osg::Vec4ubArray*>(node.getColorArray())) ||
+                (node.getTexCoordArray(0) && !dynamic_cast<osg::Vec2Array*>(node.getTexCoordArray(0)) &&
+                    !dynamic_cast<osg::Vec3Array*>(node.getTexCoordArray(0))) ||
+                (node.getTexCoordArray(3) && !dynamic_cast<osg::Vec3Array*>(node.getTexCoordArray(3))) ||
+                (node.getVertexAttribArray(6) && !dynamic_cast<osg::UByteArray*>(node.getVertexAttribArray(6))) ||
+                (node.getVertexAttribArray(Chonk::MATERIAL_VERTEX_SLOT) &&
+                    !dynamic_cast<osg::ShortArray*>(node.getVertexAttribArray(Chonk::MATERIAL_VERTEX_SLOT))))
+                reject(node, "unsupported vertex attribute type");
+            if (node.getVertexArray() && node.getVertexArray()->getDataVariance() == osg::Object::DYNAMIC)
+                reject(node, "dynamic vertex array");
+            for (unsigned i = 0; i < node.getNumTexCoordArrays(); ++i)
+                if (i != 0 && i != 3 && node.getTexCoordArray(i))
+                    reject(node, "unsupported texture coordinate channel");
+            for (unsigned i = 0; i < node.getNumVertexAttribArrays(); ++i)
+                if (i != 6 && i != Chonk::MATERIAL_VERTEX_SLOT && node.getVertexAttribArray(i))
+                    reject(node, "unsupported custom vertex attribute");
+            if (node.getSecondaryColorArray() || node.getFogCoordArray())
+                reject(node, "secondary colors or fog coordinates");
+            for (const auto& primitive : node.getPrimitiveSetList())
+                if (primitive->getDataVariance() == osg::Object::DYNAMIC)
+                    reject(node, "dynamic primitive set");
+        }
+    };
+
+    // Convert only the stock material state that Chonk encodes in its vertex
+    // and material tables. Unknown effects stay on their original scene path.
+    osg::ref_ptr<osg::Geometry> pageGeometry(osg::Geometry& source,
+        const osg::StateSet* inherited, bool& twoSided)
+    {
+        if (typeid(source) != typeid(osg::Geometry) || source.getDrawCallback()) return {};
+        // Own user values before adding encoding hints; vertex arrays stay shared.
+        osg::ref_ptr<osg::Geometry> copy = new osg::Geometry(source,
+            osg::CopyOp::DEEP_COPY_USERDATA | osg::CopyOp::DEEP_COPY_OBJECTS);
+        osg::ref_ptr<osg::StateSet> state = inherited ?
+            new osg::StateSet(*inherited, osg::CopyOp::SHALLOW_COPY) : new osg::StateSet();
+        const auto special = osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED;
+        for (const auto& attribute : state->getAttributeList())
+            if (attribute.second.second & special) return {};
+        for (const auto& unit : state->getTextureAttributeList())
+            for (const auto& attribute : unit)
+                if (attribute.second.second & special) return {};
+        for (const auto& unit : state->getTextureModeList())
+            for (const auto& mode : unit)
+                if (mode.second & special) return {};
+        for (const auto& uniform : state->getUniformList())
+            if (uniform.second.second & special) return {};
+
+        auto* program = state->getAttribute(osg::StateAttribute::PROGRAM);
+        const bool standardPBR = program == PBRTexture::getOrCreateProgram();
+        if (program && !standardPBR) return {};
+        auto* pbr = dynamic_cast<PBRTexture*>(state->getTextureAttribute(0, osg::StateAttribute::TEXTURE));
+        if (standardPBR)
+        {
+            if (!pbr) return {};
+            // The descriptor replaces exactly the standard program's bindings;
+            // mismatched uniforms/maps may represent a caller's custom effect.
+            const char* samplers[] = {"oe_pbr_texture_albedo", "oe_pbr_texture_normal",
+                "oe_pbr_texture_pbr", "oe_pbr_texture_occlusion"};
+            osg::Texture* maps[] = {pbr->albedo.get(), pbr->normal.get(), pbr->pbr.get(), pbr->occlusion.get()};
+            for (unsigned i = 0; i < 4; ++i)
+            {
+                int unit = -1;
+                auto* uniform = state->getUniform(samplers[i]);
+                if (!uniform || !uniform->get(unit) || unit != int(i+1) ||
+                    state->getTextureAttribute(i+1, osg::StateAttribute::TEXTURE) != maps[i]) return {};
+                // Core-profile texture enables may be absent; the standard
+                // PBR shader samples the validated binding regardless of them.
+                state->removeUniform(samplers[i]);
+                state->removeTextureAttribute(i+1, osg::StateAttribute::TEXTURE);
+                state->removeTextureMode(i+1, GL_TEXTURE_2D);
+            }
+            osg::Vec4 factors;
+            int flags = -1;
+            auto* factorsUniform = state->getUniform("oe_pbr_texture_layoutAndFactors");
+            auto* flagsUniform = state->getUniform("oe_pbr_texture_flags");
+            if (!factorsUniform || !factorsUniform->get(factors) || factors != pbr->layoutAndFactors ||
+                !flagsUniform || !flagsUniform->get(flags) ||
+                flags != ((pbr->normal ? 1 : 0) | (pbr->pbr ? 2 : 0) | (pbr->occlusion ? 4 : 0))) return {};
+            state->removeUniform("oe_pbr_texture_layoutAndFactors");
+            state->removeUniform("oe_pbr_texture_flags");
+            state->removeAttribute(osg::StateAttribute::PROGRAM);
+            copy->setUserValue(CHONK_HINT_LINEAR_COLOR, true);
+        }
+        auto cull = state->getModeList().find(GL_CULL_FACE);
+        twoSided = cull != state->getModeList().end() && !(cull->second & osg::StateAttribute::ON);
+        if (twoSided)
+        {
+            if (cull->second & special) return {};
+            // Preserve this raster state on a separate output group, instead of
+            // rejecting the mesh or changing the shared Chonk render-bin state.
+            state->removeMode(GL_CULL_FACE);
+        }
+        copy->setStateSet(state);
+        return copy;
+    }
+
+    // Cheap, read-only gate for automatic scene conversion. A lone ordinary
+    // draw cannot amortize Chonk's compute/indirect buffers. Count primitive
+    // sets, not vertices: one Geometry with several sets can still combine draws.
+    // This is deliberately conservative; normal conversion performs eligibility
+    // checks after this gate finds a potential batch. Explicit Ripper calls do
+    // not use this policy. No geometry/material encoding or GL work occurs here.
+    struct SceneBatchingCheck : osg::NodeVisitor
+    {
+        struct Dependency {
+            osg::ref_ptr<ExternalNode> node;
+            osg::ref_ptr<osg::Node> payload;
+        };
+        unsigned draws = 0;
+        bool instanced = false;
+        std::vector<Dependency> dependencies;
+
+        // Include masked branches conservatively; stop counting once batching
+        // may help. Retain snapshots only when a singleton needs reload tracking.
+        SceneBatchingCheck() : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN) { setNodeMaskOverride(~0u); }
+        // Existing instance batches keep their conversion policy, including a
+        // single prototype used by many placements and an adjacent unique mesh.
+        bool canBatch() const { return instanced || draws > 1; }
+        // Count external payloads without flattening or modifying their wrappers.
+        // Empty/singleton ordinary assets remain observable for later reloads.
+        void apply(osg::Node& node) override
+        {
+            if (canBatch()) return;
+            if (dynamic_cast<InstancedExternalNode*>(&node))
+                instanced = true;
+            else if (auto* external = dynamic_cast<ExternalNode*>(&node))
+            {
+                auto payload = external->getExternalNode();
+                dependencies.push_back({external, payload});
+                if (payload) payload->accept(*this);
+            }
+            else traverse(node);
+        }
+        // Two primitive sets suffice to retain the existing conversion path.
+        void apply(osg::Geometry& geometry) override
+        {
+            draws = std::min(2u, draws + std::min(2u, geometry.getNumPrimitiveSets()));
+        }
+    };
+
+    // Accumulate a cell's unique meshes in capped pages, retaining original
+    // geometry on individual append failures. Used only during rebuild/update.
+    struct ScenePages
+    {
+        ChonkFactory& factory;
+        ChonkDrawable* drawable;
+        std::unique_ptr<ChonkGeometryPageBuilder> builder;
+        std::vector<ChonkDrawable::PagePlacement> placements;
+        unsigned count = 0;
+        bool valid = true;
+
+        // Borrow the factory/output for this synchronous scene conversion.
+        ScenePages(ChonkFactory& f, ChonkDrawable* d) : factory(f), drawable(d) { reset(); }
+        // Start an empty page using the configured payload cap.
+        void reset() { builder.reset(new ChonkGeometryPageBuilder(factory, factory.geometryPageSize)); }
+        // Publish a completed page; a failure makes the whole conversion fall back.
+        void finish()
+        {
+            auto page = builder->finish();
+            if (page) valid &= drawable->add(page, placements);
+            placements.clear();
+        }
+        // Keep object-local vertices and encode the accumulated cell transform.
+        bool add(osg::Geometry* geometry, const osg::Matrixd& matrix)
+        {
+            osg::Matrixf placement(matrix);
+            if (!validPageTransform(osg::Matrixd(placement))) return false;
+            auto id = builder->addMesh(geometry);
+            if (id == ChonkGeometryPage::INVALID_MESH && !placements.empty())
+            {
+                finish();
+                reset();
+                id = builder->addMesh(geometry);
+            }
+            if (id == ChonkGeometryPage::INVALID_MESH) return false;
+            placements.push_back({id, placement, osg::Vec2f()});
+            ++count;
+            return true;
+        }
+    };
+
     // The containing cell owns the source wrappers, so manager-wide reloads
     // and unloads still reach this consumer. Only rendering children change.
     class ExternalChonkGroup : public osg::Group
     {
     public:
-        ExternalChonkGroup(osg::Node* source, std::shared_ptr<ChonkFactory> factory) :
-            _source(source), _factory(std::move(factory))
+        // Own the borrowed graph/factory until all converted geometry is retired.
+        ExternalChonkGroup(osg::Node* source, std::shared_ptr<ChonkFactory> factory, bool packUnique = false) :
+            _source(source), _factory(std::move(factory)), _packUnique(packUnique)
         {
-            setName(source->getName() + " Chonk instances");
+            setName(source->getName() + " Chonk geometry");
             setUpdateCallback(new LambdaCallback<>([this](osg::NodeVisitor&)
                 { refresh(); return true; }));
             rebuild();
@@ -821,6 +1080,8 @@ namespace
         osg::ref_ptr<osg::Node> _source;
         std::shared_ptr<ChonkFactory> _factory;
         std::vector<Dependency> _dependencies;
+        std::vector<SceneBatchingCheck::Dependency> _ordinaryDependencies;
+        bool _packUnique;
 
         static bool positiveAffine(const osg::Matrixd& m)
         {
@@ -833,7 +1094,10 @@ namespace
                 m(0,3) == 0.0 && m(1,3) == 0.0 && m(2,3) == 0.0 && m(3,3) == 1.0;
         }
 
-        osg::ref_ptr<osg::Node> convert(osg::Node* node, const osg::Matrixd& parent, ChonkDrawable* drawable)
+        // Remove only successfully packed leaves, cloning structural paths for
+        // residual content and resolving local state without changing the input.
+        osg::ref_ptr<osg::Node> convert(osg::Node* node, const osg::Matrixd& parent, ChonkDrawable* drawable,
+            const osg::StateSet* inherited = nullptr, ScenePages* oneSided = nullptr, ScenePages* twoSided = nullptr)
         {
             if (auto* external = dynamic_cast<InstancedExternalNode*>(node))
             {
@@ -856,12 +1120,55 @@ namespace
                 return nullptr;
             }
 
+            if (node->getNodeMask() != ~0u || node->getUpdateCallback() ||
+                node->getEventCallback() || node->getCullCallback() ||
+                node->getDataVariance() == osg::Object::DYNAMIC) return node;
+            osg::ref_ptr<osg::StateSet> effective;
+            if (oneSided)
+            {
+                effective = inherited ? new osg::StateSet(*inherited, osg::CopyOp::SHALLOW_COPY) : new osg::StateSet();
+                if (auto* local = node->getStateSet())
+                {
+                    auto* program = local->getAttribute(osg::StateAttribute::PROGRAM);
+                    if (local->getDataVariance() == osg::Object::DYNAMIC || local->requiresUpdateTraversal() ||
+                        local->requiresEventTraversal() || local->getRenderBinMode() != osg::StateSet::INHERIT_RENDERBIN_DETAILS ||
+                        (program && program != PBRTexture::getOrCreateProgram()))
+                    {
+                        oneSided = twoSided = nullptr;
+                    }
+                    else effective->merge(*local);
+                }
+            }
+            if (oneSided)
+            {
+                if (auto* geometry = dynamic_cast<osg::Geometry*>(node))
+                {
+                    bool doubleSided = false;
+                    auto packed = pageGeometry(*geometry, effective, doubleSided);
+                    if (packed && (doubleSided ? twoSided : oneSided)->add(packed, parent)) return nullptr;
+                    return node;
+                }
+                if (auto* external = dynamic_cast<ExternalNode*>(node))
+                {
+                    auto payload = external->getExternalNode();
+                    _ordinaryDependencies.push_back({external, payload});
+                    if (!payload) return node;
+                    auto residual = convert(payload, parent, drawable, effective, oneSided, twoSided);
+                    if (!residual) return nullptr;
+                    osg::ref_ptr<osg::Group> copy = new osg::Group(*external, osg::CopyOp::SHALLOW_COPY);
+                    copy->removeChildren(0, copy->getNumChildren());
+                    copy->addChild(residual);
+                    return copy;
+                }
+            }
+
             // Copy only structural nodes along converted paths. Ordinary
             // geometry and specialized nodes retain their original semantics.
             auto* group = node->asGroup();
             if (!group || node->getNodeMask() != ~0u || node->getUpdateCallback() ||
                 node->getEventCallback() || node->getCullCallback() ||
-                (typeid(*node) != typeid(osg::Group) && typeid(*node) != typeid(osg::MatrixTransform)))
+                (typeid(*node) != typeid(osg::Group) && typeid(*node) != typeid(osg::MatrixTransform) &&
+                    !(oneSided && typeid(*node) == typeid(osg::Geode))))
                 return node;
             if (enforceChonkEligibility())
             {
@@ -879,18 +1186,59 @@ namespace
             copy->removeChildren(0, copy->getNumChildren());
             for (unsigned i = 0; i < group->getNumChildren(); ++i)
             {
-                auto child = convert(group->getChild(i), matrix, drawable);
+                auto child = convert(group->getChild(i), matrix, drawable, effective, oneSided, twoSided);
                 if (child) copy->addChild(child);
             }
             return copy->getNumChildren() ? copy.get() : nullptr;
         }
 
+        // Rebuild after load/reload, publishing only complete pages and retaining
+        // fallback branches. Cull modes use separate ordinary OSG state groups.
         void rebuild()
         {
             _dependencies.clear();
+            _ordinaryDependencies.clear();
+            if (_packUnique)
+            {
+                SceneBatchingCheck check;
+                _source->accept(check);
+                if (!check.canBatch())
+                {
+                    // Keep the original graph/state and allocate no Chonk pages.
+                    // A reload may turn this singleton into a useful batch, so
+                    // retain its external wrappers and reconsider on update.
+                    _ordinaryDependencies = std::move(check.dependencies);
+                    removeChildren(0, getNumChildren());
+                    addChild(_source);
+                    return;
+                }
+            }
             osg::ref_ptr<ChonkDrawable> drawable = new ChonkDrawable();
             drawable->setName(getName());
-            auto residual = convert(_source.get(), osg::Matrixd(), drawable.get());
+            osg::ref_ptr<ChonkDrawable> doubleSided;
+            std::unique_ptr<ScenePages> frontPages, bothPages;
+            if (_packUnique)
+            {
+                // ChonkBin applies one draw StateGraph to the entire bin. Keep
+                // the two raster policies in distinct bins so back faces survive.
+                doubleSided = new ChonkDrawable(drawable->getRenderBinNumber() + 1);
+                doubleSided->setName(getName() + " two-sided pages");
+                frontPages.reset(new ScenePages(*_factory, drawable));
+                bothPages.reset(new ScenePages(*_factory, doubleSided));
+            }
+            auto residual = convert(_source.get(), osg::Matrixd(), drawable.get(), nullptr,
+                frontPages.get(), bothPages.get());
+            if (_packUnique)
+            {
+                frontPages->finish();
+                bothPages->finish();
+            }
+            if (_packUnique && (!frontPages->valid || !bothPages->valid))
+            {
+                removeChildren(0, getNumChildren());
+                addChild(_source);
+                return;
+            }
             // Do not change the shared Chonk render-bin StateSet.
             osg::ref_ptr<osg::Group> rendered = new osg::Group();
             rendered->getOrCreateStateSet()->setAttributeAndModes(new osg::CullFace(osg::CullFace::BACK));
@@ -899,8 +1247,21 @@ namespace
             removeChildren(0, getNumChildren());
             if (residual) addChild(residual);
             if (!drawable->empty()) addChild(rendered);
+            if (doubleSided && !doubleSided->empty())
+            {
+                osg::ref_ptr<osg::Group> renderedBoth = new osg::Group();
+                renderedBoth->getOrCreateStateSet()->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
+                renderedBoth->getOrCreateStateSet()->setAttribute(new osg::FrontFace(osg::FrontFace::COUNTER_CLOCKWISE));
+                renderedBoth->addChild(doubleSided);
+                addChild(renderedBoth);
+            }
+            if (_packUnique)
+                OE_DEBUG << LC << getName() << ": packed " << frontPages->count + bothPages->count
+                    << " ordinary meshes" << std::endl;
         }
 
+        // Ordinary assets publish new payload pointers on reload/unload; retain
+        // their wrappers so the manager can still notify this converted cell.
         void refresh()
         {
             bool changed = false;
@@ -909,9 +1270,112 @@ namespace
                 dependency.node->refresh();
                 changed |= dependency.node->getRenderRevision() != dependency.revision;
             }
+            for (auto& dependency : _ordinaryDependencies)
+                changed |= dependency.node->getExternalNode() != dependency.payload;
             if (changed) rebuild();
         }
     };
+}
+
+ChonkGeometryPage::ChonkGeometryPage() : _storage(Chonk::create())
+{
+    _storage->name() = "Chonk geometry page";
+}
+
+const Chonk::DrawCommands&
+ChonkGeometryPage::getOrCreateCommands(osg::State& state) const
+{
+    return _storage->getOrCreateCommands(state);
+}
+
+ChonkGeometryPageBuilder::ChonkGeometryPageBuilder(ChonkFactory& factory, std::size_t maxBytes) :
+    _textures(factory.textures), _getOrCreateTexture(factory.getOrCreateTexture),
+    _page(new ChonkGeometryPage()),
+    _maxBytes(std::min(maxBytes, std::size_t(std::numeric_limits<GLsizei>::max())))
+{
+}
+
+ChonkGeometryPageBuilder
+ChonkFactory::createGeometryPageBuilder(std::size_t maxBytes)
+{
+    return ChonkGeometryPageBuilder(*this, maxBytes == 0 ? geometryPageSize : maxBytes);
+}
+
+ChonkGeometryPage::MeshId
+ChonkGeometryPageBuilder::append(const std::function<bool(Chonk*)>& writer,
+    float farScale, float nearScale)
+{
+    if (!_page || !_textures || !std::isfinite(farScale) || !std::isfinite(nearScale) ||
+        farScale < 0 || nearScale < farScale)
+        return ChonkGeometryPage::INVALID_MESH;
+    auto& storage = *_page->_storage;
+    const auto vertices = storage._vbo_store.size(), indices = storage._ebo_store.size();
+    const auto materials = storage._materials.size(), lods = storage._lods.size();
+    const auto meshes = _page->_meshes.size();
+    auto arena = storage._materialArena;
+    try
+    {
+        if (!writer(&storage) || storage._ebo_store.size() == indices)
+            throw std::invalid_argument("Chonk mesh has no valid triangles");
+        if (storage._vbo_store.size()*sizeof(Chonk::VertexGPU) +
+            storage._ebo_store.size()*sizeof(Chonk::element_t) > _maxBytes)
+            throw std::length_error("Chonk geometry page is full");
+        ChonkGeometryPage::Mesh mesh;
+        mesh.firstVertex = unsigned(vertices);
+        mesh.vertexCount = unsigned(storage._vbo_store.size() - vertices);
+        mesh.firstIndex = unsigned(indices);
+        mesh.indexCount = unsigned(storage._ebo_store.size() - indices);
+        for (std::size_t i = indices; i < storage._ebo_store.size(); ++i)
+        {
+            auto& index = storage._ebo_store[i];
+            if (index < vertices || index >= storage._vbo_store.size())
+                throw std::invalid_argument("Chonk mesh index escapes its vertex range");
+            const auto& position = storage._vbo_store[index].position;
+            if (!std::isfinite(position.x()) || !std::isfinite(position.y()) || !std::isfinite(position.z()))
+                throw std::invalid_argument("Chonk mesh has non-finite positions");
+            mesh.bounds.expandBy(position);
+            index -= mesh.firstVertex;
+        }
+        if (!std::isfinite(mesh.bounds.radius()))
+            throw std::invalid_argument("Chonk mesh bounds overflow");
+        storage._lods.push_back({ mesh.firstIndex, mesh.indexCount, farScale, nearScale, mesh.firstVertex });
+        _page->_meshes.push_back(mesh);
+        return unsigned(meshes);
+    }
+    catch (const std::exception& error)
+    {
+        storage._vbo_store.resize(vertices);
+        storage._ebo_store.resize(indices);
+        storage._materials.resize(materials);
+        storage._lods.resize(lods);
+        storage._materialArena = arena;
+        _page->_meshes.resize(meshes);
+        OE_DEBUG << LC << error.what() << std::endl;
+        return ChonkGeometryPage::INVALID_MESH;
+    }
+}
+
+ChonkGeometryPage::MeshId
+ChonkGeometryPageBuilder::addMesh(osg::Node* node, float farScale, float nearScale)
+{
+    if (!node || !_page || !_textures) return ChonkGeometryPage::INVALID_MESH;
+    PageEligibility eligibility;
+    node->accept(eligibility);
+    if (!eligibility.valid) return ChonkGeometryPage::INVALID_MESH;
+    // The same encoder writes legacy assets and pages, including all materials.
+    return append([&](Chonk* storage)
+    {
+        Ripper ripper(storage, _textures, _getOrCreateTexture);
+        ripper.maxBytes = _maxBytes;
+        return ripper.rip(*node);
+    }, farScale, nearScale);
+}
+
+ChonkGeometryPage::Ptr
+ChonkGeometryPageBuilder::finish()
+{
+    auto page = std::move(_page);
+    return page && !page->_meshes.empty() ? page : ChonkGeometryPage::Ptr();
 }
 
 Chonk::Ptr
@@ -940,7 +1404,7 @@ ChonkFactory::getOrCreateChonk(osg::Node* node, float farScale, float nearScale)
     chonk->name() = node->getName();
     // The manager owns node. Unlike load(Node*, Chonk*), this never runs an
     // optimizer on the canonical graph or changes its primitive arrays.
-    Ripper ripper(chonk.get(), nullptr, textures.get(), getOrCreateTexture, farScale, nearScale);
+    Ripper ripper(chonk.get(), textures.get(), getOrCreateTexture);
     if (!ripper.rip(*node)) return {};
     if (chonk->_ebo_store.empty()) return {};
     chonk->_lods.push_back({0u, chonk->_ebo_store.size(), farScale, nearScale});
@@ -954,6 +1418,22 @@ ChonkFactory::convertExternalInstances(osg::Node* node, std::shared_ptr<ChonkFac
 {
     if (!node || !factory || !factory->textures) return node;
     return new ExternalChonkGroup(node, std::move(factory));
+}
+
+osg::ref_ptr<osg::Node>
+ChonkFactory::convertScene(osg::Node* node, std::shared_ptr<ChonkFactory> factory)
+{
+    if (!node || !factory || !factory->textures) return node;
+    const bool packUnique = useChonkGeometryPages();
+    if (packUnique)
+    {
+        SceneBatchingCheck check;
+        node->accept(check);
+        // Static singleton models need neither conversion nor an update wrapper.
+        // External assets retain the wrapper so reloads can change this decision.
+        if (!check.canBatch() && check.dependencies.empty()) return node;
+    }
+    return new ExternalChonkGroup(node, std::move(factory), packUnique);
 }
 
 bool
@@ -981,13 +1461,13 @@ ChonkFactory::load(osg::Node* node, Chonk* chonk, float far_pixel_scale, float n
     unsigned offset = chonk->_ebo_store.size();
 
     // rip geometry and textures into a new Asset object
-    Ripper ripper(chonk, nullptr, textures.get(), getOrCreateTexture, far_pixel_scale, near_pixel_scale);
+    Ripper ripper(chonk, textures.get(), getOrCreateTexture);
     if (!ripper.rip(*node)) return false;
 
     // dirty its bounding box
     if (chonk->_ebo_store.size() > 0)
     {
-        chonk->_lods.push_back({ offset, chonk->_ebo_store.size(),
+        chonk->_lods.push_back({ offset, chonk->_ebo_store.size() - offset,
             far_pixel_scale, std::min(near_pixel_scale, MAX_NEAR_PIXEL_SCALE) });
     }
     chonk->_box.init();
@@ -1004,29 +1484,129 @@ ChonkFactory::load(osg::Node* node, ChonkDrawable* drawable, float far_pixel_sca
 
     OE_PROFILING_ZONE;
 
-    Chonk::Ptr chonk;
-
-    // first count up the memory we need and allocate it
-    Counter counter;
-    node->accept(counter);
-    if (counter._numElements > 0 && counter._numVerts > 0)
+    if (!useChonkGeometryPages())
     {
-        chonk = Chonk::create();
-        chonk->_vbo_store.reserve(counter._numVerts);
-        chonk->_ebo_store.reserve(counter._numElements);
+        // Original layout: merge ordinary geometry into one Chonk, and retain
+        // a separate Chonk for each InstanceGeometry with all its placements.
+        auto merged = Chonk::create();
+        Counter counter;
+        node->accept(counter);
+        merged->_vbo_store.reserve(counter._numVerts);
+        merged->_ebo_store.reserve(counter._numElements);
+        ChonkDrawable::Batches staged;
+        Ripper ripper(nullptr, textures.get(), getOrCreateTexture);
+        // Finalize one legacy asset before encoding placements from its bound.
+        auto finishChonk = [&](const Chonk::Ptr& chonk)
+        {
+            chonk->_lods.push_back({0u, chonk->_ebo_store.size(), far_pixel_scale, near_pixel_scale});
+            chonk->getBound();
+        };
+        // Reuse the same encoder and material stack for both storage policies.
+        ripper.writeMesh = [&](osg::Geometry& geometry, const osg::Matrixd& transform)
+        {
+            if (auto* instanced = dynamic_cast<DrawInstanced::InstanceGeometry*>(&geometry))
+            {
+                if (instanced->getMatrices().empty()) return;
+                auto chonk = Chonk::create();
+                ripper.appendGeometry(geometry, chonk.get(), osg::Matrixd());
+                if (chonk->_ebo_store.empty()) return;
+                finishChonk(chonk);
+                auto& instances = staged[chonk];
+                instances.reserve(instanced->getMatrices().size());
+                for (const auto& encoded : instanced->getMatrices())
+                    instances.push_back(ChonkDrawable::makeInstance(chonk->getBound(),
+                        osg::Matrixf(instanced->decodeMatrix(encoded) * transform), osg::Vec2f()));
+            }
+            else
+                ripper.appendGeometry(geometry, merged.get(), transform);
+        };
+        if (!ripper.rip(*node)) return false;
+        if (!merged->_ebo_store.empty())
+        {
+            finishChonk(merged);
+            staged[merged].push_back(ChonkDrawable::makeInstance(
+                merged->getBound(), osg::Matrixf(), osg::Vec2f()));
+        }
+        if (staged.empty()) return false;
+        std::lock_guard<std::mutex> lock(drawable->_m);
+        if (!drawable->acceptsArena(textures->getMaterialArena())) return false;
+        drawable->_batches.reserve(drawable->_batches.size() + staged.size());
+        drawable->_batches.merge(staged);
+        drawable->_materialArena = textures->getMaterialArena();
+        drawable->_proxy_dirty = true;
+        drawable->dirtyGLObjects();
+        drawable->dirtyBound();
+        return true;
     }
 
-    Ripper ripper(chonk.get(), drawable, textures.get(), getOrCreateTexture, far_pixel_scale, near_pixel_scale);
+    auto builder = createGeometryPageBuilder();
+    std::vector<ChonkDrawable::PagePlacement> placements;
+    ChonkDrawable::PageBatches staged;
+    // Stage all pages before publishing to keep failed conversions atomic.
+    auto finishPage = [&]()
+    {
+        auto page = builder.finish();
+        if (page && !placements.empty())
+        {
+            auto& output = staged[page];
+            output.reserve(placements.size());
+            for (const auto& placement : placements)
+                output.push_back({placement.mesh, ChonkDrawable::makeInstance(
+                    page->meshes()[placement.mesh].bounds, placement.transform, placement.tileUV)});
+        }
+        placements.clear();
+    };
+    Ripper ripper(nullptr, textures.get(), getOrCreateTexture);
+    ripper.maxBytes = builder._maxBytes;
+    // A discovered geometry is a culling unit. Parent transforms remain in its
+    // placement instead of baking large translated coordinates into float vertices.
+    ripper.writeMesh = [&](osg::Geometry& geometry, const osg::Matrixd& transform)
+    {
+        auto* instanced = dynamic_cast<DrawInstanced::InstanceGeometry*>(&geometry);
+        if (instanced && instanced->getMatrices().empty()) return;
+        if (!geometry.getVertexArray() || geometry.getVertexArray()->getNumElements() == 0) return;
+        auto writer = [&](Chonk* storage)
+        {
+            ripper.appendGeometry(geometry, storage, osg::Matrixd());
+            return true;
+        };
+        auto mesh = builder.append(writer, far_pixel_scale, near_pixel_scale);
+        if (mesh == ChonkGeometryPage::INVALID_MESH && !builder._page->_meshes.empty())
+        {
+            finishPage();
+            builder._page.reset(new ChonkGeometryPage());
+            mesh = builder.append(writer, far_pixel_scale, near_pixel_scale);
+        }
+        if (mesh == ChonkGeometryPage::INVALID_MESH)
+            throw std::invalid_argument("Cannot pack Chonk geometry (invalid or exceeds page capacity)");
+        // Reject unsupported placement transforms before publishing any pages.
+        auto place = [&](const osg::Matrixd& matrix)
+        {
+            const osg::Matrixf local(matrix);
+            if (!validPageTransform(osg::Matrixd(local)))
+                throw std::invalid_argument("Unsupported Chonk page placement transform");
+            if (!std::isfinite(ChonkDrawable::makeInstance(
+                builder._page->_meshes[mesh].bounds, local, osg::Vec2f()).radius))
+                throw std::invalid_argument("Chonk page placement radius overflows");
+            placements.push_back({mesh, local, osg::Vec2f()});
+        };
+        if (instanced)
+            for (const auto& encoded : instanced->getMatrices())
+                place(instanced->decodeMatrix(encoded) * transform);
+        else
+            place(transform);
+    };
     if (!ripper.rip(*node)) return false;
-
-    if (chonk && !chonk->_ebo_store.empty())
-    {
-        chonk->_lods.push_back({ 0u, chonk->_ebo_store.size(),
-            far_pixel_scale, std::min(near_pixel_scale, MAX_NEAR_PIXEL_SCALE) });
-        chonk->_box.init();
-        drawable->add(chonk);
-    }
-
+    finishPage();
+    if (staged.empty()) return false;
+    std::lock_guard<std::mutex> lock(drawable->_m);
+    if (!drawable->acceptsArena(textures->getMaterialArena())) return false;
+    drawable->_pageBatches.reserve(drawable->_pageBatches.size() + staged.size());
+    drawable->_pageBatches.merge(staged);
+    drawable->_materialArena = textures->getMaterialArena();
+    drawable->_proxy_dirty = true;
+    drawable->dirtyGLObjects();
+    drawable->dirtyBound();
     return true;
 }
 
@@ -1200,29 +1780,14 @@ ChonkDrawable::add(Chonk::Ptr chonk, const osg::Matrixf& xform, const osg::Vec2f
     if (chonk)
     {
         std::lock_guard<std::mutex> lock(_m);
-
-        Instance instance;
-        instance.xform = xform;
-        instance.uv = local_uv;
-        // A conservative spectral-norm bound: the largest absolute row sum
-        // of A*A^T bounds its largest eigenvalue. Exact for orthogonal TRS
-        // axes, and conservative for shear and reflections as well.
-        osg::Vec3d axes[3] = {
-            {xform(0,0), xform(0,1), xform(0,2)},
-            {xform(1,0), xform(1,1), xform(1,2)},
-            {xform(2,0), xform(2,1), xform(2,2)} };
-        double maxRow = 0.0;
-        for (unsigned i = 0; i < 3; ++i)
+        if (!acceptsArena(chonk->_materialArena))
         {
-            double row = 0.0;
-            for (unsigned j = 0; j < 3; ++j)
-                row += std::abs(axes[i] * axes[j]);
-            maxRow = std::max(maxRow, row);
+            OE_WARN << LC << "A ChonkDrawable cannot mix MaterialArenas" << std::endl;
+            return;
         }
-        instance.radius = chonk->getBound().radius() * std::sqrt(maxRow);
-        instance.first_lod_cmd_index = 0;
-
-        _batches[chonk].emplace_back(std::move(instance));
+        _batches[chonk].push_back(makeInstance(chonk->getBound(), xform, local_uv));
+        _materialArena = chonk->_materialArena;
+        _proxy_dirty = true;
 
         // flag all graphics states as requiring an update:
         dirtyGLObjects();
@@ -1232,18 +1797,91 @@ ChonkDrawable::add(Chonk::Ptr chonk, const osg::Matrixf& xform, const osg::Vec2f
     }
 }
 
+ChonkDrawable::Instance
+ChonkDrawable::makeInstance(const osg::BoundingBoxf& bounds,
+    const osg::Matrixf& xform, const osg::Vec2f& uv)
+{
+    Instance instance;
+    instance.xform = xform;
+    instance.uv = uv;
+    // The maximum absolute row sum of A*A^T bounds the squared spectral norm;
+    // this is conservative for shear and exact for orthogonal TRS axes.
+    const osg::Vec3d axes[3] = {
+        {xform(0,0), xform(0,1), xform(0,2)},
+        {xform(1,0), xform(1,1), xform(1,2)},
+        {xform(2,0), xform(2,1), xform(2,2)} };
+    double maxRow = 0;
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        double row = 0;
+        for (unsigned j = 0; j < 3; ++j) row += std::abs(axes[i] * axes[j]);
+        maxRow = std::max(maxRow, row);
+    }
+    instance.radius = bounds.radius() * std::sqrt(maxRow);
+    instance.first_lod_cmd_index = 0;
+    return instance;
+}
+
+bool
+ChonkDrawable::acceptsArena(const MaterialArena* arena) const
+{
+    return empty() || _materialArena.get() == arena;
+}
+
+bool
+ChonkDrawable::add(ChonkGeometryPage::Ptr page, ChonkGeometryPage::MeshId mesh,
+    const osg::Matrixf& transform, const osg::Vec2f& tileUV)
+{
+    return add(std::move(page), std::vector<PagePlacement>{{mesh, transform, tileUV}});
+}
+
+bool
+ChonkDrawable::add(ChonkGeometryPage::Ptr page, const std::vector<PagePlacement>& placements)
+{
+    if (!page) return false;
+    std::vector<PageInstance> encoded;
+    encoded.reserve(placements.size());
+    for (const auto& placement : placements)
+    {
+        if (placement.mesh >= page->_meshes.size() ||
+            !validPageTransform(osg::Matrixd(placement.transform)) ||
+            !std::isfinite(placement.tileUV.x()) || !std::isfinite(placement.tileUV.y())) return false;
+        auto instance = makeInstance(page->_meshes[placement.mesh].bounds, placement.transform, placement.tileUV);
+        if (!std::isfinite(instance.radius)) return false;
+        encoded.push_back({placement.mesh, instance});
+    }
+    std::lock_guard<std::mutex> lock(_m);
+    if (!acceptsArena(page->_storage->_materialArena)) return false;
+    if (encoded.empty()) return true;
+    auto& output = _pageBatches[page];
+    output.insert(output.end(), encoded.begin(), encoded.end());
+    _materialArena = page->_storage->_materialArena;
+    _proxy_dirty = true;
+    dirtyGLObjects();
+    dirtyBound();
+    return true;
+}
+
 std::size_t ChonkDrawable::getNumInstances() const
 {
     std::lock_guard<std::mutex> lock(_m);
     std::size_t count = 0;
     for (const auto& batch : _batches) count += batch.second.size();
+    for (const auto& batch : _pageBatches) count += batch.second.size();
     return count;
 }
 
 std::size_t ChonkDrawable::getNumBatches() const
 {
     std::lock_guard<std::mutex> lock(_m);
-    return _batches.size();
+    std::size_t count = _batches.size();
+    for (const auto& batch : _pageBatches)
+    {
+        std::unordered_set<ChonkGeometryPage::MeshId> meshes;
+        for (const auto& placement : batch.second) meshes.insert(placement.mesh);
+        count += meshes.size();
+    }
+    return count;
 }
 
 void
@@ -1286,7 +1924,7 @@ ChonkDrawable::update_gl_objects(GLObjects& globjects, osg::State& state) const
     {
         std::lock_guard<std::mutex> lock(_m);
         globjects._gpucull = _gpucull;
-        globjects.update(_batches, this, _fadeNear, _fadeFar, _birthday, _alphaCutoff, state);
+        globjects.update(_batches, _pageBatches, this, _fadeNear, _fadeFar, _birthday, _alphaCutoff, state);
     }
 }
 
@@ -1315,13 +1953,22 @@ ChonkDrawable::computeBoundingBox() const
         }
     }
 
+    for (const auto& batch : _pageBatches)
+        for (const auto& placement : batch.second)
+        {
+            const auto& box = batch.first->_meshes[placement.mesh].bounds;
+            for (unsigned i = 0; i < 8; ++i)
+                result.expandBy(box.corner(i) * placement.instance.xform);
+        }
     return result;
 }
 
 osg::BoundingSphere
 ChonkDrawable::computeBound() const
 {
-    return osg::BoundingSphere(computeBoundingBox());
+    // Node::getBound and Drawable::getBoundingBox share the computed flag.
+    // Populate both caches so a prior node-bound query cannot hide the box.
+    return osg::BoundingSphere(getBoundingBox());
 }
 
 void
@@ -1361,8 +2008,8 @@ ChonkDrawable::refreshProxy() const
         _proxy_verts->clear();
         _proxy_indices->clear();
 
-        // pre-allocate
-        unsigned num_verts = 0, num_indices = 0;
+        // Include selected page ranges in the CPU intersection proxy.
+        std::size_t num_verts = 0, num_indices = 0;
         for (auto& batch : _batches)
         {
             Chonk::Ptr c = batch.first;
@@ -1372,6 +2019,15 @@ ChonkDrawable::refreshProxy() const
                 num_indices += c->_ebo_store.size();
             }
         }
+        for (const auto& batch : _pageBatches)
+            for (const auto& placement : batch.second)
+            {
+                const auto& mesh = batch.first->_meshes[placement.mesh];
+                num_verts += mesh.vertexCount;
+                num_indices += mesh.indexCount;
+            }
+        if (num_verts > std::numeric_limits<unsigned>::max())
+            throw std::length_error("Chonk intersection proxy exceeds index capacity");
         _proxy_verts->reserve(num_verts);
         _proxy_indices->reserve(num_indices);
 
@@ -1390,8 +2046,21 @@ ChonkDrawable::refreshProxy() const
                 {
                     _proxy_indices->push_back(index + offset);
                 }
+                offset += c->_vbo_store.size();
             }
-            offset += c->_vbo_store.size();
+        }
+        for (const auto& batch : _pageBatches)
+        {
+            const auto& page = *batch.first;
+            for (const auto& placement : batch.second)
+            {
+                const auto& mesh = page._meshes[placement.mesh];
+                for (unsigned i = 0; i < mesh.vertexCount; ++i)
+                    _proxy_verts->push_back(page.vertices()[mesh.firstVertex+i].position * placement.instance.xform);
+                for (unsigned i = 0; i < mesh.indexCount; ++i)
+                    _proxy_indices->push_back(page.indices()[mesh.firstIndex+i] + offset);
+                offset += mesh.vertexCount;
+            }
         }
 
         _proxy_dirty = false;
@@ -1401,7 +2070,7 @@ ChonkDrawable::refreshProxy() const
 void
 ChonkDrawable::accept(osg::PrimitiveFunctor& f) const
 {
-    if (!_batches.empty())
+    if (!empty())
     {
         refreshProxy();
         osg::Geometry::accept(f);
@@ -1411,7 +2080,7 @@ ChonkDrawable::accept(osg::PrimitiveFunctor& f) const
 void
 ChonkDrawable::accept(osg::PrimitiveIndexFunctor& f) const
 {
-    if (!_batches.empty())
+    if (!empty())
     {
         refreshProxy();
         osg::Geometry::accept(f);
@@ -1500,6 +2169,7 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
 void
 ChonkDrawable::GLObjects::update(
     const Batches& batches,
+    const PageBatches& pageBatches,
     const osg::Object* host,
     float fadeNear,
     float fadeFar,
@@ -1531,68 +2201,81 @@ ChonkDrawable::GLObjects::update(
     std::size_t max_lod_count = 0;
     unsigned outputOffset = 0u;
 
-    for (auto& batch : batches)
+    // Both geometry sources lower to the same shader records. Dense source
+    // indices may cross mesh boundaries; output ranges remain per mesh/LOD.
+    auto appendBatch = [&](const Chonk::DrawCommand* commands, const Chonk::LOD* lods,
+        std::size_t numLODs, const osg::BoundingBoxf& bounds, std::size_t count, auto instanceAt)
     {
-        auto& chonk = batch.first;
-        auto& instances = batch.second;
-
-        unsigned first_lod_cmd_index = _commands.size();
-
-        // For each chonk variant, set up an instanced draw command:
-        const Chonk::DrawCommands& lod_commands = chonk->getOrCreateCommands(state);
-
-        for(unsigned i=0; i< lod_commands.size(); ++i)
+        if (numLODs == 0 || count == 0) return;
+        const auto limit = std::size_t(std::numeric_limits<GLsizei>::max());
+        if (_all_instances.size() + count + GPU_CULLING_LOCAL_WG_SIZE > limit/sizeof(Instance) ||
+            _commands.size() + numLODs > limit/sizeof(Chonk::DrawCommand) ||
+            count > (limit/sizeof(VisibleInstance) - outputOffset)/numLODs)
+            throw std::length_error("Chonk drawable exceeds GPU buffer capacity");
+        const unsigned first = unsigned(_commands.size());
+        for (unsigned lod = 0; lod < numLODs; ++lod)
         {
-            _commands.emplace_back(lod_commands[i]);
-            // Each batch/LOD has room for every input instance. The compute
-            // shader compacts inside this range, avoiding an atomic update of
-            // every subsequent command for each visible instance.
-            _commands.back().cmd.baseInstance = _gpucull ? outputOffset : unculledInstances.size();
-            if (!_gpucull)
-                _commands.back().cmd.instanceCount = i == 0 ? instances.size() : 0;
-            outputOffset += instances.size();
-
+            _commands.push_back(commands[lod]);
+            _commands.back().cmd.baseInstance = _gpucull ? outputOffset : unsigned(unculledInstances.size());
+            _commands.back().cmd.instanceCount = !_gpucull && lod == 0 ? unsigned(count) : 0;
+            outputOffset += unsigned(count);
             if (_gpucull)
             {
-                // record the bounding box of this chonk:
-                auto& bs = chonk->getBound();
-
-                ChonkLOD v;
-                v.center = bs.center();
-                v.radius = bs.radius();
-                v.far_pixel_scale = chonk->_lods[i].far_pixel_scale;
-                v.near_pixel_scale = chonk->_lods[i].near_pixel_scale;
-                v.num_lods = chonk->_lods.size();
-                v.alpha_cutoff = alphaCutoff;
-                v.birthday = birthday;
-                v.fade_near = fadeNear;
-                v.fade_far = fadeFar;
-
-                _chonk_lods.emplace_back(std::move(v));
+                ChonkLOD meta;
+                meta.center = bounds.center();
+                meta.radius = bounds.radius();
+                meta.far_pixel_scale = lods[lod].far_pixel_scale;
+                meta.near_pixel_scale = lods[lod].near_pixel_scale;
+                meta.num_lods = unsigned(numLODs);
+                meta.alpha_cutoff = alphaCutoff;
+                meta.birthday = birthday;
+                meta.fade_near = fadeNear;
+                meta.fade_far = fadeFar;
+                _chonk_lods.push_back(meta);
             }
         }
-
-        // append the instance data (transforms) and set
-        // the index of the first lod command, which the compute
-        // shader will need.
-        for (auto& instance : instances)
+        for (std::size_t i = 0; i < count; ++i)
         {
             if (!_gpucull)
                 unculledInstances.push_back({ GLuint(_all_instances.size()), 0u, 1.0f, alphaCutoff });
-            _all_instances.push_back(instance);
-            _all_instances.back().first_lod_cmd_index = first_lod_cmd_index;
+            _all_instances.push_back(instanceAt(i));
+            _all_instances.back().first_lod_cmd_index = first;
         }
+        max_lod_count = std::max(max_lod_count, numLODs);
+    };
 
-        // pad out the size of the instances array so it's a multiple of the
-        // GPU culling workgroup size. Add "padding" instances will have the
-        // first_lod_cmd_index member equal to -1, indicating an invalid instance.
-        // The CS will check for this and discard them.
-        unsigned workgroups = (_all_instances.size() + GPU_CULLING_LOCAL_WG_SIZE - 1) / GPU_CULLING_LOCAL_WG_SIZE;
-        unsigned paddedSize = workgroups * GPU_CULLING_LOCAL_WG_SIZE;
-        _all_instances.resize(paddedSize);
-
-        max_lod_count = std::max(max_lod_count, lod_commands.size());
+    for (const auto& batch : batches)
+    {
+        const auto& chonk = batch.first;
+        const auto& commands = chonk->getOrCreateCommands(state);
+        // Supply stable legacy placements without allocating a temporary vector.
+        appendBatch(commands.data(), chonk->_lods.data(), commands.size(), chonk->getBound(),
+            batch.second.size(), [&](std::size_t i) -> const Instance& { return batch.second[i]; });
     }
+    for (const auto& batch : pageBatches)
+    {
+        const auto& page = batch.first;
+        const auto& commands = page->getOrCreateCommands(state);
+        if (commands.empty()) continue;
+        auto placements = batch.second;
+        // Contiguous runs avoid a separate allocation/map entry for every mesh.
+        std::stable_sort(placements.begin(), placements.end(),
+            [](const PageInstance& a, const PageInstance& b) { return a.mesh < b.mesh; });
+        for (std::size_t first = 0; first < placements.size();)
+        {
+            const auto mesh = placements[first].mesh;
+            auto end = first + 1;
+            while (end < placements.size() && placements[end].mesh == mesh) ++end;
+            appendBatch(&commands[mesh], &page->_storage->_lods[mesh], 1,
+                page->_meshes[mesh].bounds, end - first,
+                [&](std::size_t i) -> const Instance& { return placements[first+i].instance; });
+            first = end;
+        }
+    }
+    // Only the final workgroup needs invalid source records. No shader assumes
+    // that a mesh starts on a workgroup boundary.
+    const auto paddedSize = NEXT_MULTIPLE(_all_instances.size(), GPU_CULLING_LOCAL_WG_SIZE);
+    _all_instances.resize(paddedSize);
 
     // set globals
     for (auto& lod : _chonk_lods)

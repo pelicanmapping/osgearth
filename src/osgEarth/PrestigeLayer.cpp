@@ -83,7 +83,7 @@ namespace
         osg::ref_ptr< osg::Node > node = osgDB::readNodeFile(uri.full(), readOptions);
         if (progress && progress->isCanceled())
             return {};
-        return chonks && node ? ChonkFactory::convertExternalInstances(node.get(), chonks) : node;
+        return chonks && node ? ChonkFactory::convertScene(node.get(), chonks) : node;
     }
 
     bool readSidecarBounds(
@@ -469,7 +469,7 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
     const std::string lod2Name = makeLOD2TileName(z, x, y, getLOD2Extension());
     const URI lod2URI = makeTileURI(base, lod2Name);
 
-    osg::ref_ptr<osg::Node> lod2 = readModel(lod2URI, _readOptions.get(), progress);
+    osg::ref_ptr<osg::Node> lod2 = readModel(lod2URI, _readOptions.get(), progress, _detailChonks);
     if (!lod2.valid())
         return {};
 
@@ -591,7 +591,8 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
                         lod1 = readModel(
                             lod1URI,
                             readOptions.get(),
-                            progress.get());
+                            progress.get(),
+                            detailChonks);
                     }
 
                     if (!lod1.valid())

@@ -3,6 +3,7 @@
 * MIT License
 */
 #include <osgEarth/Sky>
+#include <osgEarth/SkyNode2>
 #include <osgEarth/MapNode>
 #include <osgEarth/GLUtils>
 
@@ -177,6 +178,8 @@ SkyNode*
 SkyNode::create(const SkyOptions& options)
 {
     std::string driverName = osgEarth::trim(options.getDriver());
+    if (driverName == "sky2" || driverName == "2")
+        return new SkyNode2(SkyNode2::Options(options));
     if ( driverName.empty() )
         driverName = "simple";
 

@@ -440,7 +440,8 @@ ProgramRepo::use(const Key& key, unsigned frameNumber, UID user)
 void
 ProgramRepo::release(UID user, osg::State* state)
 {
-    if (user <= 0 || _releaseUnusedPrograms == false)
+    // createUID() starts at zero; the first renderer owns releasable programs too.
+    if (user < 0 || _releaseUnusedPrograms == false)
         return;
 
     _generation.fetch_add(1, std::memory_order_release);
@@ -452,11 +453,16 @@ ProgramRepo::release(UID user, osg::State* state)
     for (const auto& entry : used->second)
     {
         entry->_users.erase(user);
+        // Other VPs may retain this composition for different contexts. They
+        // must not keep this context's GL handle alive after its ID is recycled.
+        if (state)
+        {
+            state->setLastAppliedProgramObject(nullptr);
+            entry->_program->releaseGLObjects(state);
+        }
         if (entry->_users.empty())
         {
-            if (state)
-                state->setLastAppliedProgramObject(nullptr);
-            entry->_program->releaseGLObjects(state);
+            if (!state) entry->_program->releaseGLObjects(nullptr);
             for (const auto& key : entry->_keys)
                 _db.erase(key);
             _programs.erase(entry->_program);
@@ -1455,6 +1461,12 @@ VirtualProgram::releaseGLObjects(osg::State* state) const
     }
     _lastUsedProgram.setAllElementsTo(NULL);
 #endif
+
+    // Source-cached shaders can survive every program that used them. Release
+    // their context handles too, before OSG reuses the destroyed context's ID.
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
+    for (const auto& entry : _shaderMap)
+        if (entry.second._shader.valid()) entry.second._shader->releaseGLObjects(state);
 }
 
 VirtualProgram::PolyShader*
@@ -2600,6 +2612,14 @@ VirtualProgram::PolyShader::getHash()
 void
 VirtualProgram::PolyShader::resizeGLObjectBuffers(unsigned maxSize)
 {
+    // Composed programs compile immutable snapshots, which can outlive the source
+    // shader in the global cache. They require the same context lifecycle handling.
+    std::lock_guard<std::mutex> lock(_snapshotMutex);
+    if (_shaderSnapshot)
+    {
+        for (auto shader : {_shaderSnapshot->nominal, _shaderSnapshot->geometry, _shaderSnapshot->tessellation})
+            if (shader) shader->resizeGLObjectBuffers(maxSize);
+    }
     if (_nominalShader.valid())
     {
         _nominalShader->resizeGLObjectBuffers(maxSize);
@@ -2619,6 +2639,13 @@ VirtualProgram::PolyShader::resizeGLObjectBuffers(unsigned maxSize)
 void
 VirtualProgram::PolyShader::releaseGLObjects(osg::State* state) const
 {
+    // Release compiled snapshot handles before OSG recycles a destroyed context ID.
+    std::lock_guard<std::mutex> lock(_snapshotMutex);
+    if (_shaderSnapshot)
+    {
+        for (auto shader : {_shaderSnapshot->nominal, _shaderSnapshot->geometry, _shaderSnapshot->tessellation})
+            if (shader) shader->releaseGLObjects(state);
+    }
     if (_nominalShader.valid())
     {
         _nominalShader->releaseGLObjects(state);

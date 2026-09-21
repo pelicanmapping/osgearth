@@ -13,6 +13,7 @@ set(TARGET_SRC
     ImageUtilsTests.cpp
     PathTests.cpp
     PBRMaterialTests.cpp
+    SkyNode2Tests.cpp
     ImageLayerTests.cpp
     SpatialReferenceTests.cpp
     StringUtilsTests.cpp

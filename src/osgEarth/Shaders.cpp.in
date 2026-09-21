@@ -118,6 +118,11 @@ namespace osgEarth { namespace Util
         PBR = "PBR.glsl";
         _sources[PBR] = @PBR.glsl@;
 
+        _sources["SkyNode2.Common.glsl"] = @SkyNode2.Common.glsl@;
+        _sources["SkyNode2.Lighting.glsl"] = @SkyNode2.Lighting.glsl@;
+        _sources["SkyNode2.LUT.glsl"] = @SkyNode2.LUT.glsl@;
+        _sources["SkyNode2.Background.glsl"] = @SkyNode2.Background.glsl@;
+
 		MetadataNode = "MetadataNode.glsl";
 		_sources[MetadataNode] = @MetadataNode.glsl@;
     }

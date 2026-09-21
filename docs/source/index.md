@@ -21,6 +21,7 @@ Let's get started!
 * [Using an Earth File](earthfile.md)
 * [Working with Data](data.md)
 * [Layer Reference](layers.md)
+* [SkyNode2 Lighting and Atmosphere](sky2.md)
 * [Environment Variables](envvars.md)
 * [FAQ](faq.md)
 * [Release Notes](releasenotes.md)

@@ -90,6 +90,10 @@ set(TARGET_GLSL
     MetadataNode.glsl
     WireLines.glsl
     PhongLighting.glsl
+    SkyNode2.Common.glsl
+    SkyNode2.Lighting.glsl
+    SkyNode2.LUT.glsl
+    SkyNode2.Background.glsl
     PointDrawable.glsl
     Text.glsl
     Text_legacy.glsl
@@ -400,6 +404,7 @@ SET(TARGET_H
     SimplifyFilter
     Skins
     Sky
+    SkyNode2
     SkyView
     SpatialReference
     StarData
@@ -751,6 +756,7 @@ set(TARGET_SRC
     SimplifyFilter.cpp
     Skins.cpp
     Sky.cpp
+    SkyNode2.cpp
     SkyView.cpp
     SpatialReference.cpp
     StateSetCache.cpp

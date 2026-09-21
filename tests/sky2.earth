@@ -1,0 +1,17 @@
+<!-- A network-independent globe for SkyNode2. Add imagery/elevation layers as usual. -->
+<map name="SkyNode2">
+    <options>
+        <profile>global-geodetic</profile>
+    </options>
+    <sky2>
+        <preset>balanced</preset>
+        <exposure>1.0</exposure>
+        <sun_intensity>10.0</sun_intensity>
+        <environment_intensity>1.0</environment_intensity>
+        <hours>16.0</hours>
+    </sky2>
+    <viewpoints>
+        <viewpoint name="Orbit" lat="30" long="-80" height="0" heading="0" pitch="-60" range="20000000"/>
+        <viewpoint name="Horizon" lat="30" long="-80" height="10" heading="90" pitch="0" range="100"/>
+    </viewpoints>
+</map>

@@ -7,12 +7,15 @@
 #include <osgEarthImGui/ImGuiPanel>
 #include <osgEarth/Ephemeris>
 #include <osgEarth/Sky>
+#include <osgEarth/SkyNode2>
 #include <osgEarth/ShaderLoader>
 #include <osgEarth/Shadowing>
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/WindLayer>
+#include <osgEarth/Utils>
 #include <osg/NodeCallback>
 #include <osg/Timer>
+#include <osgViewer/ViewerBase>
 #include <atomic>
 #include <cmath>
 
@@ -139,12 +142,21 @@ namespace osgEarth
         float _ambient = 0.033f;
         float _max_ambient_intensity = 0.15f;
         float _environment_strength = 1.0f;
+        float _sun_intensity = 10.0f;
         float _ground_reflectance = 0.15f;
         bool _first = true;
         bool _shadows = false;
         float _haze_cutoff = 0.0f, _haze_strength = 16.0f;
         float _shadow_darkness = 0.0f, _shadow_blur = 0.001f;
         float _wind_power = 1.0f;
+
+        //! Applies a UI edit during update traversal, retaining the selected sky until the operation runs.
+        void changeSky(osg::RenderInfo& ri, const std::function<void(SkyNode&)>& change)
+        {
+            osg::ref_ptr<SkyNode> sky;
+            if (_skyNode.lock(sky) && view(ri) && view(ri)->getViewerBase())
+                view(ri)->getViewerBase()->addUpdateOperation(new OneTimer([sky, change]() { change(*sky); }));
+        }
 
     public:
         EnvironmentGUI() : ImGuiPanel("Sky") { }
@@ -203,14 +215,25 @@ namespace osgEarth
                 if (!findNode(_skyNode, ri))
                 {
                     ImGui::Text("No Sky installed.");
-                    if (ImGui::Button("Install"))
+                    if (ImGui::Button("Install SkyNode2") && view(ri) && view(ri)->getViewerBase())
                     {
-                        auto sky = SkyNode::create();
-                        auto parent = _mapNode->getParent(0);
-                        sky->addChild(_mapNode.get());
-                        parent->addChild(sky);
-                        parent->removeChild(_mapNode.get());
-                        sky->attach(view(ri));
+                        osg::ref_ptr<MapNode> map = _mapNode.get();
+                        osg::ref_ptr<osgViewer::View> targetView = view(ri);
+                        targetView->getViewerBase()->addUpdateOperation(new OneTimer([map, targetView]()
+                        {
+                            if (findTopMostNodeOfType<SkyNode>(targetView->getSceneData())) return;
+                            osg::ref_ptr<SkyNode2> sky = new SkyNode2;
+                            if (map->getMapSRS()->isProjected())
+                                sky->setReferencePoint(map->getMap()->getProfile()->getExtent().getCentroid());
+                            if (targetView->getSceneData() == map.get())
+                            {
+                                sky->addChild(map.get());
+                                targetView->setSceneData(sky.get());
+                            }
+                            else
+                                insertParent(sky.get(),map.get());
+                            sky->attach(targetView.get());
+                        }));
                     }
                     ImGui::End();
                     return;
@@ -223,6 +246,7 @@ namespace osgEarth
                     _skyNode->addUpdateCallback(_timeCycle.get());
                 }
 
+                auto sky2 = dynamic_cast<SkyNode2*>(_skyNode.get());
                 if (_first)
                 {
                     findNode(_shadowCaster, ri);
@@ -233,12 +257,25 @@ namespace osgEarth
 
                     // Preserve the scene's selected date/time when opening the
                     // panel; simulation time also drives time-series layers.
-                    _skyNode->setSimulationTimeTracksDateTime(true);
+                    changeSky(ri,[](SkyNode& sky) { sky.setSimulationTimeTracksDateTime(true); });
+                    if (sky2)
+                    {
+                        // Opening this panel must not overwrite an earth file's physical lighting settings.
+                        const auto& options = sky2->getOptions();
+                        _exposure = options.exposure;
+                        _sun_intensity = options.sunIntensity;
+                        _environment_strength = options.environmentIntensity;
+                        _ambient = options.ambient().get();
+                    }
                 }
 
+                if (sky2)
+                    ImGui::Text("SkyNode2 / %s", sky2->getOptions().preset == SkyNode2::FLAT ? "Flat" :
+                        sky2->getOptions().preset == SkyNode2::HIGH ? "High" : "Balanced");
+
                 bool lighting = _skyNode->getLighting();
-                ImGui::Checkbox("Lighting", &lighting);
-                _skyNode->setLighting(lighting);
+                if (ImGui::Checkbox("Lighting", &lighting))
+                    changeSky(ri,[lighting](SkyNode& sky) { sky.setLighting(lighting); });
 
                 if (_shadowCaster.valid()) {
                     ImGui::SameLine();
@@ -252,7 +289,7 @@ namespace osgEarth
                 ImGui::SameLine();
                 if (ImGui::Button("Now")) {
                     _timeCycle->playing = false;
-                    _skyNode->setDateTime(DateTime());
+                    changeSky(ri,[](SkyNode& sky) { sky.setDateTime(DateTime()); });
                     dirtySettings();
                 }
 
@@ -293,11 +330,45 @@ namespace osgEarth
                     if (dateChanged)
                     {
                         _timeCycle->playing = false;
-                        _skyNode->setDateTime(DateTime(year, month, day, hour));
+                        changeSky(ri,[year, month, day, hour](SkyNode& sky)
+                            { sky.setDateTime(DateTime(year, month, day, hour)); });
                         dirtySettings();
                     }
 
-                    if (lighting)
+                    if (sky2)
+                    {
+                        ImGuiLTable::Section("Lighting:");
+                        if (ImGuiLTable::SliderFloat("Exposure", &_exposure, 0.01f, 16.0f,
+                            "%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+                        {
+                            float value = _exposure;
+                            changeSky(ri,[value](SkyNode& sky) { static_cast<SkyNode2&>(sky).setExposure(value); });
+                        }
+                        if (ImGuiLTable::SliderFloat("Sun intensity", &_sun_intensity, 0.0f, 40.0f))
+                        {
+                            float value = _sun_intensity;
+                            changeSky(ri,[value](SkyNode& sky) { static_cast<SkyNode2&>(sky).setSunIntensity(value); });
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Solar irradiance drives both atmospheric scattering and direct sunlight.");
+                        if (ImGuiLTable::SliderFloat("Sky environment", &_environment_strength, 0.0f, 4.0f))
+                        {
+                            float value = _environment_strength;
+                            changeSky(ri,[value](SkyNode& sky)
+                                { static_cast<SkyNode2&>(sky).setEnvironmentIntensity(value); });
+                        }
+                        if (ImGuiLTable::SliderFloat("Night fill", &_ambient, 0.0f, 1.0f))
+                        {
+                            float value = _ambient;
+                            changeSky(ri,[value](SkyNode& sky) { static_cast<SkyNode2&>(sky).setAmbientIntensity(value); });
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Minimum diffuse fill. Set to zero for a physically dark night.");
+                        auto color = sky2->getSunLight()->getDiffuse();
+                        if (ImGuiLTable::ColorEdit3("Sun color", &color[0], ImGuiColorEditFlags_Float))
+                            changeSky(ri,[color](SkyNode& sky) { sky.getSunLight()->setDiffuse(color); });
+                    }
+                    else if (lighting)
                     {
                         auto skyStateSet = _skyNode->getOrCreateStateSet();
                         auto environmentStrength = skyStateSet->getUniform("oe_sky_iblStrength");
@@ -391,29 +462,34 @@ namespace osgEarth
                                 stateset(ri)->addUniform(new osg::Uniform("oe_shadow_blur", _shadow_blur), 0x07);
                         }
 
-                        if (ImGuiLTable::SliderFloat("Haze cutoff", &_haze_cutoff, 0.0f, 0.2f))
-                            dirtySettings();
-                        _skyNode->getOrCreateStateSet()->getOrCreateUniform("atmos_haze_cutoff", osg::Uniform::FLOAT)->set(_haze_cutoff);
+                        if (!sky2)
+                        {
+                            if (ImGuiLTable::SliderFloat("Haze cutoff", &_haze_cutoff, 0.0f, 0.2f))
+                                dirtySettings();
+                            _skyNode->getOrCreateStateSet()->getOrCreateUniform(
+                                "atmos_haze_cutoff", osg::Uniform::FLOAT)->set(_haze_cutoff);
 
-                        if (ImGuiLTable::SliderFloat("Haze strength", &_haze_strength, 0.0f, 24.0f))
-                            dirtySettings();
-                        _skyNode->getOrCreateStateSet()->getOrCreateUniform("atmos_haze_strength", osg::Uniform::FLOAT)->set(_haze_strength);
+                            if (ImGuiLTable::SliderFloat("Haze strength", &_haze_strength, 0.0f, 24.0f))
+                                dirtySettings();
+                            _skyNode->getOrCreateStateSet()->getOrCreateUniform(
+                                "atmos_haze_strength", osg::Uniform::FLOAT)->set(_haze_strength);
+                        }
 
                         bool atmos_visible = _skyNode->getAtmosphereVisible();
-                        ImGuiLTable::Checkbox("Atmosphere", &atmos_visible);
-                        _skyNode->setAtmosphereVisible(atmos_visible);
+                        if (ImGuiLTable::Checkbox("Atmosphere", &atmos_visible))
+                            changeSky(ri,[atmos_visible](SkyNode& sky) { sky.setAtmosphereVisible(atmos_visible); });
 
                         bool sun_visible = _skyNode->getSunVisible();
-                        ImGuiLTable::Checkbox("Sun", &sun_visible);
-                        _skyNode->setSunVisible(sun_visible);
+                        if (ImGuiLTable::Checkbox("Sun", &sun_visible))
+                            changeSky(ri,[sun_visible](SkyNode& sky) { sky.setSunVisible(sun_visible); });
 
                         bool moon_visible = _skyNode->getMoonVisible();
-                        ImGuiLTable::Checkbox("Moon", &moon_visible);
-                        _skyNode->setMoonVisible(moon_visible);
+                        if (ImGuiLTable::Checkbox("Moon", &moon_visible))
+                            changeSky(ri,[moon_visible](SkyNode& sky) { sky.setMoonVisible(moon_visible); });
 
                         bool stars_visible = _skyNode->getStarsVisible();
-                        ImGuiLTable::Checkbox("Stars", &stars_visible);
-                        _skyNode->setStarsVisible(stars_visible);
+                        if (ImGuiLTable::Checkbox("Stars", &stars_visible))
+                            changeSky(ri,[stars_visible](SkyNode& sky) { sky.setStarsVisible(stars_visible); });
 
 
                         ImGui::Separator();

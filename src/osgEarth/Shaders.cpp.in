@@ -118,6 +118,16 @@ namespace osgEarth { namespace Util
         PBR = "PBR.glsl";
         _sources[PBR] = @PBR.glsl@;
 
+        _sources["SkyNode2.Common.glsl"] = @SkyNode2.Common.glsl@;
+        _sources["CloudLayer.Common.glsl"] = @CloudLayer.Common.glsl@;
+        _sources["CloudLayer.Density.glsl"] = @CloudLayer.Density.glsl@;
+        _sources["CloudLayer.Compute.glsl"] = @CloudLayer.Compute.glsl@;
+        _sources["CloudLayer.Rays.glsl"] = @CloudLayer.Rays.glsl@;
+        _sources["CloudLayer.Light.glsl"] = @CloudLayer.Light.glsl@;
+        _sources["SkyNode2.Lighting.glsl"] = @SkyNode2.Lighting.glsl@;
+        _sources["SkyNode2.LUT.glsl"] = @SkyNode2.LUT.glsl@;
+        _sources["SkyNode2.Background.glsl"] = @SkyNode2.Background.glsl@;
+
 		MetadataNode = "MetadataNode.glsl";
 		_sources[MetadataNode] = @MetadataNode.glsl@;
     }

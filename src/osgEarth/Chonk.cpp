@@ -7,6 +7,7 @@
 #include "GLUtils"
 #include "Metrics"
 #include "VirtualProgram"
+#include <osgEarth/ChonkRenderPass>
 #include "Shaders"
 #include "Utils"
 #include "DrawInstanced"
@@ -1754,6 +1755,7 @@ ChonkDrawable::setUseGPUCulling(bool value)
 void
 ChonkDrawable::dirtyGLObjects()
 {
+    ++_contentRevision;
     // flag all graphics states as requiring an update:
     for (unsigned i = 0; i < _globjects.size(); ++i)
         _globjects[i]._dirty = true;
@@ -1900,7 +1902,9 @@ ChonkDrawable::update_and_cull_batches(osg::State& state) const
 
     if (_gpucull)
     {
-        globjects.cull(state);
+        auto pass = ChonkRenderPass::find(state);
+        if (pass) globjects.cullViews(state,*pass);
+        else globjects.cull(state);
     }
 }
 
@@ -1909,7 +1913,13 @@ ChonkDrawable::draw_batches(osg::State& state) const
 {
     auto& globjects = GLObjects::get(_globjects, state);
 
-    globjects.draw(state);
+    auto pass = _gpucull ? ChonkRenderPass::find(state) : nullptr;
+    if (pass) globjects.drawViews(state,*pass);
+    else
+    {
+        state.bindVertexArrayObject(globjects._vao->name());
+        globjects.draw(state);
+    }
 }
 
 
@@ -2091,6 +2101,18 @@ void
 ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
 {
     _ext = state.get<osg::GLExtensions>();
+    osg::setGLExtensionFuncPtr(_glMultiDrawElementsIndirectCount,"glMultiDrawElementsIndirectCount");
+    osg::setGLExtensionFuncPtr(_glMultiDrawElementsIndirectBindlessCountNV,"glMultiDrawElementsIndirectBindlessCountNV");
+    if (!osg::isGLExtensionSupported(state.getContextID(),"GL_NV_bindless_multi_draw_indirect_count"))
+        _glMultiDrawElementsIndirectBindlessCountNV = nullptr;
+    osg::setGLExtensionFuncPtr(_glMultiDrawElementsIndirectBindlessNV,"glMultiDrawElementsIndirectBindlessNV");
+    _vao = createVAO(host,state,true);
+    _coreVAO = createVAO(host,state,false);
+}
+
+//! Records independent layouts so core indexed draws never inherit NV unified-address state.
+GLVAO::Ptr ChonkDrawable::GLObjects::createVAO(const osg::Object* host, osg::State& state, bool bindless)
+{
 
     void(GL_APIENTRY * gl_VertexAttribFormat)(GLuint, GLint, GLenum, GLboolean, GLuint);
     osg::setGLExtensionFuncPtr(gl_VertexAttribFormat, "glVertexAttribFormat");
@@ -2112,17 +2134,20 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
     OE_HARD_ASSERT(glEnableClientState_ != nullptr);
 
     // VAO:
-    _vao = GLVAO::create(state);
+    auto vao = GLVAO::create(state);
 
     // start recording...
-    state.bindVertexArrayObject(_vao->name());
+    state.bindVertexArrayObject(vao->name());
 
     // must call AFTER bind
-    _vao->debugLabel("Chonk drawable", "VAO " + host->getName());
+    vao->debugLabel("Chonk drawable", "VAO " + host->getName());
 
     // required in order to use BindlessNV extension
-    glEnableClientState_(GL_VERTEX_ATTRIB_ARRAY_UNIFIED_NV);
-    glEnableClientState_(GL_ELEMENT_ARRAY_UNIFIED_NV);
+    if (bindless)
+    {
+        glEnableClientState_(GL_VERTEX_ATTRIB_ARRAY_UNIFIED_NV);
+        glEnableClientState_(GL_ELEMENT_ARRAY_UNIFIED_NV);
+    }
 
     const VADef formats[] = {
         {3, GL_FLOAT,         GL_FALSE, offsetof(Chonk::VertexGPU, position)},
@@ -2162,6 +2187,7 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
 
     // Finish recording
     state.unbindVertexArrayObject();
+    return vao;
 }
 
 #define NEXT_MULTIPLE(X, Y) (((X+Y-1)/Y)*Y)
@@ -2187,6 +2213,9 @@ ChonkDrawable::GLObjects::update(
     // build a list of draw commands, each of which will 
     // have N instances, one per chonk meta.
     _commands.clear();
+    _drawGroups.clear();
+    ++_dataRevision;
+    _viewBatches.clear();
 
     // record for each variant (LOD) of each chonk
     _chonk_lods.clear();
@@ -2231,6 +2260,7 @@ ChonkDrawable::GLObjects::update(
                 meta.birthday = birthday;
                 meta.fade_near = fadeNear;
                 meta.fade_far = fadeFar;
+                meta.draw_group = unsigned(_drawGroups.size()-1);
                 _chonk_lods.push_back(meta);
             }
         }
@@ -2248,6 +2278,8 @@ ChonkDrawable::GLObjects::update(
     {
         const auto& chonk = batch.first;
         const auto& commands = chonk->getOrCreateCommands(state);
+        auto& buffers = Chonk::GLObjects::get(chonk->_globjects,state);
+        _drawGroups.push_back({buffers.vbo,buffers.ebo,GLuint(_commands.size()),GLuint(commands.size())});
         // Supply stable legacy placements without allocating a temporary vector.
         appendBatch(commands.data(), chonk->_lods.data(), commands.size(), chonk->getBound(),
             batch.second.size(), [&](std::size_t i) -> const Instance& { return batch.second[i]; });
@@ -2257,6 +2289,8 @@ ChonkDrawable::GLObjects::update(
         const auto& page = batch.first;
         const auto& commands = page->getOrCreateCommands(state);
         if (commands.empty()) continue;
+        auto& buffers = Chonk::GLObjects::get(page->_storage->_globjects,state);
+        _drawGroups.push_back({buffers.vbo,buffers.ebo,GLuint(_commands.size()),0u});
         auto placements = batch.second;
         // Contiguous runs avoid a separate allocation/map entry for every mesh.
         std::stable_sort(placements.begin(), placements.end(),
@@ -2271,17 +2305,22 @@ ChonkDrawable::GLObjects::update(
                 [&](std::size_t i) -> const Instance& { return placements[first+i].instance; });
             first = end;
         }
+        _drawGroups.back().count = GLuint(_commands.size())-_drawGroups.back().first;
     }
     // Only the final workgroup needs invalid source records. No shader assumes
     // that a mesh starts on a workgroup boundary.
     const auto paddedSize = NEXT_MULTIPLE(_all_instances.size(), GPU_CULLING_LOCAL_WG_SIZE);
     _all_instances.resize(paddedSize);
 
-    // set globals
-    for (auto& lod : _chonk_lods)
-    {
-        lod.total_num_commands = _commands.size();
-    }
+    _outputCapacity = outputOffset;
+    if (!_templateBuf) _templateBuf = GLBuffer::create(GL_SHADER_STORAGE_BUFFER,state);
+    _templateBuf->bind();
+    _templateBuf->uploadData(_commands,GL_STATIC_DRAW);
+    std::vector<osg::Vec2ui> groups;
+    for (const auto& group : _drawGroups) groups.emplace_back(group.first,group.count);
+    if (!_groupBuf) _groupBuf = GLBuffer::create(GL_SHADER_STORAGE_BUFFER,state);
+    _groupBuf->bind();
+    _groupBuf->uploadData(groups,GL_STATIC_DRAW);
 
     // Send to the GPU:
     if (!_instanceInputBuf)
@@ -2357,6 +2396,8 @@ ChonkDrawable::GLObjects::cull(osg::State& state)
     auto ext = _vao->ext();
 
     OE_HARD_ASSERT(state.getLastAppliedProgramObject() != nullptr, "Check for shader errors!");
+    ext->glUniform4ui(state.getLastAppliedProgramObject()->getUniformLocation(
+        osg::Uniform::getNameID("oe_chonk_views")),0,0,0,0);
 
     // Start each dispatch with empty output ranges. Surviving instance/LOD
     // pairs atomically increment these counts as they write their records.
@@ -2379,6 +2420,196 @@ ChonkDrawable::GLObjects::cull(osg::State& state)
     // Fixed CPU-assigned output ranges let each invocation cull and compact
     // independently. DrawLeaf publishes the results before the first draw.
     ext->glDispatchCompute(workgroups, _maxNumLODs, 1);
+}
+
+namespace
+{
+    //! Allows reconstruction roundoff when matching one drawable placement across independently fitted views.
+    bool samePlacement(const osg::Matrixd& a, const osg::Matrixd& b)
+    {
+        for (unsigned row=0; row<4; ++row)
+        for (unsigned col=0; col<4; ++col)
+            if (std::abs(a(row,col)-b(row,col)) > (row == 3 ? 1e-7 : 1e-12)) return false;
+        return true;
+    }
+}
+
+//! Shares outputs across views, while keeping distinct copies for multiply parented drawable placements.
+ChonkDrawable::GLObjects::ViewBatch&
+ChonkDrawable::GLObjects::viewBatch(osg::State& state, const ChonkRenderPass& pass)
+{
+    const auto& frame = pass.getBatch()->parameters;
+    osg::Matrixd local = state.getModelViewMatrix()*pass.getInverseRenderView();
+    for (auto i=_viewBatches.begin(); i!=_viewBatches.end();)
+    {
+        if (frame.frameNumber-i->lastUsed > 8u) i = _viewBatches.erase(i);
+        else
+        {
+            if (i->viewID == frame.viewID && samePlacement(i->localToWorld,local))
+            {
+                i->lastUsed = frame.frameNumber;
+                return *i;
+            }
+            ++i;
+        }
+    }
+    _viewBatches.emplace_back();
+    auto& result = _viewBatches.back();
+    result.viewID = frame.viewID;
+    result.localToWorld = local;
+    result.lastUsed = frame.frameNumber;
+    return result;
+}
+
+//! Performs one reset/classify/compact sequence per drawable placement and immutable submission batch.
+void ChonkDrawable::GLObjects::cullViews(osg::State& state, const ChonkRenderPass& pass)
+{
+    if (_commands.empty()) return;
+    auto& batch = viewBatch(state,pass);
+    const auto& frame = pass.getBatch()->parameters;
+    if (batch.batchSerial == pass.getBatch()->serial && batch.revision == _dataRevision) return;
+    auto program = state.getLastAppliedProgramObject();
+    // Resolve locations on the active program: shader variants and recycled contexts may have different locations.
+    auto location = [&](const char* name) { return program->getUniformLocation(osg::Uniform::getNameID(name)); };
+    state.applyModelViewAndProjectionUniformsIfRequired();
+    const unsigned count = unsigned(_commands.size());
+    const unsigned groups = unsigned(_drawGroups.size());
+    const unsigned lists = frame.output == ChonkRenderPass::PER_VIEW ? frame.count : 1u;
+    const unsigned copies = frame.output == ChonkRenderPass::UNION ? 1u : frame.count;
+    const unsigned counters = ChonkRenderPass::MAX_VIEWS * (1u+groups);
+    // Each instance/LOD/view pair has reserved space, even when all view volumes overlap completely.
+    auto allocate = [&](GLBuffer::Ptr& buffer, std::size_t bytes)
+    {
+        if (bytes > std::size_t(std::numeric_limits<GLsizei>::max()))
+            throw std::length_error("Chonk multi-view results exceed GPU buffer capacity");
+        if (!buffer) buffer = GLBuffer::create(GL_SHADER_STORAGE_BUFFER,state);
+        buffer->bind(); // Instantiate generated names before GLBuffer's direct-state-access upload.
+        buffer->uploadData(GLsizei(bytes),nullptr);
+    };
+    allocate(batch.commands,std::size_t(lists)*count*sizeof(Chonk::DrawCommand));
+    allocate(batch.compact,std::size_t(lists)*count*sizeof(Chonk::DrawCommand));
+    allocate(batch.coreCommands,std::size_t(lists)*count*5*sizeof(GLuint));
+    allocate(batch.visible,std::size_t(copies)*_outputCapacity*sizeof(VisibleInstance));
+    allocate(batch.counts,counters*sizeof(GLuint));
+    allocate(batch.parameter,sizeof(GLuint));
+    batch.visible->bindBufferBase(0);
+    _groupBuf->bindBufferBase(24);
+    batch.coreCommands->bindBufferBase(25);
+    batch.compact->bindBufferBase(26);
+    batch.counts->bindBufferBase(27);
+    _templateBuf->bindBufferBase(28);
+    batch.commands->bindBufferBase(29);
+    _chonkBuf->bindBufferBase(30);
+    _instanceInputBuf->bindBufferBase(31);
+    // Extract local-space planes in double precision. This also supports perspective views and oblique frusta.
+    std::array<osg::Vec4f,ChonkRenderPass::MAX_VIEWS*6> planes;
+    unsigned orthographic = 0;
+    for (unsigned i=0; i<frame.count; ++i)
+    {
+        osg::Matrixd clip = batch.localToWorld*frame.clipFromWorld[i];
+        for (unsigned axis=0; axis<3; ++axis)
+        for (unsigned side=0; side<2; ++side)
+        {
+            double sign = side == 0 ? 1.0 : -1.0;
+            osg::Vec4d plane(clip(0,3)+sign*clip(0,axis),clip(1,3)+sign*clip(1,axis),
+                clip(2,3)+sign*clip(2,axis),clip(3,3)+sign*clip(3,axis));
+            double length = osg::Vec3d(plane.x(),plane.y(),plane.z()).length();
+            planes[i*6+axis*2+side] = length > 0.0 ? osg::Vec4f(plane/length) :
+                osg::Vec4f(0,0,0,plane.w() >= 0.0 ? FLT_MAX : -FLT_MAX);
+        }
+        if (clip(0,3) == 0.0 && clip(1,3) == 0.0 && clip(2,3) == 0.0 && clip(3,3) > 0.0)
+        {
+            // Opposite parallel planes become three slabs: one dot/absolute-value test per axis on the GPU.
+            orthographic |= 1u << i;
+            for (unsigned axis=0; axis<3; ++axis)
+            {
+                auto& lower = planes[i*6+axis*2];
+                auto& upper = planes[i*6+axis*2+1];
+                float center = 0.5f*lower.w()-0.5f*upper.w();
+                upper.w() = 0.5f*lower.w()+0.5f*upper.w();
+                lower.w() = center;
+            }
+        }
+    }
+    _ext->glUniform4fv(location("oe_chonk_view_planes"),frame.count*6,planes[0].ptr());
+    _ext->glUniform1ui(location("oe_chonk_orthographic_views"),orthographic);
+    osg::Matrixf lodView = batch.localToWorld*frame.lodView, lodProjection = frame.lodProjection;
+    _ext->glUniformMatrix4fv(location("oe_chonk_lod_view"),1,GL_FALSE,lodView.ptr());
+    _ext->glUniformMatrix4fv(location("oe_chonk_lod_projection"),1,GL_FALSE,lodProjection.ptr());
+    _ext->glUniform2fv(location("oe_chonk_lod_viewport"),1,frame.lodViewport.ptr());
+    _ext->glUniform1i(location("oe_chonk_retain_outside_lod_view"),frame.retainOutsideLODView ? 1 : 0);
+    double norm1 = 0.0, normInf = 0.0;
+    for (unsigned i=0; i<3; ++i)
+    {
+        double row = 0.0, column = 0.0;
+        for (unsigned j=0; j<3; ++j)
+        {
+            row += std::abs(batch.localToWorld(i,j));
+            column += std::abs(batch.localToWorld(j,i));
+        }
+        norm1 = std::max(norm1,column);
+        normInf = std::max(normInf,row);
+    }
+    _ext->glUniform1f(location("oe_chonk_parent_scale"),float(std::sqrt(norm1*normInf)));
+    _ext->glUniform4ui(location("oe_chonk_views"),frame.count,frame.activeViews,count,_outputCapacity);
+    _ext->glUniform1ui(location("oe_chonk_view_groups"),groups);
+    _ext->glUniform1i(location("oe_chonk_view_output"),int(frame.output));
+    GLint phase = location("oe_chonk_view_phase");
+    // The preceding frame may still read these counters as indirect parameters. Order all prior reads
+    // before reusing the persistent buffers for shader writes (including views without an intervening draw).
+    _ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    _ext->glUniform1i(phase,0);
+    _ext->glDispatchCompute((std::max(lists*count,counters)+31)/32,1,1);
+    _ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    _ext->glUniform1i(phase,1);
+    _ext->glDispatchCompute(unsigned((_numInstances+31)/32),unsigned(_maxNumLODs),1);
+    _ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    _ext->glUniform1i(phase,2);
+    _ext->glDispatchCompute((lists*count+31)/32,1,1);
+    // DrawLeaf publishes the compact list and parameter counters before indirect drawing.
+    batch.batchSerial = pass.getBatch()->serial;
+    batch.revision = _dataRevision;
+}
+
+//! Draws a dense per-layer or merged vertex-layer list; core mode groups commands by shared vertex/index buffers.
+void ChonkDrawable::GLObjects::drawViews(osg::State& state, const ChonkRenderPass& pass)
+{
+    if (_commands.empty()) return;
+    auto& batch = viewBatch(state,pass);
+    state.applyModelViewAndProjectionUniformsIfRequired();
+    batch.visible->bindBufferBase(0);
+    _instanceInputBuf->bindBufferBase(31);
+    constexpr GLenum parameterBuffer = 0x80EE; // GL_PARAMETER_BUFFER, core in OpenGL 4.6.
+    batch.counts->bind(parameterBuffer);
+    const GLenum type = sizeof(Chonk::element_t) == sizeof(GLushort) ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
+    if (!pass.getBatch()->parameters.coreDraws && _glMultiDrawElementsIndirectBindlessCountNV)
+    {
+        state.bindVertexArrayObject(_vao->name());
+        batch.compact->bind(GL_DRAW_INDIRECT_BUFFER);
+        // Keep the NV parameter at offset zero. Some drivers validate nonzero byte offsets as draw counts.
+        // The four-byte GPU copy avoids that validation bug without a CPU readback or oversized command lists.
+        batch.counts->copyBufferSubData(batch.parameter,pass.getIndex()*sizeof(GLuint),0,sizeof(GLuint));
+        batch.parameter->bind(parameterBuffer);
+        _glMultiDrawElementsIndirectBindlessCountNV(GL_TRIANGLES,type,
+            reinterpret_cast<const GLvoid*>(pass.getIndex()*_commands.size()*sizeof(Chonk::DrawCommand)),
+            0,GLsizei(_commands.size()),sizeof(Chonk::DrawCommand),1);
+    }
+    else
+    {
+        state.bindVertexArrayObject(_coreVAO->name());
+        batch.coreCommands->bind(GL_DRAW_INDIRECT_BUFFER);
+        for (unsigned i=0; i<_drawGroups.size(); ++i)
+        {
+            const auto& group = _drawGroups[i];
+            _ext->glBindVertexBuffer(0,group.vertices->name(),0,sizeof(Chonk::VertexGPU));
+            group.indices->bind(GL_ELEMENT_ARRAY_BUFFER_ARB);
+            _glMultiDrawElementsIndirectCount(GL_TRIANGLES,type,
+                reinterpret_cast<const GLvoid*>((pass.getIndex()*_commands.size()+group.first)*5*sizeof(GLuint)),
+                (ChonkRenderPass::MAX_VIEWS+pass.getIndex()*_drawGroups.size()+i)*sizeof(GLuint),
+                group.count,5*sizeof(GLuint));
+        }
+    }
+    _ext->glBindBuffer(parameterBuffer,0);
 }
 
 void
@@ -2422,6 +2653,11 @@ ChonkDrawable::GLObjects::release()
     _instanceInputBuf = nullptr;
     _instanceOutputBuf = nullptr;
     _chonkBuf = nullptr;
+    _templateBuf = nullptr;
+    _groupBuf = nullptr;
+    _coreVAO = nullptr;
+    _viewBatches.clear();
+    _drawGroups.clear();
     _commands.clear();
     _dirty = true;
 }
@@ -2501,7 +2737,7 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
         // Publish all culling dispatches to both the vertex shader's instance
         // lookup and the indirect draw command reader before drawing the bin.
         gl._vao->ext()->glMemoryBarrier(
-            GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
+            GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
     }
 
     drawable->draw_batches(state);

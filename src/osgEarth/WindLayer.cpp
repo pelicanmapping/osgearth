@@ -15,6 +15,8 @@
 #include <osg/Texture3D>
 #include <osg/Program>
 #include <osgUtil/CullVisitor>
+#include <cmath>
+#include <algorithm>
 
 #ifdef OE_HAVE_BINDIMAGETEXTURE
 #include <osg/BindImageTexture>
@@ -233,6 +235,7 @@ namespace
         cs._sharedStateSet->addUniform(new osg::Uniform("oe_wind_tex", _unitReservation.unit()));
         cs._sharedStateSet->setTextureAttribute(_unitReservation.unit(), tex, osg::StateAttribute::ON);
         cs._sharedStateSet->setDefine("OE_WIND_TEX", "oe_wind_tex");
+        cs._sharedStateSet->addUniform(new osg::Uniform("oe_wind_power",1.0f));
     }
 
     void WindDrawable::streamDataToGPU(osg::RenderInfo& ri, GLObjects& gl) const
@@ -312,7 +315,8 @@ namespace
                 cs._windData[i].position[3] = 0.0f;
             }
 
-            cs._windData[i].speed = wind->speed()->as(Units::KNOTS);
+            double speed = wind->speed()->as(Units::METERS_PER_SECOND);
+            cs._windData[i].speed = std::isfinite(speed) ? float(std::max(0.0,speed)) : 0.0f;
         }
 
         // terminator record: set power to negative.
@@ -371,7 +375,7 @@ namespace
         gl._buffer->ext()->glDispatchCompute(WIND_DIM_X, WIND_DIM_Y, WIND_DIM_Z);
 
         // sync the output
-        gl._buffer->ext()->glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        gl._buffer->ext()->glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT|GL_TEXTURE_FETCH_BARRIER_BIT);
     }
 }
 
@@ -394,13 +398,14 @@ Wind::setPoint(const GeoPoint& point)
     point.toWorld(_pointWorld);
 }
 
-Wind::Wind(const Config& conf)
+Wind::Wind(const Config& conf) : Wind()
 {
     conf.get("type", "point", type(), TYPE_POINT);
     conf.get("type", "directional", type(), TYPE_DIRECTIONAL);
     conf.get("point", point());
     conf.get("direction", direction());
     conf.get("speed", speed());
+    if (getPoint().isValid()) getPoint().toWorld(_pointWorld);
 }
 
 Config
@@ -423,6 +428,7 @@ WindLayer::Options::getConfig() const
     Config conf = Layer::Options::getConfig();
     conf.set("ortho", ortho());
     conf.set("radius", radius());
+    conf.set("speed_factor", speedFactor());
     if (!winds().empty())
     {
         Config windsConf("winds");
@@ -442,10 +448,12 @@ WindLayer::Options::fromConfig(const Config& conf)
 {
     ortho().setDefault(true);
     radius().setDefault(Distance(75.0, Units::METERS));
+    speedFactor().setDefault(1.0f);
     winds().clear();
 
     conf.get("ortho", ortho());
     conf.get("radius", radius());
+    conf.get("speed_factor", speedFactor());
     const ConfigSet windsConf = conf.child("winds").children();
     for(ConfigSet::const_iterator i = windsConf.begin(); i != windsConf.end(); ++i)
     {
@@ -459,6 +467,8 @@ WindLayer::Options::fromConfig(const Config& conf)
 void
 WindLayer::addWind(Wind* wind)
 {
+    if (!wind) return;
+    options().winds().push_back(wind);
     WindDrawable* wd = dynamic_cast<WindDrawable*>(_drawable.get()); // also checks for nullptr
     if (wd)
     {
@@ -469,6 +479,9 @@ WindLayer::addWind(Wind* wind)
 void
 WindLayer::removeWind(Wind* wind)
 {
+    auto& sources = options().winds();
+    auto source = std::find(sources.begin(),sources.end(),wind);
+    if (source != sources.end()) sources.erase(source);
     WindDrawable* wd = dynamic_cast<WindDrawable*>(_drawable.get()); // also checks for nullptr
     if (wd)
     {
@@ -483,6 +496,47 @@ WindLayer::removeWind(Wind* wind)
             }
         }
     }
+}
+
+void WindLayer::setSpeedFactor(float value)
+{
+    options().speedFactor() = std::isfinite(value) ? std::max(0.0f,value) : 1.0f;
+}
+
+float WindLayer::getSpeedFactor() const
+{
+    float value = options().speedFactor().get();
+    return std::isfinite(value) ? std::max(0.0f,value) : 1.0f;
+}
+
+osg::Vec2d WindLayer::getDirectionalVelocity() const
+{
+    osg::Vec2d velocity;
+    for (const auto& wind : options().winds())
+    {
+        if (!wind || wind->getType() != Wind::TYPE_DIRECTIONAL) continue;
+        osg::Vec2d direction(wind->getDirection().x(),wind->getDirection().y());
+        double speed = wind->getSpeed().as(Units::METERS_PER_SECOND);
+        if (!std::isfinite(direction.x()) || !std::isfinite(direction.y()) || !std::isfinite(speed)) continue;
+        direction.normalize();
+        velocity += direction*std::max(0.0,speed);
+    }
+    return velocity*getSpeedFactor();
+}
+
+osg::Vec2d WindLayer::getDirectionalDisplacement(double time) const
+{
+    std::lock_guard<std::mutex> lock(_motionMutex);
+    if (!std::isfinite(time)) return _displacement;
+    auto velocity = isOpen() ? getDirectionalVelocity() : osg::Vec2d();
+    if (!_motionStarted || time < _motionTime)
+        _displacement = velocity*time;
+    else
+        _displacement += _previousVelocity*(time-_motionTime);
+    _previousVelocity = velocity;
+    _motionTime = time;
+    _motionStarted = true;
+    return _displacement;
 }
 
 void
@@ -504,6 +558,7 @@ WindLayer::openImplementation()
     }
 
     _drawable = new WindDrawable(getReadOptions());
+    static_cast<WindDrawable*>(_drawable.get())->_winds = options().winds();
 
     return Layer::openImplementation();
 }
@@ -548,10 +603,7 @@ WindLayer::prepareForRendering(TerrainEngine* engine)
     addWind(wind2);
 #endif
 
-    for(int i=0; i<options().winds().size(); ++i)
-    {
-        addWind(options().winds()[i].get());
-    }
+    // Sources are copied when opening; rendering preparation may run more than once for a shared layer.
 }
 
 void
@@ -615,6 +667,7 @@ WindLayer::getSharedStateSet(osg::NodeVisitor* nv) const
     cs._texToViewMatrix->set(textureToCamView);
 
     windDrawable->updateBuffers(cs, cv, _srs.get());
+    cs._sharedStateSet->getUniform("oe_wind_power")->set(getSpeedFactor());
 
     return cs._sharedStateSet.get();
 }

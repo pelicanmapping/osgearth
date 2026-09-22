@@ -26,12 +26,13 @@ void oe_phong_vertex(inout vec4 VertexVIEW)
 #pragma import_defines(OE_LIGHTING)
 #pragma import_defines(OE_NUM_LIGHTS)
 #pragma import_defines(OE_SHADOWING)
+#pragma import_defines(OE_SKY2)
 
 #ifdef OE_SHADOWING
 float oe_shadow_visibility;
 #endif
 
-#ifdef OE_LIGHTING
+#if defined(OE_LIGHTING) && !defined(OE_SKY2)
 
 in vec3 oe_phong_vertexView3; 
 

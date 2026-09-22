@@ -52,7 +52,8 @@ void main()
             // speed attenuation
             float speed = wind[i].speed;
             speed = max(speed - length(dir), 0.0); // linearly interpolates for low-res textures
-            totalDirection += normalize(dir) * speed;
+            float distance = length(dir);
+            if (distance > 0.0) totalDirection += (dir/distance) * speed;
         }
         else
         {
@@ -65,7 +66,7 @@ void main()
 
     vec4 pixel;
     // RGB holds normalized wind direction
-    pixel.rgb = 0.5*(normalize(totalDirection)+1.0);
+    pixel.rgb = 0.5*((totalSpeed > 0.0 ? totalDirection/totalSpeed : vec3(0))+1.0);
 
     // A holds normalized wind speed
     pixel.a = min(totalSpeed, MAX_WIND_SPEED) / MAX_WIND_SPEED;

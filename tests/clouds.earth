@@ -1,0 +1,38 @@
+<map name="Procedural clouds">
+    <xi:include href="readymap_imagery.xml"/>
+    <xi:include href="readymap_elevation.xml"/>
+    <wind name="Weather wind">
+        <winds>
+            <wind>
+                <type>directional</type>
+                <direction>1 0</direction>
+                <speed>10m/s</speed>
+            </wind>
+        </winds>
+    </wind>
+    <sky2>
+        <preset>balanced</preset>
+        <hours>16.0</hours>
+        <clouds>
+            <quality>balanced</quality>
+            <coverage>0.5</coverage>
+            <density>1.0</density>
+            <base_altitude>1500</base_altitude>
+            <top_altitude>4500</top_altitude>
+            <fade_start_altitude>20000</fade_start_altitude>
+            <fade_end_altitude>100000</fade_end_altitude>
+            <size>4000</size>
+            <!-- Opt in to atmospheric light shafts, or enable them in EnvironmentGUI. -->
+            <crepuscular_rays>false</crepuscular_rays>
+            <ray_quality>balanced</ray_quality>
+            <ray_haze>0.35</ray_haze>
+            <ray_intensity>7.0</ray_intensity>
+        </clouds>
+    </sky2>
+    <viewpoints>
+        <viewpoint name="Under the clouds" lat="30" long="-80" height="100" heading="90" pitch="5" range="100"/>
+        <viewpoint name="Inside the clouds" lat="30" long="-80" height="2800" heading="90" pitch="0" range="100"/>
+        <viewpoint name="Above the clouds" lat="30" long="-80" height="6500" heading="90" pitch="-20" range="100"/>
+        <viewpoint name="Orbit" lat="30" long="-80" height="0" heading="0" pitch="-60" range="1000000"/>
+    </viewpoints>
+</map>

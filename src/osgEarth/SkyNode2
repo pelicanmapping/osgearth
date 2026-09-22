@@ -1,0 +1,84 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/Sky>
+#include <memory>
+
+namespace osgEarth
+{
+    class CloudLayer;
+    /**
+     * Unified Earth atmosphere and metallic/roughness lighting. Add the map beneath
+     * this node, then attach it to each view. Requires desktop OpenGL 3.3; optional clouds require OpenGL 4.3.
+     * Construct and change settings on the update thread, before concurrent cull/draw.
+     * Camera-specific resources are isolated; no camera is retained by this node.
+     */
+    class OSGEARTH_EXPORT SkyNode2 : public SkyNode
+    {
+    public:
+        enum Quality { FLAT, BALANCED, HIGH };
+
+        struct OSGEARTH_EXPORT Options : public SkyOptions
+        {
+            SkyNode2::Quality preset = BALANCED;
+            float exposure = 1.0f;
+            float sunIntensity = 10.0f;
+            float environmentIntensity = 1.0f;
+            bool outputSRGB = true;
+            bool toneMapping = true;
+            Config clouds; // Optional <clouds> configuration; absent means no cloud resources.
+
+            //! Reads sky2 configuration; invalid scalar settings are sanitized by the node.
+            explicit Options(const ConfigOptions& = ConfigOptions());
+            //! Serializes all SkyNode2 settings and inherited date/coordinate-system options.
+            Config getConfig() const override;
+        };
+
+        //! Creates a self-contained sky. FLAT retains PBR and celestial bodies, without atmosphere LUTs.
+        explicit SkyNode2(const Options& = Options());
+        //! Returns the effective settings; read on the update thread or while traversal is stopped.
+        const Options& getOptions() const;
+        //! Returns the directional sun light; its diffuse RGB scales the physical solar irradiance.
+        osg::Light* getSunLight() const override;
+        using SkyNode::attach;
+        //! Exposes the sun to the view and disables its headlight; lightNum must be in [0,7].
+        void attach(osg::View*, int lightNum) override;
+        //! Changes exposure in linear space; negative and non-finite values are ignored.
+        void setExposure(float);
+        //! Changes solar irradiance, updating both the atmosphere and surface lighting on the next frame.
+        void setSunIntensity(float);
+        //! Changes the minimum indirect diffuse fill; zero permits a physically dark night.
+        void setAmbientIntensity(float);
+        //! Changes indirect sky lighting strength; zero skips its texture lookups.
+        void setEnvironmentIntensity(float);
+        //! Attaches optional procedural clouds; call on the update thread. Null releases the cloud renderer.
+        void setCloudLayer(CloudLayer*);
+        //! Returns the attached cloud settings, or null; follow normal update/cull synchronization.
+        CloudLayer* getCloudLayer() const;
+        //! Updates ephemerides and culls per-camera lookup passes and the ordinary child graph.
+        void traverse(osg::NodeVisitor&) override;
+        //! Releases per-context GPU objects, including off-graph lookup cameras.
+        void releaseGLObjects(osg::State*) const override;
+        //! Resizes context arrays for off-graph resources as well as children.
+        void resizeGLObjectBuffers(unsigned) override;
+
+    protected:
+        //! Releases owned lookup resources and terrain texture-unit reservations.
+        ~SkyNode2() override;
+        //! Invalidates cached celestial coordinates after replacing the ephemeris.
+        void onSetEphemeris() override;
+        //! Defers global date changes until the next update traversal.
+        void onSetDateTime() override;
+        //! Rebuilds the local-to-Earth transform for projected maps.
+        void onSetReferencePoint() override;
+
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> _impl;
+        SkyNode2(const SkyNode2&) = delete;
+        SkyNode2& operator=(const SkyNode2&) = delete;
+    };
+}

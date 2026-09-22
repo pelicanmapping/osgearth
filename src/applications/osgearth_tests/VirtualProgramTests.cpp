@@ -112,6 +112,38 @@ namespace
     const std::string secondSource = "void second(inout vec4 v) { v.x *= 2.0; }";
 }
 
+// UID zero is the first renderer in a process, not a sentinel; it must not retain stale GL handles.
+TEST_CASE("ProgramRepo releases programs owned by UID zero", "[virtualprogram]")
+{
+    ProgramRepo repo;
+    auto program = simpleProgram();
+    repo.add({1},program,1,0);
+    REQUIRE(repo.use({1},2,0) == program);
+    repo.release(0,nullptr);
+    REQUIRE(repo.copy().empty());
+}
+
+// Releasing one graphics context must discard its PCP even while another VP/context retains the composition.
+TEST_CASE("VirtualProgram releases a context shared by multiple program owners", "[virtualprogram][.gl]")
+{
+    Context first;
+    auto a = first.push();
+    a->setFunction("first",firstSource,VirtualProgram::LOCATION_VERTEX_MODEL);
+    auto program = first.apply(a);
+    Context second;
+    auto b = second.push();
+    b->setFunction("first",firstSource,VirtualProgram::LOCATION_VERTEX_MODEL);
+    REQUIRE(second.apply(b) == program);
+    osg::ref_ptr<const osg::Program::PerContextProgram> other = second.state().getLastAppliedProgramObject();
+    REQUIRE(first.gc->makeCurrent());
+    a->releaseGLObjects(&first.state());
+    REQUIRE(program->getPCP(first.state())->needsLink());
+    REQUIRE(first.apply(a) == program);
+    REQUIRE(second.gc->makeCurrent());
+    REQUIRE(second.apply(b) == program);
+    REQUIRE(second.state().getLastAppliedProgramObject() == other);
+}
+
 TEST_CASE("ProgramRepo releases every alias of an unused program", "[virtualprogram]")
 {
     ProgramRepo repo;

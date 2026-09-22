@@ -98,6 +98,9 @@ namespace osgEarth
         //! bindless buffers and draw commands, are available
         bool supportsNVGL() const { return _supportsNVGL; }
 
+        //! Whether vertex shaders can write gl_Layer using GL_ARB_shader_viewport_layer_array.
+        bool supportsShaderViewportLayerArray() const { return _supportsShaderViewportLayerArray; }
+
     protected:
         Capabilities();
 
@@ -131,6 +134,7 @@ namespace osgEarth
         bool _supportsVertexArrayObjects;
         bool _supportsInt64;
         bool _supportsNVGL;
+        bool _supportsShaderViewportLayerArray;
 
     public:
         friend class Registry;

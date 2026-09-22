@@ -1,6 +1,8 @@
 #pragma vp_function oe_chonk_default_vertex_model, vertex_model, 0.0
 #pragma import_defines(OE_IS_SHADOW_CAMERA)
 #pragma import_defines(OE_IS_DEPTH_CAMERA)
+// Available after vertex_model order 0.0; callers own projection and render-target routing.
+int oe_chonk_view_index;
 #pragma import_defines(OE_CHONK_MAX_LOD_FOR_NORMAL_MAPS)
 #pragma import_defines(OE_CHONK_MAX_LOD_FOR_PBR_MAPS)
 #pragma include PBRMaterial.glsl
@@ -93,7 +95,8 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
     ChonkVisibleInstance visible = chonkVisibleInstances[gl_BaseInstance + gl_InstanceID];
     uint i = visible.source_index;
 
-    chonk_lod = visible.lod;
+    chonk_lod = visible.lod & 0xffffu;
+    oe_chonk_view_index = int(visible.lod >> 16u);
 
     vertex = chonkInstances[i].xform * vec4(position, 1.0);
     vp_Color = color;

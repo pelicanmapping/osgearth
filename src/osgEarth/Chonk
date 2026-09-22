@@ -15,6 +15,7 @@
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
+#include <atomic>
 
 // Usage hint to signal which textures are external materials. Currently only two slots are supported [0, 1]
 #define CHONK_HINT_EXTENDED_MATERIAL_SLOT "osgEarth.Chonk.ExtendedMaterial.Slot"
@@ -24,6 +25,7 @@
 
 namespace osgEarth
 {
+    class ChonkRenderPass;
     using ChonkMaterial = MaterialArena::Material;
 
     class ChonkFactory;
@@ -377,6 +379,8 @@ namespace osgEarth
         //! Whether to GPU cull on the per-chonk basis.
         //! Default is true.
         void setUseGPUCulling(bool value);
+        //! Reports whether this drawable supports GPU visibility, including optional multi-view passes.
+        bool getUseGPUCulling() const { return _gpucull; }
 
         //! Render bin number to use for this drawable
         void setRenderBinNumber(int value);
@@ -393,6 +397,9 @@ namespace osgEarth
         //! Logical counts, excluding GPU workgroup padding and LOD duplication.
         std::size_t getNumInstances() const;
         std::size_t getNumBatches() const;
+
+        //! Monotonic content revision, changed by geometry/placement and render-setting updates.
+        std::uint64_t getContentRevision() const { return _contentRevision.load(); }
 
     public:
 
@@ -423,6 +430,7 @@ namespace osgEarth
             "Chonk source instance offsets must match GLSL std430");
 
         // One result per visible instance/LOD pair; sourceIndex addresses Instance.
+        // Multi-view passes pack the view index in lod's high 16 bits; the low bits retain the selected LOD.
         // Full-precision fade also preserves the culling debug values above 1.
         struct VisibleInstance
         {
@@ -447,6 +455,7 @@ namespace osgEarth
         //! Check the common arena with _m held; empty drawables accept any.
         bool acceptsArena(const MaterialArena*) const;
         bool _gpucull = true;
+        std::atomic<std::uint64_t> _contentRevision{0};
         float _fadeNear = 0.0f, _fadeFar = 0.0f;
         double _birthday = -1.0;
         float _alphaCutoff = 0.0f;
@@ -470,7 +479,7 @@ namespace osgEarth
                 GLfloat fade_near;
                 GLfloat fade_far;
                 GLuint num_lods; // chonk-global
-                GLuint total_num_commands; // global
+                GLuint draw_group; // shared vertex/index buffers for core indirect draws
             };
 
             // re-usable arrays
@@ -486,6 +495,29 @@ namespace osgEarth
             GLBuffer::Ptr _instanceInputBuf;
             GLBuffer::Ptr _instanceOutputBuf;
             GLBuffer::Ptr _chonkBuf;
+            struct DrawGroup
+            {
+                GLBuffer::Ptr vertices, indices;
+                GLuint first = 0, count = 0;
+            };
+            std::vector<DrawGroup> _drawGroups;
+            GLBuffer::Ptr _templateBuf, _groupBuf;
+            GLVAO::Ptr _coreVAO;
+            unsigned _outputCapacity = 0;
+            std::uint64_t _dataRevision = 0;
+            struct ViewBatch
+            {
+                std::uint64_t viewID = 0, revision = 0;
+                std::uint64_t batchSerial = 0;
+                unsigned lastUsed = 0;
+                osg::Matrixd localToWorld;
+                GLBuffer::Ptr commands, visible, compact, coreCommands, counts, parameter;
+            };
+            std::vector<ViewBatch> _viewBatches;
+            void(GL_APIENTRY * _glMultiDrawElementsIndirectCount)
+                (GLenum, GLenum, const GLvoid*, GLintptr, GLsizei, GLsizei) = nullptr;
+            void(GL_APIENTRY * _glMultiDrawElementsIndirectBindlessCountNV)
+                (GLenum, GLenum, const GLvoid*, GLintptr, GLsizei, GLsizei, GLint) = nullptr;
             bool _dirty = true;
             bool _gpucull = true;
 
@@ -504,6 +536,14 @@ namespace osgEarth
             void cull(osg::State& state);
             void draw(osg::State& state);
             void release();
+            //! Finds persistent per-view/per-placement output storage, allowing a drawable to appear on multiple paths.
+            ViewBatch& viewBatch(osg::State&, const ChonkRenderPass&);
+            //! Classifies instances for every active view, then compacts both core and bindless draw commands.
+            void cullViews(osg::State&, const ChonkRenderPass&);
+            //! Submits only surviving GPU-generated commands for this view, without CPU readback.
+            void drawViews(osg::State&, const ChonkRenderPass&);
+            //! Creates an independent core or NV-unified vertex layout with matching Chonk attribute formats.
+            GLVAO::Ptr createVAO(const osg::Object*, osg::State&, bool bindless);
         };
         mutable osg::buffered_object<GLObjects> _globjects;
 

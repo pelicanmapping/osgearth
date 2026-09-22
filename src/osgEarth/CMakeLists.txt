@@ -84,6 +84,7 @@ set(TARGET_GLSL
     FrustumGridComputer.glsl
     GPUClamping.glsl
     GPUClamping.lib.glsl
+    GrimeLayer.glsl
     HexTiling.glsl
     Instancing.glsl
     LineDrawable.glsl
@@ -272,6 +273,7 @@ SET(TARGET_H
     GLSLChunker
     GLUtils
     GraticuleLabelingEngine
+    GrimeLayer
     HeightFieldUtils
     Horizon
     HorizonClipPlane
@@ -646,6 +648,7 @@ set(TARGET_SRC
     GLSLChunker.cpp
     GLUtils.cpp
     GraticuleLabelingEngine.cpp
+    GrimeLayer.cpp
     HeightFieldUtils.cpp
     Horizon.cpp
     HorizonClipPlane.cpp

@@ -11,6 +11,7 @@ set(TARGET_SRC
     EndianTests.cpp
     ExpressionTests.cpp
     GeoExtentTests.cpp
+    GrimeLayerTests.cpp
     FeatureTests.cpp
     ImageUtilsTests.cpp
     PathTests.cpp

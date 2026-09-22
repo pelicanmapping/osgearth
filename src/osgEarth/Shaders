@@ -26,6 +26,7 @@ namespace osgEarth { namespace Util
         std::string FrustumGrid_Headers;
         std::string FrustumGridComputer;
         std::string GPUClamping, GPUClampingLib;
+        std::string GrimeLayer;
         std::string HexTilingLib;
         std::string Instancing;
         std::string LineDrawable;

@@ -149,6 +149,7 @@
 #include <osgEarth/GeometryRasterizer>
 #include <osgEarth/GeometryUtils>
 #include <osgEarth/GraticuleLabelingEngine>
+#include <osgEarth/GrimeLayer>
 #include <osgEarth/HTM>
 #include <osgEarth/HTTPClient>
 #include <osgEarth/HeightFieldUtils>

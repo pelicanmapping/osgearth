@@ -36,6 +36,7 @@ These are the public layer types native to osgEarth.
 | Annotations       | AnnotationLayer        | Holds a collection of annotation elements (like text labels, place nodes, or features) |
 | Debug             | DebugImageLayer        | Renders metadata about each rendered map tile                |
 | GeodeticGraticule | GeodeticGraticuleLayer | Display a simple latitude/longitude graticule                |
+| [Grime](grime.html) | GrimeLayer | Adds generated 3D weathering to a tiled model layer |
 | MGRSGraticule     | MGRSGraticuleLayer     | Displays a simple MGRS graticule with labels                 |
 | Model             | ModelLayer             | Loads and displays an external 3D model at a map location    |
 | Ocean             | SimpleOceanLayer       | Renders a very simple ocean surface (requires the map to have bathymetry data) |

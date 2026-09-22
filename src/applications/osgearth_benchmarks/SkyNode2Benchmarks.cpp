@@ -30,7 +30,20 @@ namespace
         }
         state.counters["max_error"] = maximum;
         state.counters["rmse"] = std::sqrt(square/pixels.size());
-        if (maximum > 2.0/255.0) throw std::runtime_error("Lighting changed by more than two display code values");
+        if (maximum > 2.0/255.0) throw std::runtime_error("Lighting changed: max="+std::to_string(maximum)+
+            " RMS="+std::to_string(std::sqrt(square/pixels.size())));
+    }
+
+    //! Measures temporal/coplanar noise in GPU-compacted city draws; synthetic fixtures retain strict pixel checks.
+    double lightingRMS(const std::vector<float>& a, const std::vector<float>& b)
+    {
+        double square = 0.0;
+        for (std::size_t i=0; i<a.size(); ++i)
+        {
+            double delta = double(a[i])-b[i];
+            square += delta*delta;
+        }
+        return std::sqrt(square/a.size());
     }
 
     //! Records or verifies an opt-in reference image; never updates a reference during verification.
@@ -93,17 +106,38 @@ namespace
             // Keep scene layers but exclude any sky/cloud/shadow wrappers from the earth file.
             sky->addChild(map);
             sky->attach(scene->viewer);
+            // The viewpoints extension schedules its home view on the first event. Benchmarks own their camera.
+            scene->viewer->getEventHandlers().clear();
             manip->setNode(sky);
             const auto viewpoints = map->getConfig().child("viewpoints").children("viewpoint");
             if (viewpoints.empty()) throw std::runtime_error("Prestige benchmark requires a saved viewpoint");
             unsigned index = 0;
             if (const char* value = std::getenv("SKY2_PRESTIGE_VIEW")) index = unsigned(std::stoul(value));
             if (index >= viewpoints.size()) throw std::runtime_error("Prestige viewpoint index out of range");
-            manip->setViewpoint(Viewpoint(viewpoints[index]),0.0);
+            Viewpoint requested(viewpoints[index]);
+            if (const char* path = std::getenv("SKY2_PRESTIGE_VIEWPOINT"))
+            {
+                std::ifstream input(path);
+                Config config;
+                if (!input || !config.fromXML(input)) throw std::runtime_error("Cannot read benchmark viewpoint XML");
+                requested = Viewpoint(config.key() == "viewpoint" ? config : config.child("viewpoint"));
+                if (!requested.valid()) throw std::runtime_error("Invalid benchmark viewpoint XML");
+            }
+            manip->setHomeViewpoint(requested,0.0);
+            manip->setViewpoint(requested,0.0);
+            std::cerr << "SkyNode2 city viewpoint: " << manip->getViewpoint().getConfig().toJSON(false) << '\n';
+            // Freeze before paging: terrain callbacks can recenter the manipulator and adjust its roll.
+            auto viewMatrix = manip->getInverseMatrix();
+            scene->viewer->setCameraManipulator(nullptr,false);
+            scene->viewer->getCamera()->setViewMatrix(viewMatrix);
             scene->readback->enabled = false;
             auto start = std::chrono::steady_clock::now();
             while (std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count() < 30.0)
+            {
                 scene->draw();
+                // Bound queued GPU work while the CPU pager warms; timing starts only after this phase.
+                glFinish();
+            }
             scene->viewer->getDatabasePager()->setAcceptNewDatabaseRequests(false);
             scene->readback->enabled = true;
             scene->draw();
@@ -113,6 +147,17 @@ namespace
             gl->glGenQueries(1,&query);
             scene->viewer->getCamera()->setPreDrawCallback(new CityTimer(query,true));
             scene->viewer->getCamera()->setPostDrawCallback(new CityTimer(query,false));
+        }
+        //! Renders the warmed scene without update traversal, preventing late streamed tiles from changing the workload.
+        //! The camera/date stay fixed; SkyNode2's lighting settings are consumed during cull traversal.
+        void draw()
+        {
+            unsigned errors = Sky2Tests::Diagnostics::get().errors.load();
+            scene->viewer->advance();
+            scene->viewer->renderingTraversals();
+            scene->context->makeCurrent();
+            if (Sky2Tests::Diagnostics::get().errors.load() != errors)
+                throw std::runtime_error("Shader compilation, link, or OpenGL failure during city frame");
         }
         //! Releases the query before the fixture's graphics context is destroyed.
         ~CityScene()
@@ -124,7 +169,7 @@ namespace
         }
     };
 
-    //! Measures the same loaded city with lighting components toggled, retaining materials, geometry and paging.
+    //! Measures the same loaded city with lighting components toggled and scene updates frozen after warmup.
     void prestigeLighting(benchmark::State& state)
     {
         const char* path = std::getenv("SKY2_PRESTIGE");
@@ -135,27 +180,55 @@ namespace
             city.sky->setAtmosphereVisible(state.range(0) != 1);
             city.sky->setEnvironmentIntensity(state.range(0) == 2 ? 0.0f : 1.0f);
             city.sky->setLighting(state.range(0) != 3);
-            city.sky->setDepthPrepass(false);
-            for (unsigned i=0; i<12; ++i) city.scene->draw();
+            auto lightingState = city.sky->getOrCreateStateSet();
+            lightingState->setDefine("OE_NUM_LIGHTS","8",
+                osg::StateAttribute::ON|osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
+            for (unsigned i=0; i<12; ++i) city.draw();
             city.scene->readback->enabled = true;
-            city.scene->draw();
-            auto reference = city.scene->pixels();
-            city.sky->setDepthPrepass(state.range(1) != 0);
-            city.scene->draw();
-            compareLighting(state,city.scene->pixels(),reference);
+            std::vector<float> reference;
+            double temporal = 0.0;
+            unsigned settle = 0;
+            // Finish late texture uploads before accepting a reference; never retry a changed lighting result.
+            for (; settle<4; ++settle)
+            {
+                city.draw();
+                reference = city.scene->pixels();
+                temporal = 0.0;
+                // Compaction can leave one control frame unusually stable. Measure an envelope, not one pair.
+                for (unsigned i=0; i<8; ++i)
+                {
+                    city.draw();
+                    temporal = std::max(temporal,lightingRMS(city.scene->pixels(),reference));
+                }
+                if (temporal <= 0.001) break;
+            }
+            state.counters["settle_retries"] = settle;
+            if (state.range(1) == 0) lightingState->setDefine("OE_NUM_LIGHTS","1");
+            city.draw();
+            double difference = lightingRMS(city.scene->pixels(),reference);
+            state.counters["frame_rmse"] = temporal;
+            state.counters["rmse"] = difference;
+            if (temporal > 0.001 || difference > temporal*2.0+0.0001)
+                throw std::runtime_error("City image changed: control RMS="+std::to_string(temporal)+
+                    " comparison RMS="+std::to_string(difference));
             city.scene->readback->enabled = false;
-            for (unsigned i=0; i<12; ++i) city.scene->draw();
+            for (unsigned i=0; i<12; ++i) city.draw();
             auto gl = city.scene->context->getState()->get<osg::GLExtensions>();
             for (auto _ : state)
             {
-                city.scene->draw();
+                city.draw();
                 GLuint64 ns = 0;
                 gl->glGetQueryObjectui64v(city.query,GL_QUERY_RESULT,&ns);
                 state.SetIterationTime(double(ns)*1e-9);
             }
             if (glGetError() != GL_NO_ERROR) state.SkipWithError("OpenGL error during Prestige benchmark");
         }
-        catch (const std::exception& error) { state.SkipWithError(error.what()); }
+        catch (const std::exception& error)
+        {
+            // Keep validation failures visible even if the installed benchmark reporter fails to aggregate skipped runs.
+            std::cerr << "SkyNode2 city validation failed: " << error.what() << std::endl;
+            state.SkipWithError(error.what());
+        }
     }
 
     struct LightingTimer : osg::Drawable::DrawCallback
@@ -206,13 +279,15 @@ namespace
                 osg::Vec3d(6378257,0,0),osg::Vec3d(6378217,0,0),osg::Vec3d(0,0,1));
             if (state.range(2) == 1) sky->setAtmosphereVisible(false);
             if (state.range(2) == 2) sky->setLighting(false);
-            sky->setDepthPrepass(false);
+            auto lightingState = sky->getOrCreateStateSet();
+            lightingState->setDefine("OE_NUM_LIGHTS","8",
+                osg::StateAttribute::ON|osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
             scene.readback->enabled = false;
             for (unsigned i=0; i<16; ++i) scene.draw();
             scene.readback->enabled = true;
             scene.draw();
             auto reference = scene.pixels();
-            sky->setDepthPrepass(state.range(3) != 0);
+            lightingState->setDefine("OE_NUM_LIGHTS","1");
             scene.draw();
             compareLighting(state,scene.pixels(),reference);
             verifyLighting(state,scene.pixels(),"sky2-instanced-"+std::to_string(state.range(0))+"-"+
@@ -389,13 +464,12 @@ namespace
     // The dataset is machine-local and large; do not add it to ordinary benchmark runs.
     auto* cityBenchmark = std::getenv("SKY2_PRESTIGE") ?
         benchmark::RegisterBenchmark("SkyNode2/PrestigeLighting",prestigeLighting)
-        ->Args({0,0})->Args({0,1})->Args({1,0})->Args({1,1})->Args({2,0})->Args({2,1})->Args({3,0})->Args({3,1})
+        ->Args({0,8})->Args({0,0})->Args({1,0})->Args({2,0})->Args({3,0})
         ->UseManualTime()->Unit(benchmark::kMillisecond) : nullptr;
     BENCHMARK_CAPTURE(lighting, BalancedLighting, 1)->Name("SkyNode2/BalancedLighting")
         ->Args({3840,0})->Args({3840,1})->Args({3840,2})->UseManualTime()->Unit(benchmark::kMillisecond);
     BENCHMARK(instancedLighting)->Name("SkyNode2/InstancedLighting")
-        ->Args({4,1,0,0})->Args({4,1,0,1})->Args({4,4,0,0})->Args({4,4,0,1})->Args({16,4,0,0})->Args({16,4,0,1})
-        ->Args({4,4,1,0})->Args({4,4,1,1})->Args({4,4,2,0})->Args({4,4,2,1})
+        ->Args({4,1,0})->Args({4,4,0})->Args({16,4,0})->Args({4,4,1})->Args({4,4,2})
         ->UseManualTime()->Unit(benchmark::kMillisecond);
     BENCHMARK_CAPTURE(lighting, HighLighting, 2)->Name("SkyNode2/HighLighting")
         ->Args({3840,0})->Args({3840,1})->Args({3840,2})->UseManualTime()->Unit(benchmark::kMillisecond);

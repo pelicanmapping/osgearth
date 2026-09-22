@@ -11,7 +11,6 @@
 #include <osgEarth/NodeUtils>
 #include <osgEarth/SkyNode2Atmosphere.h>
 #include "SkyNode2TestScene.h"
-#include "ChonkMaterialTestUtils.h"
 #include <limits>
 #include <iostream>
 
@@ -65,89 +64,6 @@ namespace
         }
         REQUIRE(count > 0);
         return osg::Vec2d(std::sqrt(squared/count),maximum);
-    }
-}
-
-// Preserve alpha cutouts, fades, coplanar ordering and conventional geometry across runtime prepass changes.
-TEST_CASE("SkyNode2 instanced depth prepass preserves forward rendering", "[sky2][sky2prepass][chonk][.gl]")
-{
-    if (!Capabilities::get().supportsNVGL()) return;
-    GLUtils::useNVGL(true);
-    SkyNode2::Options options;
-    options.depthPrepass = false;
-    REQUIRE_FALSE(SkyNode2::Options(options.getConfig()).depthPrepass);
-    for (auto quality : {SkyNode2::FLAT,SkyNode2::BALANCED,SkyNode2::HIGH})
-    {
-        options.preset = quality;
-        osg::ref_ptr<SkyNode2> sky = new SkyNode2(options);
-        Scene scene(sky,384,216);
-        scene.models->removeChildren(0,scene.models->getNumChildren());
-        osg::ref_ptr<TextureArena> textures = new TextureArena;
-        ChonkFactory factory(textures);
-        auto source = ChonkTest::materialScene(4);
-        // Include cutouts at several alpha levels, not just opaque texels that hide a mismatched depth threshold.
-        for (unsigned i=0; i<source->getNumChildren(); ++i)
-        {
-            auto geometry = source->getChild(i)->asGroup()->getChild(0);
-            auto material = dynamic_cast<PBRTexture*>(geometry->getStateSet()->getTextureAttribute(0,osg::StateAttribute::TEXTURE));
-            REQUIRE(material);
-            auto image = material->albedo->getImage(0);
-            for (unsigned pixel=0; pixel<4; ++pixel) image->data()[pixel*4+3] = GLubyte(pixel*85);
-            image->dirty();
-        }
-        auto chonk = factory.getOrCreateChonk(source);
-        REQUIRE(chonk);
-        for (unsigned i=0; i<3; ++i)
-        {
-            osg::ref_ptr<ChonkDrawable> drawable = new ChonkDrawable;
-            drawable->setUseGPUCulling(false);
-            if (i == 2) drawable->setFadeNearFar(10.0f,80.0f);
-            drawable->setAlphaCutoff(0.25f);
-            for (unsigned layer=0; layer<3; ++layer)
-                drawable->add(chonk,osg::Matrixf::translate(float(i)-1.0f,0.0f,80.0f+float(layer)*0.1f));
-            scene.models->addChild(drawable);
-        }
-        // Ordinary OSG geometry both before and after the instancing bin verifies depth and color-mask restoration.
-        for (int bin : {0,7})
-        {
-            auto marker = ChonkTest::mesh();
-            marker->getOrCreateStateSet()->setRenderBinDetails(bin,"RenderBin");
-            auto transform = new osg::MatrixTransform(osg::Matrix::scale(bin == 0 ? 8.0 : 1.0,8.0,1.0)*
-                osg::Matrix::translate(0,0,bin == 0 ? 75.0 : 83.0));
-            transform->addChild(marker);
-            scene.models->addChild(transform);
-        }
-        auto ss = scene.models->getOrCreateStateSet();
-        ss->setAttribute(textures);
-        ss->addUniform(new osg::Uniform("oe_sse",0.0f));
-        scene.viewer->getCamera()->setViewMatrixAsLookAt(
-            osg::Vec3d(6378237,0,0),osg::Vec3d(6378217,0,0),osg::Vec3d(0,0,1));
-        for (unsigned mode=0; mode<7; ++mode)
-        {
-            INFO("quality=" << quality << " mode=" << mode);
-            Util::LogarithmicDepthBuffer log;
-            log.uninstall(scene.viewer->getCamera());
-            if (mode >= 5)
-            {
-                log.setUseFragDepth(mode == 6);
-                log.install(scene.viewer->getCamera());
-            }
-            ss->setAttributeAndModes(new osg::Depth(mode == 1 ? osg::Depth::LEQUAL : osg::Depth::LESS,
-                0.0,1.0,mode != 2),mode == 3 ? osg::StateAttribute::OFF : osg::StateAttribute::ON);
-            ss->setMode(GL_BLEND,mode == 4 ? osg::StateAttribute::ON : osg::StateAttribute::OFF);
-            sky->setDepthPrepass(false);
-            for (unsigned i=0; i<3; ++i) scene.draw();
-            auto expected = scene.pixels();
-            REQUIRE(energy(expected) > 0.01);
-            sky->setDepthPrepass(true);
-            scene.draw();
-            auto actual = scene.pixels();
-            double maximum = 0.0;
-            for (std::size_t i=0; i<actual.size(); ++i)
-                maximum = std::max(maximum,double(std::abs(actual[i]-expected[i])));
-            CHECK(maximum <= 1.0/255.0+1e-6);
-            REQUIRE(glGetError() == GL_NO_ERROR);
-        }
     }
 }
 
@@ -417,6 +333,42 @@ TEST_CASE("SkyNode2 renders finite ground and orbital views at every quality", "
         REQUIRE(scene.save("sky2-night-"+std::to_string(int(quality))+".png"));
         REQUIRE(glGetError() == GL_NO_ERROR);
     }
+}
+
+// Verifies shader specialization matches the former eight-slot shader, including sparse sun and point-light slots.
+TEST_CASE("SkyNode2 specializes light capacity without changing PBR output", "[sky2][.gl]")
+{
+    osg::ref_ptr<SkyNode2> sky = new SkyNode2;
+    Scene scene(sky);
+    osg::ref_ptr<LightGL3> point = new LightGL3(3);
+    point->setPosition(osg::Vec4(6378150.0f,0,0,1));
+    point->setDiffuse(osg::Vec4(4,2,1,1));
+    osg::ref_ptr<osg::LightSource> source = new osg::LightSource;
+    source->setLight(point);
+    source->setCullingActive(false);
+    source->addCullCallback(new LightSourceGL3UniformGenerator);
+    sky->addChild(source);
+    auto ss = sky->getOrCreateStateSet();
+    for (int sunIndex : {0,7})
+    for (bool localLight : {false,true})
+    {
+        CAPTURE(sunIndex,localLight);
+        sky->attach(scene.viewer,sunIndex);
+        source->setNodeMask(localLight ? ~0u : 0u);
+        ss->setDefine("OE_NUM_LIGHTS","1");
+        scene.draw();
+        auto actual = scene.pixels();
+        REQUIRE(energy(actual) > 0.01);
+        ss->setDefine("OE_NUM_LIGHTS","8",
+            osg::StateAttribute::ON|osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
+        scene.draw();
+        auto reference = scene.pixels();
+        double maximum = 0.0;
+        for (unsigned i=0; i<actual.size(); ++i)
+            maximum = std::max(maximum,double(std::abs(actual[i]-reference[i])));
+        REQUIRE(maximum <= 1.0/255.0+1e-6);
+    }
+    REQUIRE(glGetError() == GL_NO_ERROR);
 }
 
 // Exercises sparse OSG indices, distance attenuation, cone cutoff, disabled lights and the shadow interface.

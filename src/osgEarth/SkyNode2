@@ -29,7 +29,6 @@ namespace osgEarth
             float environmentIntensity = 1.0f;
             bool outputSRGB = true;
             bool toneMapping = true;
-            bool depthPrepass = true; // Reject hidden Chonk fragments before lighting; ordinary GL 3.3 draws are unchanged.
             Config clouds; // Optional <clouds> configuration; absent means no cloud resources.
 
             //! Reads sky2 configuration; invalid scalar settings are sanitized by the node.
@@ -55,9 +54,6 @@ namespace osgEarth
         void setAmbientIntensity(float);
         //! Changes indirect sky lighting strength; zero skips its texture lookups.
         void setEnvironmentIntensity(float);
-        //! Enables a conservative depth prepass for opaque Chonk instancing; disable for sparse or vertex-bound scenes.
-        //! Custom shaders that change depth/coverage specifically in depth cameras must opt out. Update thread only.
-        void setDepthPrepass(bool);
         //! Attaches optional procedural clouds; call on the update thread. Null releases the cloud renderer.
         void setCloudLayer(CloudLayer*);
         //! Returns the attached cloud settings, or null; follow normal update/cull synchronization.

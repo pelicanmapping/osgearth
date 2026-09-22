@@ -10,6 +10,7 @@
 #include <osgDB/ObjectWrapper>
 #include <osg/Light>
 #include <osg/Material>
+#include <algorithm>
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
@@ -196,19 +197,13 @@ LightSourceGL3UniformGenerator::run(osg::Object* obj, osg::Object* data)
 
         osg::StateSet::DefinePair* numLights = ss->getDefinePair("OE_NUM_LIGHTS");
 
-        if (fs != cv->getFrameStamp()->getFrameNumber())
-        {
-            ss->setDefine("OE_NUM_LIGHTS", "1", osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
-            fsu->set(cv->getFrameStamp()->getFrameNumber());
-        }
-        else
-        {
-            int value = 1;
-            if (numLights) {
-                value = ::atoi(numLights->first.c_str()) + 1;
-            }
-            ss->setDefine("OE_NUM_LIGHTS", Stringify() << value, osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
-        }
+        // Size the shader array by its highest occupied index, not by the number of visited sources.
+        // Sparse indices and repeated visits to one light must not truncate or inflate the array.
+        int capacity = std::max(1, light->getLightNum() + 1);
+        if (fs == cv->getFrameStamp()->getFrameNumber() && numLights)
+            capacity = std::max(capacity, ::atoi(numLights->first.c_str()));
+        ss->setDefine("OE_NUM_LIGHTS", Stringify() << capacity, osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+        fsu->set(cv->getFrameStamp()->getFrameNumber());
     }
     return traverse(obj, data);
 }

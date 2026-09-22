@@ -601,8 +601,6 @@ namespace osgEarth
         friend class ChonkDrawable;
 
         osg::ref_ptr<osgUtil::StateGraph> _cull_sg;
-        osg::ref_ptr<osg::StateSet> _depthSS;
-        osg::ref_ptr<osgUtil::StateGraph> _depth_sg;
 
         struct CullLeaf : public Util::CustomRenderLeaf {
             CullLeaf(osgUtil::RenderLeaf*);

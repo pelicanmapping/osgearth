@@ -1,9 +1,6 @@
 #pragma vp_function oe_chonk_default_vertex_model, vertex_model, 0.0
 #pragma import_defines(OE_IS_SHADOW_CAMERA)
 #pragma import_defines(OE_IS_DEPTH_CAMERA)
-#pragma import_defines(OE_CHONK_DEPTH_PREPASS)
-// Keep depth and color variants rasterizing exactly the same positions.
-invariant gl_Position;
 // Available after vertex_model order 0.0; callers own projection and render-target routing.
 int oe_chonk_view_index;
 #pragma import_defines(OE_CHONK_MAX_LOD_FOR_NORMAL_MAPS)
@@ -116,9 +113,7 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
     oe_material2_tex = chonkMaterials[material_index].material2;
 
 #if defined(OE_IS_SHADOW_CAMERA) || defined(OE_IS_DEPTH_CAMERA)
-#ifndef OE_CHONK_DEPTH_PREPASS
     oe_fade = 1.0;
-#endif
     return;
 #endif
 
@@ -156,7 +151,6 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
 #pragma vp_function oe_chonk_default_fragment, fragment
 #pragma import_defines(OE_IS_SHADOW_CAMERA)
 #pragma import_defines(OE_IS_DEPTH_CAMERA)
-#pragma import_defines(OE_CHONK_DEPTH_PREPASS)
 #pragma import_defines(OE_USE_ALPHA_TO_COVERAGE)
 #pragma import_defines(OE_GL_RG_COMPRESSED_NORMALS)
 #pragma import_defines(OE_GPUCULL_DEBUG)
@@ -235,7 +229,7 @@ void oe_chonk_default_fragment(inout vec4 color)
                         12.92 * c, lessThanEqual(c, vec3(0.0031308)));
     }
 
-#if (defined(OE_IS_SHADOW_CAMERA) || defined(OE_IS_DEPTH_CAMERA)) && !defined(OE_CHONK_DEPTH_PREPASS)
+#if defined(OE_IS_SHADOW_CAMERA) || defined(OE_IS_DEPTH_CAMERA)
 
     // for shadowing cameras, just do a simple step discard.
     color.a = step(oe_shadow_alpha_discard_threshold, color.a * oe_fade);
@@ -284,11 +278,6 @@ void oe_chonk_default_fragment(inout vec4 color)
   #endif // !OE_USE_ALPHA_TO_COVERAGE
 
 #endif // !OE_GPUCULL_DEBUG
-
-#ifdef OE_CHONK_DEPTH_PREPASS
-    // Match color-pass coverage, including mip-adjusted cutouts and per-instance fades.
-    return;
-#endif
 
     vec3 normal_view = vp_Normal;
 

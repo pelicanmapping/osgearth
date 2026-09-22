@@ -21,10 +21,6 @@
 #include <osg/MatrixTransform>
 #include <osg/CullFace>
 #include <osg/FrontFace>
-#include <osg/ColorMask>
-#include <osg/Depth>
-#include <osg/PolygonOffset>
-#include <osg/PolygonMode>
 #include <cstdlib>
 #include <stdexcept>
 #include <limits>
@@ -2705,23 +2701,6 @@ ChonkRenderBin::ChonkRenderBin(const ChonkRenderBin& rhs, const osg::CopyOp& op)
     // cull program
     _cull_sg = new osgUtil::StateGraph();
     _cull_sg->_stateset = _cullSS.get();
-
-    // A conservative depth pass rejects hidden fragments without changing LESS/LEQUAL tie-breaking.
-    // EQUAL with depth writes disabled would change the winner of coplanar, differently colored faces.
-    _depthSS = new osg::StateSet;
-    _depthSS->setDefine("OE_IS_DEPTH_CAMERA");
-    _depthSS->setDefine("OE_CHONK_DEPTH_PREPASS");
-    GLUtils::setLighting(_depthSS,osg::StateAttribute::OFF|osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
-    _depthSS->setAttributeAndModes(new osg::ColorMask(false,false,false,false),osg::StateAttribute::ON|
-        osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
-    _depthSS->setAttributeAndModes(new osg::Depth(osg::Depth::LEQUAL,0.0,1.0,true),osg::StateAttribute::ON|
-        osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
-    _depthSS->setAttributeAndModes(new osg::PolygonOffset(0.0f,1.0f),osg::StateAttribute::ON|
-        osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
-    _depthSS->setMode(GL_POLYGON_OFFSET_FILL,osg::StateAttribute::ON|
-        osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
-    _depth_sg = new osgUtil::StateGraph;
-    _depth_sg->_stateset = _depthSS;
 }
 
 
@@ -2778,62 +2757,6 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
     }
 }
 
-namespace
-{
-    //! Resolves the limited inherited state relevant to a conservative opaque depth prepass, without copying uniforms.
-    struct ChonkPrepassState
-    {
-        using Value = osg::StateAttribute::OverrideValue;
-        Value requested = 0, lighting = 0, blend = 0, stencil = 0, offset = 0;
-        Value depthTest = osg::StateAttribute::ON;
-        const osg::StateSet::RefAttributePair* depth = nullptr;
-        bool specialPass = false;
-
-        //! Applies an inherited mode or define using OSG's OVERRIDE/PROTECTED rules.
-        static void inherit(Value& current, Value next)
-        {
-            if (!(next & osg::StateAttribute::INHERIT) &&
-                (!(current & osg::StateAttribute::OVERRIDE) || (next & osg::StateAttribute::PROTECTED)))
-                current = next;
-        }
-
-        //! Visits root-to-leaf state on the draw thread; special camera/depth shaders conservatively opt out.
-        void collect(const osgUtil::StateGraph* graph)
-        {
-            if (!graph) return;
-            collect(graph->_parent);
-            auto ss = graph->getStateSet();
-            if (!ss) return;
-            if (auto value = ss->getDefinePair("OE_CHONK_PREPASS_ENABLED")) inherit(requested,value->second);
-            if (auto value = ss->getDefinePair("OE_LIGHTING")) inherit(lighting,value->second);
-            for (auto name : {"OE_IS_DEPTH_CAMERA","OE_IS_SHADOW_CAMERA","OE_IS_PICK_CAMERA"})
-                if (auto value = ss->getDefinePair(name)) specialPass |= (value->second & osg::StateAttribute::ON) != 0;
-            inherit(blend,ss->getMode(GL_BLEND));
-            inherit(stencil,ss->getMode(GL_STENCIL_TEST));
-            inherit(offset,ss->getMode(GL_POLYGON_OFFSET_FILL));
-            inherit(depthTest,ss->getMode(GL_DEPTH_TEST));
-            if (auto value = ss->getAttributePair(osg::StateAttribute::DEPTH))
-                if (!depth || !(depth->second & osg::StateAttribute::OVERRIDE) ||
-                    (value->second & osg::StateAttribute::PROTECTED)) depth = value;
-            if (auto polygon = dynamic_cast<const osg::PolygonMode*>(ss->getAttribute(osg::StateAttribute::POLYGONMODE)))
-                specialPass |= polygon->getMode(osg::PolygonMode::FRONT) != osg::PolygonMode::FILL ||
-                    polygon->getMode(osg::PolygonMode::BACK) != osg::PolygonMode::FILL;
-            // Polygon offset does not bias an explicitly written gl_FragDepth. Keep precise logarithmic depth intact.
-            if (auto vp = VirtualProgram::get(ss)) specialPass |= vp->getPolyShader("oe_logDepth_frag") != nullptr;
-        }
-
-        //! Restricts the optimization to ordinary opaque forward lighting with the standard increasing depth range.
-        bool enabled() const
-        {
-            if (!(requested & lighting & depthTest & osg::StateAttribute::ON) || specialPass ||
-                ((blend | stencil | offset) & osg::StateAttribute::ON)) return false;
-            auto value = depth ? dynamic_cast<const osg::Depth*>(depth->first.get()) : nullptr;
-            return !value || (value->getWriteMask() && value->getZNear() == 0.0 && value->getZFar() == 1.0 &&
-                (value->getFunction() == osg::Depth::LESS || value->getFunction() == osg::Depth::LEQUAL));
-        }
-    };
-}
-
 void
 ChonkRenderBin::drawImplementation(
     osg::RenderInfo& ri,
@@ -2859,13 +2782,6 @@ ChonkRenderBin::drawImplementation(
     _cull_sg->_parent = draw_sg;
     _cull_sg->_leaves.clear();
 
-    ChonkPrepassState prepassState;
-    prepassState.collect(draw_sg);
-    bool prepass = prepassState.enabled();
-    _depth_sg->_parent = draw_sg;
-    _depth_sg->_depth = draw_sg->_depth+1;
-    _depth_sg->_leaves.clear();
-
     for(unsigned i=0; i<_renderLeafList.size(); ++i)
     {
         auto leaf = _renderLeafList[i];
@@ -2873,9 +2789,6 @@ ChonkRenderBin::drawImplementation(
         bool last = (i == _renderLeafList.size() - 1);
 
         _cull_sg->addLeaf(new CullLeaf(leaf));
-        // Both draws reuse the same culled indirect commands and immutable instance/fade data.
-        if (prepass)
-            _depth_sg->addLeaf(new DrawLeaf(leaf,first,last));
         draw_sg->addLeaf(new DrawLeaf(leaf, first, last));
     }
 
@@ -2883,8 +2796,6 @@ ChonkRenderBin::drawImplementation(
     _renderLeafList.clear();
     _stateGraphList.clear();
     _stateGraphList.push_back(_cull_sg.get());
-    if (prepass)
-        _stateGraphList.push_back(_depth_sg);
     _stateGraphList.push_back(draw_sg);
 
     // dispatch.

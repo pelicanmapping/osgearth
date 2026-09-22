@@ -11,7 +11,9 @@ void oe_sky2_vertex(inout vec4 vertex) { }
 #pragma vp_order 0.8
 #pragma import_defines(OE_LIGHTING, OE_NUM_LIGHTS, OE_SHADOWING)
 #pragma import_defines(OE_SKY2_ATMOSPHERE, OE_SKY2_SRGB, OE_SKY2_TONEMAP)
+#pragma import_defines(OE_CLOUD_LAYER)
 #pragma include SkyNode2.Common.glsl
+#pragma include CloudLayer.Common.glsl
 
 in vec3 vp_Normal;
 in vec3 vp_VertexView;
@@ -108,6 +110,9 @@ void oe_sky2_lighting(inout vec4 color)
 #ifdef OE_SHADOWING
             light *= oe_shadow_visibility;
 #endif
+#ifdef OE_CLOUD_LAYER
+            light *= oe_cloud_shadow(earthPosition);
+#endif
         }
         if (max(light.r,max(light.g,light.b)) > 0.0)
             radiance += light*oe_s2_brdf(N,V,L,albedo,f0,metal,a2,nv,nl);
@@ -141,6 +146,10 @@ void oe_sky2_lighting(inout vec4 color)
         oe_s2_aerial(oe_s2_normalize(ray,vec3(0,0,1)),length(ray),scattering,transmission);
         radiance = radiance*transmission+scattering;
     }
+#endif
+#ifdef OE_CLOUD_LAYER
+    vec3 cloudRay = oe_sky2_viewToEarth*vp_VertexView;
+    radiance = oe_cloud_apply(radiance,oe_s2_normalize(cloudRay,vec3(0,0,1)),length(cloudRay));
 #endif
     color.rgb = oe_s2_output(radiance);
 #endif

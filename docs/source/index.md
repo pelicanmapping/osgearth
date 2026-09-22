@@ -22,6 +22,7 @@ Let's get started!
 * [Working with Data](data.md)
 * [Layer Reference](layers.md)
 * [SkyNode2 Lighting and Atmosphere](sky2.md)
+* [Procedural Volumetric Clouds](clouds.md)
 * [Sun Shadows](shadows.md)
 * [Chonk Multi-view Rendering](chonk-multiview.md)
 * [Environment Variables](envvars.md)

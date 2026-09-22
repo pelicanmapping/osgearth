@@ -49,7 +49,11 @@ void main()
         vec3 H = tangent*(sine*cos(azimuth))+bitangent*(sine*sin(azimuth))+N*cosine;
         vec3 L = level > 5.5 ? H : reflect(-N,H);
         float w = level > 5.5 ? 1.0 : max(0.0,dot(N,L));
-        sum += oe_s2_sky(L)*w;
+        vec3 sky = oe_s2_sky(L);
+#ifdef OE_CLOUD_LAYER
+        sky = oe_cloud_apply(sky,L,1e8);
+#endif
+        sum += sky*w;
         weight += w;
     }
     oe_s2_result = vec4(sum/max(weight,1e-6),1.0);

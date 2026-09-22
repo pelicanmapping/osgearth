@@ -9,9 +9,10 @@
 
 namespace osgEarth
 {
+    class CloudLayer;
     /**
      * Unified Earth atmosphere and metallic/roughness lighting. Add the map beneath
-     * this node, then attach it to each view. Requires desktop OpenGL 3.3.
+     * this node, then attach it to each view. Requires desktop OpenGL 3.3; optional clouds require OpenGL 4.3.
      * Construct and change settings on the update thread, before concurrent cull/draw.
      * Camera-specific resources are isolated; no camera is retained by this node.
      */
@@ -28,6 +29,7 @@ namespace osgEarth
             float environmentIntensity = 1.0f;
             bool outputSRGB = true;
             bool toneMapping = true;
+            Config clouds; // Optional <clouds> configuration; absent means no cloud resources.
 
             //! Reads sky2 configuration; invalid scalar settings are sanitized by the node.
             explicit Options(const ConfigOptions& = ConfigOptions());
@@ -52,6 +54,10 @@ namespace osgEarth
         void setAmbientIntensity(float);
         //! Changes indirect sky lighting strength; zero skips its texture lookups.
         void setEnvironmentIntensity(float);
+        //! Attaches optional procedural clouds; call on the update thread. Null releases the cloud renderer.
+        void setCloudLayer(CloudLayer*);
+        //! Returns the attached cloud settings, or null; follow normal update/cull synchronization.
+        CloudLayer* getCloudLayer() const;
         //! Updates ephemerides and culls per-camera lookup passes and the ordinary child graph.
         void traverse(osg::NodeVisitor&) override;
         //! Releases per-context GPU objects, including off-graph lookup cameras.

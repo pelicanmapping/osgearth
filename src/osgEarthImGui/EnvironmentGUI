@@ -8,6 +8,7 @@
 #include <osgEarth/Ephemeris>
 #include <osgEarth/Sky>
 #include <osgEarth/SkyNode2>
+#include <osgEarth/CloudLayer>
 #include <osgEarth/ShaderLoader>
 #include <osgEarth/Shadowing>
 #include <osgEarth/VirtualProgram>
@@ -397,6 +398,66 @@ namespace osgEarth
                         auto color = sky2->getSunLight()->getDiffuse();
                         if (ImGuiLTable::ColorEdit3("Sun color", &color[0], ImGuiColorEditFlags_Float))
                             changeSky(ri,[color](SkyNode& sky) { sky.getSunLight()->setDiffuse(color); });
+                        ImGuiLTable::Section("Procedural clouds:");
+                        auto cloud = sky2->getCloudLayer();
+                        bool cloudEnabled = cloud && cloud->getOptions().enabled;
+                        if (ImGuiLTable::Checkbox("Clouds", &cloudEnabled))
+                        {
+                            changeSky(ri,[cloudEnabled](SkyNode& sky)
+                            {
+                                auto& host = static_cast<SkyNode2&>(sky);
+                                if (!host.getCloudLayer()) host.setCloudLayer(new CloudLayer);
+                                auto options = host.getCloudLayer()->getOptions();
+                                options.enabled = cloudEnabled;
+                                host.getCloudLayer()->setOptions(options);
+                            });
+                        }
+                        if (cloud)
+                        {
+                            auto controls = cloud->getOptions();
+                            int quality = int(controls.quality);
+                            bool changed = ImGuiLTable::SliderInt("Cloud quality", &quality, 0, 2);
+                            controls.quality = static_cast<CloudLayer::Quality>(quality);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0: Low  1: Balanced  2: High");
+                            changed |= ImGuiLTable::SliderFloat("Coverage", &controls.coverage, 0.0f, 1.0f);
+                            changed |= ImGuiLTable::SliderFloat("Cloud density", &controls.density, 0.0f, 5.0f);
+                            changed |= ImGuiLTable::SliderFloat("Cloud base (m)", &controls.baseAltitude, 0.0f, 10000.0f);
+                            changed |= ImGuiLTable::SliderFloat("Cloud top (m)", &controls.topAltitude, 100.0f, 20000.0f);
+                            changed |= ImGuiLTable::SliderFloat("Cloud fade starts (m)", &controls.fadeStartAltitude,
+                                controls.topAltitude, 100000.0f);
+                            changed |= ImGuiLTable::SliderFloat("Cloud hidden above (m)", &controls.fadeEndAltitude,
+                                controls.fadeStartAltitude+100.0f, 200000.0f);
+                            changed |= ImGuiLTable::SliderFloat("Cloud size (m)", &controls.size, 500.0f, 15000.0f);
+                            changed |= ImGuiLTable::SliderFloat("Cloud erosion", &controls.erosion, 0.0f, 1.0f);
+                            changed |= ImGuiLTable::SliderFloat("Cloud shadows", &controls.shadowStrength, 0.0f, 1.0f);
+                            changed |= ImGuiLTable::Checkbox("Crepuscular rays", &controls.crepuscularRays);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Cloud shadows in atmospheric haze. Optional extra GPU work.");
+                            if (controls.crepuscularRays)
+                            {
+                                int rayQuality = int(controls.rayQuality);
+                                changed |= ImGuiLTable::SliderInt("Ray quality", &rayQuality, 0, 2);
+                                controls.rayQuality = static_cast<CloudLayer::Quality>(rayQuality);
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("0: Low  1: Balanced  2: High");
+                                changed |= ImGuiLTable::SliderFloat("Ray strength", &controls.rayStrength, 0.0f, 1.0f);
+                                changed |= ImGuiLTable::SliderFloat("Ray intensity", &controls.rayIntensity, 0.0f, 8.0f);
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("Sunlight scattering without increasing haze opacity. 1 is unamplified.");
+                                changed |= ImGuiLTable::SliderFloat("Ray haze", &controls.rayHaze, 0.0f, 4.0f);
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("Extra low-altitude haze that reveals sunbeams. "
+                                        "Zero uses existing air only.");
+                                changed |= ImGuiLTable::SliderFloat("Ray distance (m)", &controls.rayDistance,
+                                    1000.0f, 100000.0f);
+                            }
+                            changed |= ImGuiLTable::SliderFloat("Cloud wind X (m/s)", &controls.wind.x(), -100.0f, 100.0f);
+                            if (changed)
+                                changeSky(ri,[controls](SkyNode& sky)
+                                {
+                                    auto layer = static_cast<SkyNode2&>(sky).getCloudLayer();
+                                    if (layer) layer->setOptions(controls);
+                                });
+                        }
                     }
                     else if (lighting)
                     {

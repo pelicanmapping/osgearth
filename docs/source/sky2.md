@@ -122,7 +122,8 @@ primary supported projection.
 
 ## Approximation boundaries
 
-This is a clear-sky renderer: no clouds, weather, local reflection captures,
+Optional [procedural volumetric clouds](clouds.md) attach through `setCloudLayer` or a nested `<clouds>` block.
+Cloud-free rendering remains the default. The base renderer has no local reflection captures,
 screen-space ambient occlusion, terrain-aware indirect occlusion, or automatic
 exposure. Ambient occlusion comes from materials, and terrain shadows come from
 the existing shadow system. The low-resolution aerial volume can smooth distant

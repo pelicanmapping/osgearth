@@ -91,6 +91,11 @@ set(TARGET_GLSL
     WireLines.glsl
     PhongLighting.glsl
     SkyNode2.Common.glsl
+    CloudLayer.Common.glsl
+    CloudLayer.Density.glsl
+    CloudLayer.Compute.glsl
+    CloudLayer.Rays.glsl
+    CloudLayer.Light.glsl
     SkyNode2.Lighting.glsl
     SkyNode2.LUT.glsl
     SkyNode2.Background.glsl
@@ -408,6 +413,7 @@ SET(TARGET_H
     Skins
     Sky
     SkyNode2
+    CloudLayer
     SkyView
     SpatialReference
     StarData
@@ -761,6 +767,7 @@ set(TARGET_SRC
     Skins.cpp
     Sky.cpp
     SkyNode2.cpp
+    CloudLayer.cpp
     SkyView.cpp
     SpatialReference.cpp
     StateSetCache.cpp

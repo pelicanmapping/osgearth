@@ -1,0 +1,69 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarth/Config>
+#include <osg/Referenced>
+#include <osg/Vec3>
+
+namespace osgEarth
+{
+    /** Procedural cloud settings, independent of scene graph and sky implementation.
+     * Change settings on the update thread, before concurrent cull/draw. Renderers own per-view GPU resources.
+     */
+    class OSGEARTH_EXPORT CloudLayer : public osg::Referenced
+    {
+    public:
+        enum Quality { LOW, BALANCED, HIGH };
+        struct OSGEARTH_EXPORT Options : public ConfigOptions
+        {
+            bool enabled = true;
+            Quality quality = BALANCED;
+            float coverage = 0.55f;
+            float density = 1.0f;
+            float baseAltitude = 1500.0f;
+            float topAltitude = 4500.0f;
+            float fadeStartAltitude = 20000.0f; // Fully visible below this camera altitude, in meters.
+            float fadeEndAltitude = 100000.0f; // Invisible above this camera altitude, in meters.
+            float size = 4000.0f;
+            float erosion = 0.3f;
+            float shadowStrength = 0.8f;
+            bool crepuscularRays = false; // Optional cloud shadows in atmospheric scattering.
+            Quality rayQuality = BALANCED; // Independent GPU budget for atmospheric rays.
+            float rayStrength = 1.0f; // Blend from existing lighting (0) to shadowed air and additional haze (1).
+            float rayDistance = 50000.0f; // Local atmospheric shadow integration range, in meters.
+            float rayHaze = 0.35f; // Extra low-altitude haze; zero keeps the existing air alone.
+            float rayIntensity = 3.0f; // Sunlight scattering gain independent of haze opacity; 1 is unamplified.
+            osg::Vec3 wind = osg::Vec3(10.0f,0.0f,0.0f); // Earth-fixed meters/second.
+            unsigned seed = 1;
+            unsigned resolution = 0; // View-volume width; zero selects the quality preset.
+            unsigned samples = 0; // Base view samples; grazing rays use up to 4x. Zero selects the preset.
+            unsigned lightSamples = 0; // Secondary samples; zero selects the preset.
+            unsigned depthSlices = 0; // Cumulative distance samples; zero selects the preset.
+
+            //! Reads controls; CloudLayer sanitizes invalid values before rendering.
+            explicit Options(const ConfigOptions& = ConfigOptions());
+            //! Serializes controls including explicit quality overrides and wind in meters/second.
+            Config getConfig() const override;
+        };
+
+        //! Creates sanitized procedural settings; texture generation is deferred until renderer creation.
+        explicit CloudLayer(const Options& = Options());
+        //! Returns sanitized settings; callers must follow the update/cull synchronization contract.
+        const Options& getOptions() const;
+        //! Replaces and sanitizes controls on the update thread; callers synchronize against concurrent traversal.
+        void setOptions(const Options&);
+        //! Returns a monotonically increasing settings revision for dependent renderer invalidation.
+        unsigned getRevision() const;
+        //! Returns smooth altitude visibility in [0,1]; non-finite heights return zero. Uses sanitized meter controls.
+        float getVisibility(double cameraAltitude) const;
+
+    protected:
+        //! Releases settings; rendering resources belong to the hosting sky's renderer.
+        ~CloudLayer() override = default;
+    private:
+        Options _options;
+        unsigned _revision = 0;
+    };
+}

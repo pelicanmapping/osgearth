@@ -15,6 +15,8 @@ set(TARGET_SRC
     PathTests.cpp
     PBRMaterialTests.cpp
     SkyNode2Tests.cpp
+    CloudLayerTests.cpp
+    CloudRayReferenceTests.cpp
     ShadowTests.cpp
     Shadow46Tests.cpp
     ImageLayerTests.cpp

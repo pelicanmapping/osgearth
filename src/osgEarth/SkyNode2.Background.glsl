@@ -47,5 +47,8 @@ void main()
         radiance = radiance*transmission+oe_s2_sky(direction);
     }
 #endif
+#ifdef OE_CLOUD_LAYER
+    radiance = oe_cloud_apply(radiance,direction,1e8);
+#endif
     oe_s2_result = vec4(oe_s2_output(radiance),1.0);
 }

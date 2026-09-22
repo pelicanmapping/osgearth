@@ -21,6 +21,7 @@
 #include <osgUtil/CullVisitor>
 #include <osgViewer/View>
 #include "SkyNode2Atmosphere.h"
+#include "CloudLayerRenderer.h"
 #include <array>
 #include <atomic>
 #include <map>
@@ -71,7 +72,8 @@ namespace
         result->addBindAttribLocation("osg_Vertex",0);
         result->addShader(new osg::Shader(osg::Shader::VERTEX,triangleVertex));
         result->addShader(new osg::Shader(osg::Shader::FRAGMENT,
-            "#version 330\n"+defines+shaders.context().at("SkyNode2.Common.glsl")+shaders.context().at(file)));
+            "#version 330\n"+defines+shaders.context().at("SkyNode2.Common.glsl")+
+            shaders.context().at("CloudLayer.Common.glsl")+shaders.context().at(file)));
         return result;
     }
 
@@ -177,6 +179,8 @@ struct SkyNode2::Impl
     osg::ref_ptr<osg::Texture2D> atmosphere, stars;
     osg::ref_ptr<osg::Program> skyProgram, environmentProgram, aerialProgram, backgroundProgram;
     osg::ref_ptr<TerrainResources> resources;
+    osg::ref_ptr<CloudLayer> clouds;
+    osg::ref_ptr<CloudLayerRenderer> cloudRenderer;
     std::array<TextureImageUnitReservation,4> units;
     std::atomic_bool celestialDirty{true};
     TimeStamp date = 0;
@@ -218,6 +222,7 @@ struct SkyNode2::Impl
         lightSource->setLight(light);
         lightSource->setCullingActive(false);
         lightSource->addCullCallback(new LightSourceGL3UniformGenerator);
+        if (!input.clouds.empty()) clouds = new CloudLayer(CloudLayer::Options(input.clouds));
     }
 
     //! Reserves terrain units and compiles pass descriptions once after the child graph is installed.
@@ -225,12 +230,12 @@ struct SkyNode2::Impl
     {
         if (ready) return;
         atmospheric = options.preset != FLAT;
+        auto terrain = findTopMostNodeOfType<TerrainEngineNode>(&owner);
+        resources = terrain ? terrain->getResources() : new TerrainResources;
+        // Standalone model graphs commonly own material units 0 through 7.
+        if (!terrain) for (int i=0; i<8; ++i) resources->setTextureImageUnitOffLimits(i);
         if (atmospheric)
         {
-            auto terrain = findTopMostNodeOfType<TerrainEngineNode>(&owner);
-            resources = terrain ? terrain->getResources() : new TerrainResources;
-            // Standalone model graphs commonly own material units 0 through 7.
-            if (!terrain) for (int i=0; i<8; ++i) resources->setTextureImageUnitOffLimits(i);
             for (auto& unit : units)
             {
                 if (!resources->reserveTextureImageUnit(unit,"SkyNode2"))
@@ -260,6 +265,86 @@ struct SkyNode2::Impl
             environmentProgram = program(defines,"SkyNode2.LUT.glsl");
         }
         ready = true;
+        configureClouds(owner);
+    }
+
+    //! Adapts clear-air lighting to the independent cloud renderer and updates only the two consuming programs.
+    void configureClouds(SkyNode2& owner)
+    {
+        if (!ready) return;
+        cloudRenderer = nullptr;
+        if (clouds)
+        {
+            Shaders shaders;
+            std::string adapter = atmospheric ? "#define OE_SKY2_ATMOSPHERE\n" : "";
+            adapter += shaders.context().at("SkyNode2.Common.glsl");
+            adapter += R"(
+                // Supplies cumulative clear air to the cloud transport integrator in the host's linear units.
+                void oe_cloud_air(vec3 direction, float distance, out vec3 S, out vec3 T)
+                {
+                    S=vec3(0); T=vec3(1);
+                    #ifdef OE_SKY2_ATMOSPHERE
+                    if (oe_sky2_flags.x>0.5) oe_s2_aerial(direction,distance,S,T);
+                    #endif
+                }
+                // Evaluates solar extinction at cloud altitude, including the planetary night shadow.
+                vec3 oe_cloud_sunlight(vec3 p)
+                {
+                    #ifdef OE_SKY2_ATMOSPHERE
+                    return oe_sky2_solarIrradiance*oe_s2_transmittance(p,oe_sky2_sun);
+                    #else
+                    return oe_s2_occluded(length(p),dot(normalize(p),oe_sky2_sun)) ?
+                        vec3(0) : oe_sky2_solarIrradiance;
+                    #endif
+                }
+                // Uses only clear-air illumination; sampling the cloud-composited environment would create feedback.
+                vec3 oe_cloud_ambient(vec3 p)
+                {
+                    vec3 ambient=vec3(oe_sky2_settings.w);
+                    #ifdef OE_SKY2_ATMOSPHERE
+                    ambient+=oe_s2_sky(normalize(p))*oe_sky2_settings.z*0.5;
+                    #endif
+                    return ambient;
+                }
+                // Direct air scattering per scaled kilometer; cloud shadowing must not remove indirect sky light.
+                vec3 oe_cloud_airSource(vec3 p, vec3 direction)
+                {
+                    #ifdef OE_SKY2_ATMOSPHERE
+                    float r=length(p);
+                    if (oe_sky2_flags.x<0.5 || r<oe_s2_radius || r>oe_s2_top) return vec3(0);
+                    vec3 extinction, rayleigh;
+                    float mie;
+                    oe_s2_medium(r-oe_s2_radius,extinction,rayleigh,mie);
+                    float cosine=dot(direction,oe_sky2_sun), g=0.8;
+                    float phaseR=3.0*(1.0+cosine*cosine)/(16.0*oe_s2_pi);
+                    float phaseM=(1.0-g*g)/(4.0*oe_s2_pi*pow(max(0.01,1.0+g*g-2.0*g*cosine),1.5));
+                    return oe_sky2_solarIrradiance*oe_s2_transmittance(p,oe_sky2_sun)*(rayleigh*phaseR+mie*phaseM);
+                    #else
+                    return vec3(0);
+                    #endif
+                }
+            )";
+            cloudRenderer = new CloudLayerRenderer(clouds,resources,adapter);
+            if (!cloudRenderer->valid()) cloudRenderer = nullptr;
+        }
+        auto ss = owner.getOrCreateStateSet();
+        if (cloudRenderer) ss->setDefine("OE_CLOUD_LAYER"); else ss->removeDefine("OE_CLOUD_LAYER");
+        std::string defines;
+        if (options.toneMapping) defines += "#define OE_SKY2_TONEMAP\n";
+        if (options.outputSRGB) defines += "#define OE_SKY2_SRGB\n";
+        if (atmospheric) defines += "#define OE_SKY2_ATMOSPHERE\n";
+        if (cloudRenderer) defines += "#define OE_CLOUD_LAYER\n";
+        backgroundProgram = program(defines,"SkyNode2.Background.glsl");
+        defines += std::string("#define OE_SKY2_FILTER_SAMPLES ")+(options.preset == HIGH ? "32\n" : "16\n");
+        if (atmospheric) environmentProgram = program(defines,"SkyNode2.LUT.glsl");
+        for (auto& entry : views)
+        for (auto& frame : entry.second->frames)
+        {
+            if (frame.background) frame.background->getOrCreateStateSet()->setAttributeAndModes(backgroundProgram,
+                osg::StateAttribute::ON|osg::StateAttribute::OVERRIDE);
+            if (frame.environmentPass) frame.environmentPass = pass(frame.environment,environmentProgram,-100);
+            frame.valid = false;
+        }
     }
 
     //! Allocates a frame's private LUTs and uniforms once; subsequent culls reuse them.
@@ -296,9 +381,9 @@ struct SkyNode2::Impl
             f.sky = target(width,height,true);
             f.environment = target(64,224,true);
             f.aerial = target(64*slices,64); // 64 azimuths x 32 elevations; RGB radiance and transmission halves.
-            f.skyPass = pass(f.sky,skyProgram,-103);
-            f.environmentPass = pass(f.environment,environmentProgram,-102);
-            f.aerialPass = pass(f.aerial,aerialProgram,-101);
+            f.skyPass = pass(f.sky,skyProgram,-104);
+            f.environmentPass = pass(f.environment,environmentProgram,-100);
+            f.aerialPass = pass(f.aerial,aerialProgram,-103);
             f.state->setTextureAttributeAndModes(units[0].unit(),atmosphere);
             f.state->setTextureAttributeAndModes(units[1].unit(),f.sky);
             f.state->setTextureAttributeAndModes(units[2].unit(),f.environment);
@@ -432,12 +517,34 @@ struct SkyNode2::Impl
         if (atmospheric && !f.scheduled)
         {
             // Pass programs only sample their inputs; their output samplers are compiled out.
-            if (skyDirty) { f.skyPass->accept(cv); f.environmentPass->accept(cv); }
+            if (skyDirty) f.skyPass->accept(cv);
             if (skyDirty) f.aerialPass->accept(cv);
-            f.scheduled = true;
         }
+        osg::StateSet* cloudState = nullptr;
+        osg::StateSet* cloudEnvironmentState = nullptr;
+        if (cloudRenderer)
+        {
+            CloudLayerRenderer::Frame input;
+            input.eye = shaderEye; input.sun = osg::Vec3(sun); input.basis = shaderBasis; input.horizon = horizon;
+            input.viewToEarth = matrix3(toEarth);
+            input.earthToView = matrix3(osg::Matrixd::inverse(toEarth));
+            input.projection = osg::Matrixf(*cv.getProjectionMatrix());
+            input.inverseProjection = osg::Matrixf::inverse(*cv.getProjectionMatrix());
+            input.time = cv.getFrameStamp() ? cv.getFrameStamp()->getSimulationTime() : 0.0;
+            input.airScattering = atmospheric && owner.getAtmosphereVisible() && solar.length2() > 0.0f;
+            cloudState = cloudRenderer->cull(cv,input,cloudEnvironmentState);
+            if (cloudState) cv.pushStateSet(cloudState);
+        }
+        if (atmospheric && !f.scheduled && (skyDirty || cloudState))
+        {
+            if (cloudEnvironmentState) cv.pushStateSet(cloudEnvironmentState);
+            f.environmentPass->accept(cv);
+            if (cloudEnvironmentState) cv.popStateSet();
+        }
+        f.scheduled = true;
         f.background->accept(cv);
         owner.SkyNode::traverse(cv);
+        if (cloudState) cv.popStateSet();
         cv.popStateSet();
         f.lastEye = shaderEye; f.lastSun = sun;
         f.lastSolar = solar;
@@ -461,6 +568,7 @@ SkyNode2::Options::Options(const ConfigOptions& input) : SkyOptions(input)
     input.getConfig().get("environment_intensity",environmentIntensity);
     input.getConfig().get("output_srgb",outputSRGB);
     input.getConfig().get("tone_mapping",toneMapping);
+    clouds = input.getConfig().child("clouds");
 }
 
 Config SkyNode2::Options::getConfig() const
@@ -472,6 +580,7 @@ Config SkyNode2::Options::getConfig() const
     config.set("environment_intensity",environmentIntensity);
     config.set("output_srgb",outputSRGB);
     config.set("tone_mapping",toneMapping);
+    if (!clouds.empty()) config.add(clouds);
     return config;
 }
 
@@ -499,6 +608,15 @@ SkyNode2::SkyNode2(const Options& options) : SkyNode(options), _impl(new Impl(op
 SkyNode2::~SkyNode2() = default;
 const SkyNode2::Options& SkyNode2::getOptions() const { return _impl->options; }
 osg::Light* SkyNode2::getSunLight() const { return _impl->light; }
+CloudLayer* SkyNode2::getCloudLayer() const { return _impl->clouds.get(); }
+
+void SkyNode2::setCloudLayer(CloudLayer* layer)
+{
+    if (_impl->clouds == layer) return;
+    _impl->clouds = layer;
+    _impl->options.clouds = layer ? layer->getOptions().getConfig() : Config();
+    _impl->configureClouds(*this);
+}
 
 void SkyNode2::attach(osg::View* view, int lightNum)
 {
@@ -595,6 +713,7 @@ void SkyNode2::releaseGLObjects(osg::State* state) const
         frame.scheduled = false;
     }
     _impl->lightSource->releaseGLObjects(state);
+    if (_impl->cloudRenderer) _impl->cloudRenderer->releaseGLObjects(state);
 }
 
 void SkyNode2::resizeGLObjectBuffers(unsigned size)
@@ -611,6 +730,7 @@ void SkyNode2::resizeGLObjectBuffers(unsigned size)
         if (frame.aerialPass) frame.aerialPass->resizeGLObjectBuffers(size);
     }
     _impl->lightSource->resizeGLObjectBuffers(size);
+    if (_impl->cloudRenderer) _impl->cloudRenderer->resizeGLObjectBuffers(size);
 }
 
 namespace

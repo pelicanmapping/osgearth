@@ -9,6 +9,8 @@
 #include <osgEarth/ExampleResources>
 #include <osgEarth/NodeUtils>
 #include <osgEarth/EarthManipulator>
+#include <osgEarth/WindLayer>
+#include <osgEarth/TerrainEngineNode>
 #include "SkyNode2TestScene.h"
 #include <limits>
 #include <iostream>
@@ -206,6 +208,173 @@ TEST_CASE("Capture cloud rays over a local city", "[cloudraycity][.gl]")
     CHECK(glGetError() == GL_NO_ERROR);
 }
 
+// Shared sources retain units, local east/north directions, runtime edits, and configuration before opening.
+TEST_CASE("WindLayer exposes shared directional weather", "[clouds][cloudsharedwind][wind]")
+{
+    WindLayer::Options input(Config("wind"));
+    osg::ref_ptr<WindLayer> wind = new WindLayer(input);
+    osg::ref_ptr<Wind> east = new Wind;
+    east->setDirection(osg::Vec2(2,0)); east->setSpeed(Speed(10,Units::KNOTS));
+    wind->addWind(east);
+    osg::ref_ptr<Wind> north = new Wind;
+    north->setDirection(osg::Vec2(0,3)); north->setSpeed(Speed(4,Units::METERS_PER_SECOND));
+    wind->addWind(north);
+    osg::ref_ptr<Wind> point = new Wind;
+    point->setType(Wind::TYPE_POINT); point->setSpeed(Speed(100,Units::METERS_PER_SECOND));
+    wind->addWind(point);
+    wind->setSpeedFactor(2.0f);
+    auto velocity = wind->getDirectionalVelocity();
+    CHECK(velocity.x() == Approx(Speed(20,Units::KNOTS).as(Units::METERS_PER_SECOND)));
+    CHECK(velocity.y() == Approx(8.0));
+    WindLayer::Options copy(wind->getConfig());
+    osg::ref_ptr<WindLayer> restored = new WindLayer(copy);
+    CHECK((restored->getDirectionalVelocity()-velocity).length() < 1e-5);
+    wind->removeWind(north);
+    CHECK(wind->getDirectionalVelocity().y() == 0.0);
+    east->setSpeed(Speed(3,Units::METERS_PER_SECOND));
+    CHECK(wind->getDirectionalVelocity().x() == Approx(6.0));
+    wind->setSpeedFactor(-1.0f);
+    CHECK(wind->getDirectionalVelocity().length() == 0.0);
+    wind->setSpeedFactor(std::numeric_limits<float>::quiet_NaN());
+    CHECK(wind->getSpeedFactor() == 1.0f);
+}
+
+// The vegetation LUT must use the same physical units and shared multiplier as cloud motion, including calm wind.
+TEST_CASE("WindLayer GPU consumers share speed units and multiplier", "[clouds][cloudsharedwind][wind][.gl]")
+{
+    osg::ref_ptr<Map> map = new Map;
+    osg::ref_ptr<WindLayer> wind = new WindLayer;
+    osg::ref_ptr<Wind> source = new Wind;
+    source->setSpeed(Speed(10,Units::METERS_PER_SECOND)); wind->addWind(source);
+    map->addLayer(wind);
+    osg::ref_ptr<MapNode> mapNode = new MapNode(map);
+    osg::ref_ptr<SkyNode2> sky = new SkyNode2; sky->addChild(mapNode);
+    Scene scene(sky,32,32);
+    scene.models->setNodeMask(0);
+    osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry;
+    osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array;
+    vertices->push_back(osg::Vec3(-1,-1,0)); vertices->push_back(osg::Vec3(3,-1,0));
+    vertices->push_back(osg::Vec3(-1,3,0)); geometry->setVertexArray(vertices);
+    geometry->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLES,0,3));
+    geometry->setUseDisplayList(false); geometry->setUseVertexBufferObjects(true); geometry->setCullingActive(false);
+    auto state = geometry->getOrCreateStateSet();
+    state->setAttributeAndModes(new osg::Depth(osg::Depth::ALWAYS));
+    state->setRenderBinDetails(100,"RenderBin");
+    ShaderLoader::load(VirtualProgram::getOrCreate(state),R"(
+        #pragma vp_function windUnitClip, vertex_clip, 0.9
+        in vec4 osg_Vertex;
+        // Covers the viewport after the shared wind compute pass.
+        void windUnitClip(inout vec4 vertex) { vertex=vec4(osg_Vertex.xy,0,1); }
+        [break]
+        #pragma vp_function windUnitSample, fragment_lighting, 0.99
+        #pragma import_defines(OE_WIND_TEX)
+        uniform sampler3D OE_WIND_TEX;
+        uniform float oe_wind_power;
+        // Exposes encoded speed and multiplier without lighting or output transforms.
+        void windUnitSample(inout vec4 color)
+        {
+            color=vec4(texture(OE_WIND_TEX,vec3(0.5)).a,oe_wind_power/10.0,0,1);
+        }
+    )");
+    mapNode->addChild(geometry);
+    wind->setSpeedFactor(3.0f); drawAtTime(scene,0.0);
+    auto pixels = scene.pixels();
+    CHECK(std::abs(pixels[0]-10.0/50.0) < 0.005);
+    CHECK(std::abs(pixels[1]-0.3) < 0.005);
+    CHECK(wind->getDirectionalVelocity().x() == Approx(30.0));
+    wind->removeWind(source); drawAtTime(scene,1.0);
+    CHECK(scene.pixels()[0] == 0.0f);
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+// Automatic map wind drives one weather phase across views; changing speed must never rephase existing clouds.
+TEST_CASE("Clouds reuse map wind without motion discontinuities", "[clouds][cloudsharedwind][wind][.gl]")
+{
+    osg::ref_ptr<Map> map = new Map;
+    osg::ref_ptr<SkyNode2> sky = new SkyNode2;
+    osg::ref_ptr<MapNode> mapNode = new MapNode(map);
+    sky->addChild(mapNode);
+    auto options = weather(); options.coverage = 0.6f; options.crepuscularRays = true;
+    options.rayQuality = CloudLayer::LOW; options.rayHaze = 0.5f;
+    osg::ref_ptr<CloudLayer> clouds = new CloudLayer(options);
+    sky->setCloudLayer(clouds);
+    Scene scene(sky,384,216); scene.skyView(350.0);
+    // Keep map discovery and wind traversal, while excluding asynchronous terrain paging from pixel comparisons.
+    drawAtTime(scene,0.0);
+    auto terrainNode = dynamic_cast<osg::Node*>(mapNode->getTerrainEngine());
+    REQUIRE(terrainNode != nullptr); terrainNode->setNodeMask(0);
+    drawAtTime(scene,0.0); auto initial = scene.pixels();
+    osg::ref_ptr<WindLayer> wind = new WindLayer;
+    osg::ref_ptr<Wind> source = new Wind;
+    source->setSpeed(Speed(100,Units::METERS_PER_SECOND));
+    wind->addWind(source); map->addLayer(wind);
+    REQUIRE(wind->isOpen());
+    drawAtTime(scene,0.0);
+    CHECK(difference(initial,scene.pixels()) < 0.0001);
+    drawAtTime(scene,60.0); auto moved = scene.pixels();
+    CHECK(difference(initial,moved) > 0.003);
+    CHECK(wind->getDirectionalDisplacement(60.0).x() == Approx(6000.0));
+    wind->setSpeedFactor(0.0f); drawAtTime(scene,60.0);
+    CHECK(difference(moved,scene.pixels()) < 0.0001);
+    drawAtTime(scene,120.0);
+    CHECK(difference(moved,scene.pixels()) < 0.0001);
+    // A second independent view sees identical weather and cannot advance the shared phase twice.
+    Scene other(sky,384,216); other.skyView(350.0);
+    drawAtTime(other,120.0);
+    CHECK(difference(moved,other.pixels()) < 0.0001);
+    source->setDirection(osg::Vec2(0,1)); wind->setSpeedFactor(2.0f);
+    drawAtTime(scene,120.0);
+    CHECK(difference(moved,scene.pixels()) < 0.0001);
+    drawAtTime(scene,150.0); auto turned = scene.pixels();
+    CHECK(difference(moved,turned) > 0.003);
+    CHECK(wind->getDirectionalDisplacement(150.0).y() == Approx(6000.0));
+    wind->close(); drawAtTime(scene,150.0); drawAtTime(scene,180.0);
+    CHECK(difference(turned,scene.pixels()) < 0.0001);
+    REQUIRE(wind->open().isOK());
+    drawAtTime(scene,180.0); drawAtTime(scene,210.0);
+    CHECK(difference(turned,scene.pixels()) > 0.003);
+    // Explicit providers override map discovery; a removed layer restores the calm fallback.
+    osg::ref_ptr<WindLayer> calm = new WindLayer;
+    REQUIRE(calm->open().isOK());
+    clouds->setWindLayer(calm); drawAtTime(scene,210.0);
+    CHECK(difference(initial,scene.pixels()) < 0.0001);
+    clouds->setWindLayer(nullptr); map->removeLayer(wind); drawAtTime(scene,210.0);
+    CHECK(difference(initial,scene.pixels()) < 0.0001);
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+// Shared east/north advection must feed visible density and projected shadows with the identical moving coordinates.
+TEST_CASE("Shared wind keeps cloud and shadow density aligned", "[clouds][cloudsharedwind][wind][.gl]")
+{
+    osg::ref_ptr<WindLayer> wind = new WindLayer;
+    osg::ref_ptr<Wind> source = new Wind;
+    source->setSpeed(Speed(100,Units::METERS_PER_SECOND)); wind->addWind(source);
+    REQUIRE(wind->open().isOK());
+    osg::ref_ptr<SkyNode2> sky = new SkyNode2;
+    auto options = weather(); options.coverage = 0.55f; options.shadowStrength = 1.0f;
+    options.resolution = 128; options.samples = 256;
+    osg::ref_ptr<CloudLayer> layer = new CloudLayer(options); layer->setWindLayer(wind);
+    sky->setCloudLayer(layer);
+    Scene scene(sky,64,64); scene.skyView(2.0); shadowProbe(scene);
+    osg::ref_ptr<Sun> sun = new Sun(35.0); sky->setEphemeris(sun);
+    osg::Vec3d eye(6378139.0,0,0);
+    scene.viewer->getCamera()->setViewMatrixAsLookAt(eye,eye+sun->direction,osg::Vec3d(0,0,1));
+    double error = 0.0;
+    float lo = 1.0f, hi = 0.0f;
+    for (unsigned step=0; step<24; ++step)
+    {
+        drawAtTime(scene,step*10.0); auto pixels = scene.pixels();
+        error += std::abs(pixels[0]-pixels[1]);
+        lo = std::min(lo,pixels[0]); hi = std::max(hi,pixels[0]);
+    }
+    CHECK(error/24.0 < 0.04);
+    CHECK(hi-lo > 0.1f);
+    CHECK(wind->getDirectionalDisplacement(0.0).length() == 0.0);
+    CHECK(wind->getDirectionalDisplacement(10.0).x() == Approx(1000.0));
+    CHECK(wind->getDirectionalDisplacement(std::numeric_limits<double>::quiet_NaN()).x() == Approx(1000.0));
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
 // Animated shadows must follow the visible, eroded cloud field even with a stationary camera and fixed sunlight.
 TEST_CASE("Ground cloud shadows track the visible wind-advected cloud column", "[clouds][cloudwind][.gl]")
 {
@@ -339,6 +508,67 @@ TEST_CASE("Cloud shafts illuminate air beneath the deck", "[clouds][cloudrays][.
     CHECK(structure > 0.04);
     CHECK(motion/count > 0.002);
     CHECK(difference(off,on) > 0.003);
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+// Clearing weather must remove added ray haze continuously, including its contribution to material environment lighting.
+TEST_CASE("Cloud ray haze clears with decreasing coverage", "[clouds][cloudrays][cloudraycoverage][.gl]")
+{
+    osg::ref_ptr<SkyNode2> sky = new SkyNode2;
+    auto options = weather(); options.quality = CloudLayer::BALANCED;
+    options.baseAltitude = 1500.0f; options.topAltitude = 2300.0f; options.size = 1500.0f;
+    options.density = 4.0f; options.erosion = 0.4f; options.seed = 3;
+    options.crepuscularRays = true; options.rayIntensity = 8.0f; options.rayDistance = 30000.0f;
+    osg::ref_ptr<CloudLayer> layer = new CloudLayer(options);
+    sky->setCloudLayer(layer);
+    Scene scene(sky,640,360);
+    sky->setEphemeris(new Sun(20.0));
+    LogarithmicDepthBuffer depth; depth.install(scene.viewer->getCamera());
+    for (bool ground : {false,true})
+    {
+        if (ground) { scene.models->setNodeMask(~0u); scene.groundView(); }
+        else scene.skyView(350.0);
+        for (auto quality : {CloudLayer::LOW,CloudLayer::HIGH})
+        {
+            options.rayQuality = quality;
+            double previous = 1.0;
+            std::vector<float> nearlyClear;
+            for (float coverage : {0.6f,0.5f,0.4f,0.25f,0.2f,0.1f,0.02f,0.001f,0.0f})
+            {
+                INFO(ground); INFO(quality); INFO(coverage);
+                options.coverage = coverage; options.rayHaze = 0.0f;
+                layer->setOptions(options); scene.draw(); auto reference = scene.pixels();
+                options.rayHaze = 0.5f;
+                layer->setOptions(options); scene.draw(); auto actual = scene.pixels();
+                double added = difference(reference,actual);
+                std::cout << "Ray haze ground=" << ground << " quality=" << int(quality)
+                    << " coverage=" << coverage << " difference=" << added << '\n';
+                if (coverage >= 0.5f) CHECK(added > 0.005);
+                if (coverage <= 0.25f)
+                {
+                    CHECK(added < 0.03);
+                    CHECK(added <= previous+0.0001);
+                    previous = added;
+                }
+                if (coverage <= 0.02f) CHECK(added < 0.002);
+                if (coverage == 0.001f) nearlyClear = actual;
+                if (coverage == 0.0f)
+                {
+                    CHECK(added < 0.0001);
+                    CHECK(difference(nearlyClear,actual) < 0.001);
+                }
+                if (!ground && quality == CloudLayer::HIGH && (coverage == 0.6f || coverage == 0.02f))
+                    REQUIRE(scene.save("cloud-coverage-"+std::to_string(int(coverage*100.0f))+".png"));
+            }
+            // Even the maximum haze setting must converge to clear air instead of popping at zero coverage.
+            options.coverage = 0.001f; options.rayHaze = 4.0f;
+            layer->setOptions(options); scene.draw(); auto maximumHaze = scene.pixels();
+            options.crepuscularRays = false;
+            layer->setOptions(options); scene.draw();
+            CHECK(difference(maximumHaze,scene.pixels()) < 0.001);
+            options.crepuscularRays = true;
+        }
+    }
     CHECK(glGetError() == GL_NO_ERROR);
 }
 

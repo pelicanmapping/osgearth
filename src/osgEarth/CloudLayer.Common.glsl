@@ -10,6 +10,7 @@ uniform vec4 oe_cloud_shape; // coverage, extinction per km, scale in km, erosio
 uniform vec4 oe_cloud_grid; // width, height, depth, shadow strength
 uniform vec3 oe_cloud_sun;
 uniform vec3 oe_cloud_wind;
+uniform vec4 oe_cloud_advection; // east/north sine components, cosine, shared WindLayer active
 uniform vec3 oe_cloud_seed;
 uniform vec4 oe_cloud_shadowOrigin; // center xyz and half width in km
 uniform bool oe_cloud_screenSpace;

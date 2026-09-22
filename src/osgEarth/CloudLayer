@@ -9,6 +9,7 @@
 
 namespace osgEarth
 {
+    class WindLayer;
     /** Procedural cloud settings, independent of scene graph and sky implementation.
      * Change settings on the update thread, before concurrent cull/draw. Renderers own per-view GPU resources.
      */
@@ -33,9 +34,9 @@ namespace osgEarth
             Quality rayQuality = BALANCED; // Independent GPU budget for atmospheric rays.
             float rayStrength = 1.0f; // Blend from existing lighting (0) to shadowed air and additional haze (1).
             float rayDistance = 50000.0f; // Local atmospheric shadow integration range, in meters.
-            float rayHaze = 0.35f; // Extra low-altitude haze; zero keeps the existing air alone.
+            float rayHaze = 0.35f; // Maximum extra haze; fades with coverage from full at 0.6 to none at 0.2.
             float rayIntensity = 3.0f; // Sunlight scattering gain independent of haze opacity; 1 is unamplified.
-            osg::Vec3 wind = osg::Vec3(10.0f,0.0f,0.0f); // Earth-fixed meters/second.
+            osg::Vec3 wind; // Legacy Earth-fixed m/s fallback when no WindLayer is present; default calm.
             unsigned seed = 1;
             unsigned resolution = 0; // View-volume width; zero selects the quality preset.
             unsigned samples = 0; // Base view samples; grazing rays use up to 4x. Zero selects the preset.
@@ -58,12 +59,17 @@ namespace osgEarth
         unsigned getRevision() const;
         //! Returns smooth altitude visibility in [0,1]; non-finite heights return zero. Uses sanitized meter controls.
         float getVisibility(double cameraAltitude) const;
+        //! Retains an explicit wind provider; null uses the host map's WindLayer. Call on the update thread.
+        void setWindLayer(WindLayer*);
+        //! Returns the explicit provider, or null for automatic map wind selection.
+        WindLayer* getWindLayer() const;
 
     protected:
         //! Releases settings; rendering resources belong to the hosting sky's renderer.
-        ~CloudLayer() override = default;
+        ~CloudLayer() override;
     private:
         Options _options;
         unsigned _revision = 0;
+        osg::ref_ptr<WindLayer> _windLayer;
     };
 }

@@ -27,6 +27,7 @@ namespace osgEarth
             float radius = 6360.0f; // Host's ellipsoid-scaled kilometers.
             float horizon = 1.5707963f;
             double time = 0.0;
+            WindLayer* windLayer = nullptr; // Borrowed host map provider during cull; explicit CloudLayer wind wins.
             bool airScattering = false; // Host enables optional rays only when its air scattering is active.
         };
         //! Reserves two sampler units; optional rays reserve one more lazily. Host GLSL also supplies airSource.

@@ -166,6 +166,15 @@ namespace osgEarth
                 view(ri)->getViewerBase()->addUpdateOperation(new OneTimer([caster, change]() { change(*caster); }));
         }
 
+        //! Applies the shared wind multiplier during update, before any wind or cloud cull work.
+        void changeWind(osg::RenderInfo& ri, float factor)
+        {
+            osg::ref_ptr<WindLayer> wind;
+            if (_windLayer.lock(wind) && view(ri) && view(ri)->getViewerBase())
+                view(ri)->getViewerBase()->addUpdateOperation(new OneTimer([wind, factor]()
+                    { wind->setSpeedFactor(factor); }));
+        }
+
     public:
         EnvironmentGUI() : ImGuiPanel("Sky") { }
 
@@ -255,13 +264,19 @@ namespace osgEarth
                 }
 
                 auto sky2 = dynamic_cast<SkyNode2*>(_skyNode.get());
+                // Resolve the active provider each draw so map edits and explicit cloud providers use the same control.
+                std::vector<osg::ref_ptr<WindLayer>> winds;
+                _mapNode->getMap()->getLayers(winds);
+                _windLayer = winds.empty() ? nullptr : winds.front().get();
+                if (sky2 && sky2->getCloudLayer() && sky2->getCloudLayer()->getWindLayer())
+                    _windLayer = sky2->getCloudLayer()->getWindLayer();
                 if (_first)
                 {
                     findNode(_shadowCaster, ri);
                     if (_shadowCaster.valid())
                         _shadows = _shadowCaster->getEnabled();
 
-                    findLayer(_windLayer, ri);
+                    if (_windLayer.valid()) _wind_power = _windLayer->getSpeedFactor();
 
                     // Preserve the scene's selected date/time when opening the
                     // panel; simulation time also drives time-series layers.
@@ -446,11 +461,10 @@ namespace osgEarth
                                 changed |= ImGuiLTable::SliderFloat("Ray haze", &controls.rayHaze, 0.0f, 4.0f);
                                 if (ImGui::IsItemHovered())
                                     ImGui::SetTooltip("Extra low-altitude haze that reveals sunbeams. "
-                                        "Zero uses existing air only.");
+                                        "Fades out as cloud coverage falls from 0.6 to 0.2. Zero uses existing air only.");
                                 changed |= ImGuiLTable::SliderFloat("Ray distance (m)", &controls.rayDistance,
                                     1000.0f, 100000.0f);
                             }
-                            changed |= ImGuiLTable::SliderFloat("Cloud wind X (m/s)", &controls.wind.x(), -100.0f, 100.0f);
                             if (changed)
                                 changeSky(ri,[controls](SkyNode& sky)
                                 {
@@ -518,10 +532,10 @@ namespace osgEarth
                         ImGui::Separator();
                         ImGuiLTable::Section("Wind");
 
-                        if (ImGuiLTable::SliderFloat("Speed mult", &_wind_power, 0.0f, 9.0f, "%.1f", 0) || _first)
+                        _wind_power = _windLayer->getSpeedFactor();
+                        if (ImGuiLTable::SliderFloat("Speed mult", &_wind_power, 0.0f, 9.0f, "%.1f", 0))
                         {
-                            stateset(ri)->addUniform(new osg::Uniform("oe_wind_power", _wind_power),
-                                osg::StateAttribute::OVERRIDE | 0x01);
+                            changeWind(ri,_wind_power);
                             dirtySettings();
                         }
 

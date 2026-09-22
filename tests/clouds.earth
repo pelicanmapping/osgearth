@@ -1,6 +1,15 @@
 <map name="Procedural clouds">
     <xi:include href="readymap_imagery.xml"/>
     <xi:include href="readymap_elevation.xml"/>
+    <wind name="Weather wind">
+        <winds>
+            <wind>
+                <type>directional</type>
+                <direction>1 0</direction>
+                <speed>10m/s</speed>
+            </wind>
+        </winds>
+    </wind>
     <sky2>
         <preset>balanced</preset>
         <hours>16.0</hours>
@@ -13,7 +22,6 @@
             <fade_start_altitude>20000</fade_start_altitude>
             <fade_end_altitude>100000</fade_end_altitude>
             <size>4000</size>
-            <wind_x>10</wind_x>
             <!-- Opt in to atmospheric light shafts, or enable them in EnvironmentGUI. -->
             <crepuscular_rays>false</crepuscular_rays>
             <ray_quality>balanced</ray_quality>

@@ -7,7 +7,16 @@ float oe_cloud_density(vec3 p, bool detail)
 {
     float h = (length(p)-oe_cloud_shell.x-oe_cloud_shell.y)/(oe_cloud_shell.z-oe_cloud_shell.y);
     if (h <= 0.0 || h >= 1.0 || oe_cloud_shape.x <= 0.0) return 0.0;
-    vec3 q = (p-oe_cloud_wind)/(oe_cloud_shape.z*4.0)+oe_cloud_seed;
+    vec3 weatherPosition = p;
+    if (oe_cloud_advection.w > 0.5)
+    {
+        float radius = length(p);
+        vec3 up = p/radius;
+        vec3 east = dot(p.xy,p.xy) > 1e-8 ? normalize(vec3(-p.y,p.x,0)) : vec3(0,1,0);
+        vec3 north = cross(up,east);
+        weatherPosition = p*oe_cloud_advection.z-radius*(east*oe_cloud_advection.x+north*oe_cloud_advection.y);
+    }
+    vec3 q = (weatherPosition-oe_cloud_wind)/(oe_cloud_shape.z*4.0)+oe_cloud_seed;
     float weather = textureLod(oe_cloud_noise,q*0.125,0.0).r;
     float coverage = clamp(oe_cloud_shape.x*(0.55+weather),0.0,1.0);
     vec3 noise = textureLod(oe_cloud_noise,q,0.0).rgb;

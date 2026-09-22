@@ -6,6 +6,7 @@
 #include <osgEarth/Capabilities>
 #include <osgEarth/Shaders>
 #include <osgEarth/CameraUtils>
+#include <osgEarth/WindLayer>
 #include "CloudLayerRenderer.h"
 #include <osg/BindImageTexture>
 #include <osg/DispatchCompute>
@@ -20,6 +21,10 @@
 #include <cstdint>
 
 using namespace osgEarth;
+
+CloudLayer::~CloudLayer() = default;
+void CloudLayer::setWindLayer(WindLayer* layer) { _windLayer = layer; ++_revision; }
+WindLayer* CloudLayer::getWindLayer() const { return _windLayer.get(); }
 
 namespace
 {
@@ -337,6 +342,7 @@ struct CloudLayerRenderer::Impl
         slot.state->addUniform(new osg::Uniform("oe_cloud_shape",osg::Vec4()));
         slot.state->addUniform(new osg::Uniform("oe_cloud_grid",osg::Vec4()));
         slot.state->addUniform(new osg::Uniform("oe_cloud_wind",osg::Vec3()));
+        slot.state->addUniform(new osg::Uniform("oe_cloud_advection",osg::Vec4(0,0,1,0)));
         slot.state->addUniform(new osg::Uniform("oe_cloud_seed",osg::Vec3()));
         slot.state->addUniform(new osg::Uniform("oe_cloud_shadowOrigin",osg::Vec4()));
         slot.state->addUniform(new osg::Uniform("oe_cloud_samples",64));
@@ -451,6 +457,10 @@ osg::StateSet* CloudLayerRenderer::cull(osgUtil::CullVisitor& cv, const Frame& i
     environmentState = nullptr;
     if (!valid()) return nullptr;
     const auto& options = _impl->layer->getOptions();
+    WindLayer* windLayer = _impl->layer->getWindLayer();
+    if (!windLayer) windLayer = input.windLayer;
+    osg::Vec2d displacement;
+    if (windLayer) displacement = windLayer->getDirectionalDisplacement(input.time)*0.001;
     double altitude = (osg::Vec3d(input.eye).length()-input.radius)*1000.0;
     float visibility = _impl->layer->getVisibility(altitude);
     // No per-view volume allocation or compute work outside the altitude range, including first visits from orbit.
@@ -509,8 +519,12 @@ osg::StateSet* CloudLayerRenderer::cull(osgUtil::CullVisitor& cv, const Frame& i
     state->getUniform("oe_cloud_raysEnabled")->set(rays);
     if (rays)
     {
+        // Sparse clouds expose the whole aerosol layer to sunlight, producing a uniform wash instead of shafts.
+        // Fade only the added medium as the deck clears; retain shadowing of the host's existing atmosphere.
+        float hazeCoverage = osg::clampBetween((options.coverage-0.2f)/0.4f,0.0f,1.0f);
+        hazeCoverage = hazeCoverage*hazeCoverage*(3.0f-2.0f*hazeCoverage);
         state->getUniform("oe_cloud_raySettings")->set(osg::Vec4(options.rayDistance*0.001f,
-            options.rayStrength,float(raySteps[rayPreset]),options.rayHaze*0.02f));
+            options.rayStrength,float(raySteps[rayPreset]),options.rayHaze*0.02f*hazeCoverage));
         state->getUniform("oe_cloud_rayIntensity")->set(options.rayIntensity);
         state->getUniform("oe_cloud_rayGrid")->set(osg::Vec3(float(rayWidth),float(rayHeight),float(rayDepth)));
         state->getUniform("oe_cloud_sunSamples")->set(int(sunSteps[rayPreset]));
@@ -541,6 +555,19 @@ osg::StateSet* CloudLayerRenderer::cull(osgUtil::CullVisitor& cv, const Frame& i
     for (unsigned i=0; i<3; ++i)
         wind[i] = float(std::fmod(input.time*options.wind[i]*0.001,period));
     state->getUniform("oe_cloud_wind")->set(wind);
+    // Backtrace east/north flow on the cloud shell, independently of camera position and view count.
+    // Precompute the angle on the CPU; density samples need only a local tangent basis, with no extra textures.
+    osg::Vec4 advection(0,0,1,0);
+    if (windLayer)
+    {
+        double distance = displacement.length();
+        double radius = input.radius+(options.baseAltitude+options.topAltitude)*0.0005;
+        double angle = std::fmod(distance/radius,2.0*osg::PI);
+        double scale = distance > 0.0 ? std::sin(angle)/distance : 0.0;
+        advection.set(float(displacement.x()*scale),float(displacement.y()*scale),float(std::cos(angle)),1.0f);
+        state->getUniform("oe_cloud_wind")->set(osg::Vec3());
+    }
+    state->getUniform("oe_cloud_advection")->set(advection);
     state->getUniform("oe_cloud_seed")->set(osg::Vec3(hash(options.seed,1,2)*8.0f,
         hash(options.seed,3,4)*8.0f,hash(options.seed,5,6)*8.0f));
     osg::Vec3 center = input.eye; center.normalize(); center *= input.radius+0.001f;

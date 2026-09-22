@@ -8,6 +8,7 @@
 #include <osgEarth/Layer>
 #include <osgEarth/TerrainResources>
 #include <osgEarth/Units>
+#include <mutex>
 
 namespace osgEarth
 {
@@ -73,6 +74,7 @@ namespace osgEarth
             OE_OPTION_VECTOR(osg::ref_ptr<Wind>, winds);
             OE_OPTION(bool, ortho);
             OE_OPTION(Distance, radius);
+            OE_OPTION(float, speedFactor);
             virtual Config getConfig() const;
         private:
             void fromConfig(const Config& conf);
@@ -81,11 +83,23 @@ namespace osgEarth
     public:
         META_Layer(osgEarth, WindLayer, Options, Layer, Wind);
 
-        //! Adds a new wind to the layer
+        //! Adds a retained source before or after opening; call during update, before concurrent cull/draw.
         void addWind(Wind*);
 
         //! Removed an existing wind from the layer
         void removeWind(Wind*);
+
+        //! Sets the shared speed multiplier for wind consumers; invalid values become 1. Call during update.
+        void setSpeedFactor(float);
+        //! Returns the nonnegative shared speed multiplier.
+        float getSpeedFactor() const;
+        //! Returns summed directional wind in east/north meters per second; excludes local point sources.
+        //! Sources may only be edited during update, before concurrent cull/draw. No GL context is required.
+        osg::Vec2d getDirectionalVelocity() const;
+        //! Integrates directional motion in meters on the simulation clock; closed layers retain their displacement.
+        //! Sample each frame. Equal-time calls agree across cameras; backwards seeks restart with the current wind.
+        //! Non-finite times retain the last displacement. Source edits follow the update/cull contract above.
+        osg::Vec2d getDirectionalDisplacement(double simulationTime) const;
 
     protected: // Layer
 
@@ -111,6 +125,10 @@ namespace osgEarth
     private:
         osg::ref_ptr<osg::Node> _drawable;
         osg::ref_ptr<const SpatialReference> _srs;
+        mutable std::mutex _motionMutex;
+        mutable osg::Vec2d _displacement, _previousVelocity;
+        mutable double _motionTime = 0.0;
+        mutable bool _motionStarted = false;
     };
 
 } // namespace osgEarth

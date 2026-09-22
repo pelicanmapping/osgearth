@@ -14,6 +14,7 @@
 #include <osgEarth/TerrainResources>
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/Extension>
+#include <osgEarth/WindLayer>
 #include <osg/Camera>
 #include <osg/Depth>
 #include <osg/Geometry>
@@ -181,6 +182,9 @@ struct SkyNode2::Impl
     osg::ref_ptr<TerrainResources> resources;
     osg::ref_ptr<CloudLayer> clouds;
     osg::ref_ptr<CloudLayerRenderer> cloudRenderer;
+    osg::observer_ptr<Map> windMap;
+    osg::ref_ptr<WindLayer> mapWind;
+    Revision windMapRevision;
     std::array<TextureImageUnitReservation,4> units;
     std::atomic_bool celestialDirty{true};
     TimeStamp date = 0;
@@ -229,6 +233,8 @@ struct SkyNode2::Impl
     void prepare(SkyNode2& owner)
     {
         if (ready) return;
+        auto mapNode = findTopMostNodeOfType<MapNode>(&owner);
+        if (mapNode) windMap = mapNode->getMap();
         atmospheric = options.preset != FLAT;
         auto terrain = findTopMostNodeOfType<TerrainEngineNode>(&owner);
         resources = terrain ? terrain->getResources() : new TerrainResources;
@@ -531,6 +537,7 @@ struct SkyNode2::Impl
             input.projection = osg::Matrixf(*cv.getProjectionMatrix());
             input.inverseProjection = osg::Matrixf::inverse(*cv.getProjectionMatrix());
             input.time = cv.getFrameStamp() ? cv.getFrameStamp()->getSimulationTime() : 0.0;
+            input.windLayer = mapWind.get();
             input.airScattering = atmospheric && owner.getAtmosphereVisible() && solar.length2() > 0.0f;
             cloudState = cloudRenderer->cull(cv,input,cloudEnvironmentState);
             if (cloudState) cv.pushStateSet(cloudState);
@@ -689,6 +696,19 @@ void SkyNode2::traverse(osg::NodeVisitor& visitor)
         }
         std::lock_guard<std::mutex> lock(_impl->mutex);
         _impl->prepare(*this);
+        osg::ref_ptr<Map> windMap;
+        if (_impl->windMap.lock(windMap) && _impl->windMapRevision != windMap->getDataModelRevision())
+        {
+            std::vector<osg::ref_ptr<WindLayer>> winds;
+            _impl->windMapRevision = windMap->getLayers(winds);
+            _impl->mapWind = winds.empty() ? nullptr : winds.front().get();
+        }
+        if (_impl->clouds && visitor.getFrameStamp())
+        {
+            auto wind = _impl->clouds->getWindLayer();
+            if (!wind) wind = _impl->mapWind.get();
+            if (wind) wind->getDirectionalDisplacement(visitor.getFrameStamp()->getSimulationTime());
+        }
         for (auto i = _impl->views.begin(); i != _impl->views.end();)
             if (!i->second->camera.valid()) i = _impl->views.erase(i); else ++i;
     }

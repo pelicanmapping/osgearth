@@ -5,13 +5,213 @@
 #include <benchmark/benchmark.h>
 #include <osgEarth/SkyNode2Atmosphere.h>
 #include <osgEarth/MapNode>
+#include <osgEarth/ExampleResources>
+#include <osgEarth/EarthManipulator>
 #include "../osgearth_tests/SkyNode2TestScene.h"
 #include <iostream>
+#include <fstream>
+#include <cstdlib>
+#include <chrono>
 
 using namespace osgEarth;
 
 namespace
 {
+    struct CityTimer : osg::Camera::DrawCallback
+    {
+        GLuint query;
+        bool begin;
+        //! Brackets the main camera only, excluding the private atmospheric RTT cameras.
+        CityTimer(GLuint q, bool start) : query(q), begin(start) { }
+        //! Issues a timer boundary on the owning camera's draw thread.
+        void operator()(osg::RenderInfo& info) const override
+        {
+            auto gl = info.getState()->get<osg::GLExtensions>();
+            if (begin) gl->glBeginQuery(GL_TIME_ELAPSED,query);
+            else gl->glEndQuery(GL_TIME_ELAPSED);
+        }
+    };
+
+    struct CityScene
+    {
+        osg::ref_ptr<SkyNode2> sky = new SkyNode2;
+        std::unique_ptr<Sky2Tests::Scene> scene;
+        GLuint query = 0;
+        //! Loads the opt-in local Prestige scene once and warms paging before any measurements.
+        explicit CityScene(const std::string& filename)
+        {
+            GLUtils::useNVGL(true);
+            scene.reset(new Sky2Tests::Scene(sky,3840,2160));
+            scene->sky->setEphemeris(new Ephemeris);
+            scene->sky->setDateTime(DateTime(2026,9,21,17.0));
+            auto manip = new Util::EarthManipulator;
+            scene->viewer->setCameraManipulator(manip);
+            std::vector<std::string> args = {"sky2-benchmark",filename,"--nvgl","--novsync"};
+            std::vector<char*> argv;
+            for (auto& arg : args) argv.push_back(&arg[0]);
+            int argc = int(argv.size());
+            osg::ArgumentParser arguments(&argc,argv.data());
+            auto node = Util::MapNodeHelper().load(arguments,scene->viewer);
+            auto map = MapNode::get(node);
+            if (!map) throw std::runtime_error("Cannot load Prestige benchmark map");
+            sky->removeChild(scene->models);
+            sky->addChild(node);
+            manip->setNode(sky);
+            const auto viewpoints = map->getConfig().child("viewpoints").children("viewpoint");
+            if (viewpoints.empty()) throw std::runtime_error("Prestige benchmark requires a saved viewpoint");
+            unsigned index = 0;
+            if (const char* value = std::getenv("SKY2_PRESTIGE_VIEW")) index = unsigned(std::stoul(value));
+            if (index >= viewpoints.size()) throw std::runtime_error("Prestige viewpoint index out of range");
+            manip->setViewpoint(Viewpoint(viewpoints[index]),0.0);
+            scene->readback->enabled = false;
+            auto start = std::chrono::steady_clock::now();
+            while (std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count() < 30.0)
+                scene->draw();
+            scene->readback->enabled = true;
+            scene->draw();
+            scene->save("sky2-lighting-prestige.png");
+            scene->readback->enabled = false;
+            auto gl = scene->context->getState()->get<osg::GLExtensions>();
+            gl->glGenQueries(1,&query);
+            scene->viewer->getCamera()->setPreDrawCallback(new CityTimer(query,true));
+            scene->viewer->getCamera()->setPostDrawCallback(new CityTimer(query,false));
+        }
+        //! Releases the query before the fixture's graphics context is destroyed.
+        ~CityScene()
+        {
+            scene->context->makeCurrent();
+            scene->viewer->getCamera()->setPreDrawCallback(nullptr);
+            scene->viewer->getCamera()->setPostDrawCallback(nullptr);
+            scene->context->getState()->get<osg::GLExtensions>()->glDeleteQueries(1,&query);
+        }
+    };
+
+    //! Measures the same loaded city with lighting components toggled, retaining materials, geometry and paging.
+    void prestigeLighting(benchmark::State& state)
+    {
+        const char* path = std::getenv("SKY2_PRESTIGE");
+        if (!path) { state.SkipWithError("Set SKY2_PRESTIGE to an earth file to opt into the local city benchmark"); return; }
+        try
+        {
+            static CityScene city(path);
+            city.sky->setAtmosphereVisible(state.range(0) != 1);
+            city.sky->setEnvironmentIntensity(state.range(0) == 2 ? 0.0f : 1.0f);
+            city.sky->setLighting(state.range(0) != 3);
+            for (unsigned i=0; i<12; ++i) city.scene->draw();
+            auto gl = city.scene->context->getState()->get<osg::GLExtensions>();
+            for (auto _ : state)
+            {
+                city.scene->draw();
+                GLuint64 ns = 0;
+                gl->glGetQueryObjectui64v(city.query,GL_QUERY_RESULT,&ns);
+                state.SetIterationTime(double(ns)*1e-9);
+            }
+            if (glGetError() != GL_NO_ERROR) state.SkipWithError("OpenGL error during Prestige benchmark");
+        }
+        catch (const std::exception& error) { state.SkipWithError(error.what()); }
+    }
+
+    struct LightingTimer : osg::Drawable::DrawCallback
+    {
+        mutable GLuint query = 0;
+        //! Times eight actual production draws with scene state already applied; the caller owns the GL context.
+        void drawImplementation(osg::RenderInfo& info, const osg::Drawable* drawable) const override
+        {
+            auto gl = info.getState()->get<osg::GLExtensions>();
+            if (!query) gl->glGenQueries(1,&query);
+            gl->glBeginQuery(GL_TIME_ELAPSED,query);
+            for (unsigned i=0; i<8; ++i) drawable->drawImplementation(info);
+            gl->glEndQuery(GL_TIME_ELAPSED);
+        }
+    };
+
+    //! Isolates full-screen production lighting, with optional component ablation and before/after pixel validation.
+    void lighting(benchmark::State& state, int quality)
+    {
+        SkyNode2::Options options;
+        options.preset = static_cast<SkyNode2::Quality>(quality);
+        osg::ref_ptr<SkyNode2> sky = new SkyNode2(options);
+        try
+        {
+            unsigned width = unsigned(state.range(0)), mode = unsigned(state.range(1));
+            Sky2Tests::Scene scene(sky,width,width*9/16);
+            auto wall = scene.horizonWall();
+            scene.wallView(wall,100.0,300.0);
+            scene.viewer->getCamera()->setProjectionMatrixAsPerspective(50.0,16.0/9.0,0.1,1e8);
+            auto ss = wall->getOrCreateStateSet();
+            ss->removeAttribute(osg::StateAttribute::PROGRAM);
+            ss->setAttributeAndModes(new osg::Depth(osg::Depth::ALWAYS,0.0,1.0,false));
+            ss->setRenderBinDetails(20,"RenderBin");
+            ShaderLoader::load(VirtualProgram::getOrCreate(ss),R"(
+                #pragma vp_function sky2BenchMaterial, fragment_coloring, 0.9
+                struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;
+                in vec3 vp_Normal;
+                // Vary normals/materials across the facade to retain the complete PBR shader workload.
+                void sky2BenchMaterial(inout vec4 color)
+                {
+                    vec2 uv=fract(gl_FragCoord.xy/vec2(271.0,193.0));
+                    vp_Normal=normalize(vec3(uv.x-0.5,0.9,0.2+0.3*uv.y));
+                    oe_pbr.roughness=0.05+0.95*uv.x; oe_pbr.metal=uv.y; oe_pbr.ao=0.8;
+                    color=vec4(0.3+0.4*uv.x,0.25+0.3*uv.y,0.2,1.0);
+                }
+            )");
+            if (mode == 1) sky->setAtmosphereVisible(false);
+            if (mode == 2) sky->setEnvironmentIntensity(0.0f);
+            auto geometry = wall->getChild(0)->asGeometry();
+            osg::ref_ptr<LightingTimer> timer = new LightingTimer;
+            geometry->setDrawCallback(timer);
+            auto gl = scene.context->getState()->get<osg::GLExtensions>();
+            if (!gl->glGetQueryObjectui64v) { state.SkipWithError("GPU timer queries unavailable"); return; }
+            static bool reported = false;
+            if (!reported)
+            {
+                std::cerr << "SkyNode2 lighting GPU: " << glGetString(GL_RENDERER) << "; " << glGetString(GL_VERSION) << '\n';
+                reported = true;
+            }
+            scene.draw();
+            // Baselines are explicit opt-in artifacts, never silently updated by the verification mode.
+            auto pixels = scene.pixels();
+            std::string name = "sky2-lighting-"+std::to_string(quality)+"-"+std::to_string(width)+"-"+
+                std::to_string(mode)+".rgba";
+            if (const char* directory = std::getenv("SKY2_LIGHTING_RECORD"))
+            {
+                std::ofstream output(std::string(directory)+"/"+name,std::ios::binary);
+                output.write(reinterpret_cast<const char*>(pixels.data()),pixels.size()*sizeof(float));
+                if (!output) throw std::runtime_error("Could not write lighting reference image");
+            }
+            if (const char* directory = std::getenv("SKY2_LIGHTING_VERIFY"))
+            {
+                std::vector<float> reference(pixels.size());
+                std::ifstream input(std::string(directory)+"/"+name,std::ios::binary);
+                input.read(reinterpret_cast<char*>(reference.data()),reference.size()*sizeof(float));
+                if (!input) throw std::runtime_error("Missing or incomplete lighting reference image");
+                double maximum = 0.0, square = 0.0;
+                for (unsigned i=0; i<pixels.size(); ++i)
+                {
+                    double error = std::abs(double(pixels[i])-reference[i]);
+                    maximum = std::max(maximum,error); square += error*error;
+                }
+                state.counters["max_error"] = maximum;
+                state.counters["rmse"] = std::sqrt(square/pixels.size());
+                if (maximum > 2.0/255.0) throw std::runtime_error("Lighting changed by more than two display code values");
+            }
+            scene.readback->enabled = false;
+            for (unsigned i=0; i<8; ++i) scene.draw();
+            for (auto _ : state)
+            {
+                scene.draw();
+                GLuint64 nanoseconds = 0;
+                gl->glGetQueryObjectui64v(timer->query,GL_QUERY_RESULT,&nanoseconds);
+                state.SetIterationTime(double(nanoseconds)*1e-9/8.0);
+            }
+            gl->glDeleteQueries(1,&timer->query);
+            timer->query = 0;
+            geometry->setDrawCallback(nullptr);
+            if (glGetError() != GL_NO_ERROR) state.SkipWithError("OpenGL error during lighting benchmark");
+        }
+        catch (const std::exception& error) { state.SkipWithError(error.what()); }
+    }
+
     //! Measures an atmospheric query before/after tabulation, checking error against the same reference model.
     void transmission(benchmark::State& state, bool lookup)
     {
@@ -95,6 +295,14 @@ namespace
     }
 
     BENCHMARK_CAPTURE(transmission, Reference128, false)->Name("SkyNode2/TransmittanceBefore");
+    // The dataset is machine-local and large; do not add it to ordinary benchmark runs.
+    auto* cityBenchmark = std::getenv("SKY2_PRESTIGE") ?
+        benchmark::RegisterBenchmark("SkyNode2/PrestigeLighting",prestigeLighting)
+        ->Arg(0)->Arg(1)->Arg(2)->Arg(3)->UseManualTime()->Unit(benchmark::kMillisecond) : nullptr;
+    BENCHMARK_CAPTURE(lighting, BalancedLighting, 1)->Name("SkyNode2/BalancedLighting")
+        ->Args({3840,0})->Args({3840,1})->Args({3840,2})->UseManualTime()->Unit(benchmark::kMillisecond);
+    BENCHMARK_CAPTURE(lighting, HighLighting, 2)->Name("SkyNode2/HighLighting")
+        ->Args({3840,0})->Args({3840,1})->Args({3840,2})->UseManualTime()->Unit(benchmark::kMillisecond);
     BENCHMARK_CAPTURE(transmission, Lookup, true)->Name("SkyNode2/TransmittanceAfter");
     BENCHMARK_CAPTURE(render, Flat, 0)->Name("SkyNode2/FlatFrame")
         ->Args({1920,0})->Args({1920,1})->UseManualTime()->Unit(benchmark::kMillisecond);

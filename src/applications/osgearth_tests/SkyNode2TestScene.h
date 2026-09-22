@@ -7,6 +7,7 @@
 #include <osgEarth/SkyNode2>
 #include <osgEarth/Capabilities>
 #include <osgEarth/GLUtils>
+#include <osgEarth/Chonk>
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/ShaderLoader>
 #include <osg/GraphicsContext>
@@ -329,6 +330,7 @@ namespace osgEarth { namespace Sky2Tests
             viewer->getCamera()->setFinalDrawCallback(nullptr);
             viewer->getCamera()->releaseGLObjects(context->getState());
             sky->releaseGLObjects(context->getState());
+            ChonkRenderBin::releaseSharedGLObjects(context->getState());
             context->releaseContext();
         }
     };

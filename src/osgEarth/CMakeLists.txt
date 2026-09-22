@@ -161,6 +161,7 @@ SET(TARGET_H
     CentroidFilter
     CesiumIon
     Chonk
+    ChonkRenderPass
     CircleNode
     ClampableNode
     ClampCallback
@@ -398,6 +399,8 @@ SET(TARGET_H
     Shaders
     ShaderUtils
     Shadowing
+    ShadowingMath.h
+    ShadowingCache.h
     SimpleOceanLayer
     SimplePager
     SimplexNoise
@@ -537,6 +540,7 @@ set(TARGET_SRC
     CentroidFilter.cpp
     CesiumIon.cpp
     Chonk.cpp
+    ChonkRenderPass.cpp
     CircleNode.cpp
     ClampableNode.cpp
     ClampCallback.cpp

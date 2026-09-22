@@ -1,149 +1,151 @@
 /* osgEarth
-* Copyright 2025 Pelican Mapping
-* MIT License
-*/
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
 #ifndef OSGEARTH_UTIL_SHADOWING_H
-#define OSGEARTH_UTIL_SHADOWING_H  1
+#define OSGEARTH_UTIL_SHADOWING_H 1
 
 #include <osgEarth/Common>
-#include <osg/Camera>
-#include <osg/Texture2DArray>
-#include <osg/Matrix>
-#include <osg/Uniform>
+#include <osg/Group>
 #include <osg/Light>
+#include <osg/Camera>
+#include <memory>
+#include <cstdint>
+#include <vector>
 
 namespace osgEarth { namespace Util
 {
-    /**
-     * Static Shadowing methods
-     */
     struct OSGEARTH_EXPORT Shadowing
     {
-        //! Marks a camera as a shadow map camera
+        //! Marks a camera with both OE_IS_SHADOW_CAMERA and OE_IS_DEPTH_CAMERA.
         static void setIsShadowCamera(osg::Camera* camera);
-
-        //! Whether a camera is marked as a shadow map camera
+        //! Tests the public shadow-camera marker.
         static bool isShadowCamera(const osg::Camera* camera);
     };
 
-    /**
-     * Group that casts shadows on its subgraph.
-     *
-     * NOTE!! This object is not multi-camera aware yet.
+    /** Stable cascaded sun shadows on this group's children.
+     * Add casters separately to getShadowCastingGroup(), in this node's coordinate system.
+     * Each camera/cull visitor owns its depth maps and double-buffered uniforms. Change settings,
+     * the light, and the casting graph during update traversal, synchronized with cull/draw.
+     * The light position's XYZ specifies the direction toward a distant sun (W is ignored for
+     * compatibility). Local point/spot shadow maps are not supported.
      */
     class OSGEARTH_EXPORT ShadowCaster : public osg::Group
     {
     public:
-        //! Construct a shadow caster
+        enum Filter { HARD = 0, PCF = 1, SOFT = 2 };
+        enum Submission { AUTOMATIC = 0, CORE = 1, LEGACY = 2 };
+        //! Chooses GPU-counted core/NV commands, or the reference per-cascade culler for comparison.
+        void setSubmission(Submission value)
+        {
+            if (value >= AUTOMATIC && value <= LEGACY) _submission = value;
+        }
+        //! Returns the requested draw submission path; AUTOMATIC prefers available bindless count support.
+        Submission getSubmission() const { return _submission; }
+        //! Opts in to caching a static caster graph. Applications must invalidate custom shader/attribute/GL
+        //! changes; callbacks, DYNAMIC nodes and pagers bypass reuse. Ordinary mesh/transform edits are tracked.
+        void setCacheEnabled(bool value) { _cacheEnabled = value; invalidateCache(); }
+        //! Returns whether the application has declared its caster shaders and render state cacheable.
+        bool getCacheEnabled() const { return _cacheEnabled; }
+        //! Invalidates every view after changes not represented by scene graph/mesh/uniform revisions.
+        void invalidateCache() { ++_cacheRevision; }
+        //! Returns the number of cascades submitted by the most recently culled eligible view.
+        unsigned getRenderedCascades() const;
+        //! Returns the number of cascades reused by the most recently culled eligible view.
+        unsigned getReusedCascades() const;
+
+        //! Creates three 2048-square cascades covering 2500 meters, with four hardware PCF taps.
         ShadowCaster();
-
-        /** Whether shadows are supported (requires GLSL) */
+        //! Whether the current platform supports shader-based shadowing.
         bool supported() const { return _supported; }
-
-        //! Whether to enable shadowing
+        //! Enables shadow rendering without discarding allocated resources.
         void setEnabled(bool value) { _enabled = value; }
+        //! Returns whether shadow rendering is enabled.
         bool getEnabled() const { return _enabled; }
-
-        /**
-         * The light that will cast shadows.
-         * NOTE: Only works for point lights, like the sun.
-         */
+        //! Retains the light supplying the world-space solar direction; null disables shadows.
         void setLight(osg::Light* light) { _light = light; }
+        //! Returns the retained light, or null.
         osg::Light* getLight() { return _light.get(); }
-
-        /**
-         * Group of geometry that should cast shadows on this node's children.
-         * You must add geometry here in order to cast shadows. The geometry
-         * you add here will only be used to generate shadows - it must still
-         * exist elsewhere in the scene graph for rendering.
-         */
+        //! Returns the owned caster graph; these nodes must also appear in the visible scene.
         osg::Group* getShadowCastingGroup() { return _castingGroup.get(); }
-
-        /**
-         * Sets the traversal mask to use when collecting shadow-casting
-         * geometry. Default is 0xFFFFFFFF (everything)
-         */
+        //! Sets the mask intersected with the main traversal mask when rendering casters.
         void setTraversalMask(unsigned mask) { _traversalMask = mask; }
+        //! Returns the caster traversal mask.
         unsigned getTraversalMask() const { return _traversalMask; }
-
-        /**
-         * Slice ranges. Each slice (the space between each value in the list)
-         * represents a single shadow map in the Cascading Shadow Maps 
-         * implementation.
-         */
-        const std::vector<float>& getRanges() { return _ranges; }
+        //! Returns fixed cascade boundaries in view-space meters.
+        const std::vector<float>& getRanges() const { return _ranges; }
+        //! Accepts 1-4 finite, strictly increasing nonnegative intervals; invalid input is ignored.
         void setRanges(const std::vector<float>& ranges);
-
-        /**
-         * The GPU texture image unit that will store the shadow map while
-         * rendering the subgraph.
-         */
+        //! Generates 1-4 fixed practical splits; lambda blends uniform (0) and logarithmic (1) spacing.
+        //! Invalid input is ignored; distances do not depend on the terrain's changing near/far planes.
+        void setCascades(unsigned count, float maximumDistance, float lambda = 0.8f);
+        //! Returns the texture image unit reserved by the application for this node.
         int getTextureImageUnit() const { return _texImageUnit; }
+        //! Changes the application-reserved unit; values outside the hardware's range are ignored.
         void setTextureImageUnit(int unit);
-
-        /**
-         * The size (in both dimensions) of the shadow depth texture. Bigger
-         * is sharper. Default is 1024. The total texture size used will be
-         * size * # of range slices * 3 bytes.
-         */
+        //! Returns depth-map width and height per cascade.
         unsigned getTextureSize() const { return _size; }
+        //! Sets resolution, clamped to 256-8192 and the hardware limit. Allocation occurs lazily during cull.
         void setTextureSize(unsigned size);
-
-        /**
-         * Minimum direct-light visibility in shadow. Default is 0.0 (sunlight
-         * is fully blocked). Ambient and environment lighting are unaffected.
-         */
+        //! Sets minimum direct-sun visibility (0-1); ambient and environment lighting are unaffected.
         void setShadowColor(float value);
+        //! Returns minimum direct-sun visibility.
         float getShadowColor() const { return _color; }
-
-        /**
-         * The blurring factor to apply to shadow PCF sampling. Using a blurring
-         * factor will incur a GPU performance penalty. Default is 0.0.
-         * Decent values are [0.0 -> 0.001].
-         */
+        //! Compatibility API: sets filter radius in normalized texture coordinates (clamped to 8 texels).
         void setBlurFactor(float value);
-        float getBlurFactor() const { return _blurFactor; }
-
-
-    public: // osg::Node
-
-        virtual void traverse(osg::NodeVisitor& nv);
-
-    public:
-
-        virtual void resizeGLObjectBuffers(unsigned maxSize);
-
-        virtual void releaseGLObjects(osg::State* state) const;
+        //! Returns filter radius in normalized texture coordinates.
+        float getBlurFactor() const { return _filterRadius / float(_size); }
+        //! Selects one bilinear comparison, continuous box PCF, or continuous tent PCF.
+        void setFilter(Filter value);
+        //! Returns the selected comparison filter.
+        Filter getFilter() const { return _filter; }
+        //! Sets filter radius in texels (0-8); wide filters add comparisons to retain continuous coverage.
+        void setFilterRadius(float value);
+        //! Returns filter radius in texels.
+        float getFilterRadius() const { return _filterRadius; }
+        //! Sets receiver depth bias in world texel units (0-10), scaled by surface slope in the shader.
+        void setDepthBias(float value);
+        //! Returns receiver depth bias in texel units.
+        float getDepthBias() const { return _depthBias; }
+        //! Sets upstream caster coverage in meters; larger values admit taller/offscreen casters.
+        void setCasterDistance(float value);
+        //! Returns the upstream extrusion distance.
+        float getCasterDistance() const { return _casterDistance; }
+        //! Sets the fraction (0-0.3) of each interval used for cascade blending and final distance fade.
+        void setCascadeBlend(float value);
+        //! Returns the cascade transition fraction.
+        float getCascadeBlend() const { return _cascadeBlend; }
+        //! Culls shadow passes for eligible views, and always traverses the visible children.
+        void traverse(osg::NodeVisitor& nv) override;
+        //! Resizes context storage for all owned resources and the ordinary subgraph.
+        void resizeGLObjectBuffers(unsigned maxSize) override;
+        //! Releases context resources for all views and the ordinary subgraph; call with rendering stopped.
+        void releaseGLObjects(osg::State* state) const override;
 
     protected:
-        virtual ~ShadowCaster() { }
+        //! Releases owned per-view resources.
+        ~ShadowCaster() override;
 
-        void reinitialize();
-
-        bool                                    _supported;
-        bool                                    _enabled;
-        osg::ref_ptr<osg::Group>                _castingGroup;
-        unsigned                                _size;
-        float                                   _blurFactor;
-        float                                   _color;
-        osg::ref_ptr<osg::Light>                _light;
-        osg::ref_ptr<osg::Texture2DArray>       _shadowmap;
-        osg::ref_ptr<osg::StateSet>             _rttStateSet;
-        std::vector<float>                      _ranges;
-        std::vector<osg::ref_ptr<osg::Camera> > _rttCameras;
-        osg::Matrix                             _prevProjMatrix;
-        unsigned                                _traversalMask;
-
-        int                         _texImageUnit;
-        osg::ref_ptr<osg::StateSet> _renderStateSet;
-        osg::ref_ptr<osg::Uniform>  _shadowMapTexGenUniform;
-        osg::ref_ptr<osg::Uniform>  _shadowBlurUniform;
-        osg::ref_ptr<osg::Uniform>  _shadowColorUniform;
-        osg::ref_ptr<osg::Uniform>  _shadowToPrimaryMatrix;
-        osg::ref_ptr<osg::Uniform>  _primaryProjectionMatrix;
-        osg::ref_ptr<osg::Uniform>  _primaryViewportUniform;
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> _impl;
+        bool _supported = false;
+        bool _enabled = true;
+        osg::ref_ptr<osg::Group> _castingGroup;
+        osg::ref_ptr<osg::Light> _light;
+        std::vector<float> _ranges;
+        unsigned _traversalMask = ~0u;
+        unsigned _size = 2048;
+        int _texImageUnit = 7;
+        Filter _filter = PCF;
+        Submission _submission = AUTOMATIC;
+        bool _cacheEnabled = false;
+        std::uint64_t _cacheRevision = 0;
+        float _filterRadius = 1.5f;
+        float _color = 0.0f;
+        float _depthBias = 1.5f;
+        float _casterDistance = 1000.0f;
+        float _cascadeBlend = 0.1f;
     };
-
 } }
-
-#endif // OSGEARTH_UTIL_SHADOWING_H
+#endif

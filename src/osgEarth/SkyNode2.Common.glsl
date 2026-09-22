@@ -12,12 +12,15 @@ uniform vec3 oe_sky2_sun;
 uniform vec3 oe_sky2_solarIrradiance;
 uniform mat3 oe_sky2_basis;
 uniform mat3 oe_sky2_viewToEarth;
+uniform mat3 oe_sky2_viewToSky;
 uniform mat4 oe_sky2_inverseProjection;
 uniform vec4 oe_sky2_settings; // solar irradiance, exposure, environment strength, night ambient
 uniform vec4 oe_sky2_flags; // atmosphere, sun, moon, stars
 uniform float oe_sky2_horizon;
 uniform vec2 oe_sky2_viewSize;
 uniform float oe_sky2_aerialSlices;
+uniform vec2 oe_sky2_rowInterval[32];
+uniform vec4 oe_sky2_rowWarp[32];
 
 // Normalizes even degenerate surface normals and half vectors without propagating NaNs.
 vec3 oe_s2_normalize(vec3 v, vec3 fallback)
@@ -173,10 +176,10 @@ vec3 oe_s2_aerialSlice(vec2 uv, float slice, bool transmittance)
 }
 
 // Reconstructs one elevation row, preserving metric distance near the eye and the atmospheric endpoint in orbit.
-void oe_s2_aerialRow(vec2 uv, float depth, float remaining, out vec3 scattering, out vec3 transmittance)
+void oe_s2_aerialRow(float azimuth, int row, float depth, float remaining, out vec3 scattering, out vec3 transmittance)
 {
-    vec3 direction = oe_s2_skyDirection(vec2(0.0,uv.y));
-    vec2 interval = oe_s2_airInterval(oe_sky2_eye,direction);
+    vec2 uv = vec2(azimuth,float(row)/(oe_s2_aerialSize.y-1.0));
+    vec2 interval = oe_sky2_rowInterval[row];
     if (interval.y <= interval.x)
     {
         scattering = vec3(0.0);
@@ -189,10 +192,11 @@ void oe_s2_aerialRow(vec2 uv, float depth, float remaining, out vec3 scattering,
     float ratio2 = ratio*ratio;
     float localDepth = depth/sqrt(sqrt(max(1e-24,remaining+ratio2*ratio2)));
     float distance = interval.x+min(localDepth,interval.y-interval.x);
-    vec3 warp = oe_s2_rayWarp(oe_sky2_eye,direction,interval);
+    vec4 rowWarp = oe_sky2_rowWarp[row];
+    vec3 warp = rowWarp.xyz;
     float offset = clamp(distance,interval.x,interval.y)-warp.z;
     float q = sign(offset)*sqrt(abs(offset));
-    float fraction = (q-warp.x)/max(1e-6,warp.y-warp.x);
+    float fraction = (q-warp.x)*rowWarp.w;
     float z = clamp(fraction,0.0,1.0)*(oe_sky2_aerialSlices-1.0);
     float lo = floor(z), hi = min(lo+1.0,oe_sky2_aerialSlices-1.0);
     float nearDistance = oe_s2_rayDistance(warp,lo/(oe_sky2_aerialSlices-1.0));
@@ -233,16 +237,15 @@ void oe_s2_aerial(vec3 direction, float distance, out vec3 scattering, out vec3 
     float row = clamp(uv.y,0.0,1.0)*(oe_s2_aerialSize.y-1.0);
     float lo = floor(row), hi = min(lo+1.0,oe_s2_aerialSize.y-1.0);
     vec3 scatterLo, scatterHi, transmitLo, transmitHi;
-    oe_s2_aerialRow(vec2(uv.x,lo/(oe_s2_aerialSize.y-1.0)),depth,remaining,scatterLo,transmitLo);
-    oe_s2_aerialRow(vec2(uv.x,hi/(oe_s2_aerialSize.y-1.0)),depth,remaining,scatterHi,transmitHi);
+    oe_s2_aerialRow(uv.x,int(lo),depth,remaining,scatterLo,transmitLo);
+    oe_s2_aerialRow(uv.x,int(hi),depth,remaining,scatterHi,transmitHi);
     scattering = mix(scatterLo,scatterHi,fract(row));
     transmittance = mix(transmitLo,transmitHi,fract(row));
 }
 
-// Samples a cosine-convolved or GGX-prefiltered local environment (6 specular + 1 diffuse rows).
-vec3 oe_s2_environment(vec3 earthDirection, float level)
+// Samples the local environment using a unit direction already transformed into the sky basis.
+vec3 oe_s2_environment(vec3 d, float level)
 {
-    vec3 d = transpose(oe_sky2_basis)*earthDirection;
     vec2 uv = vec2(fract(atan(d.y,d.x)/(2.0*oe_s2_pi)),acos(clamp(d.z,-1.0,1.0))/oe_s2_pi);
     float lo = floor(level), hi = min(6.0,lo+1.0);
     float y = clamp(uv.y,0.0,1.0)*31.0+0.5;

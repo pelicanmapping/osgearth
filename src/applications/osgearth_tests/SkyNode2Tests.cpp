@@ -118,6 +118,36 @@ TEST_CASE("SkyNode2 aerial depth interpolation resolves airborne surfaces", "[sk
     }
 }
 
+// Checks cached row geometry against reference integration at oblique and polar globe orientations.
+TEST_CASE("SkyNode2 aerial rows retain accuracy away from the equator", "[sky2][sky2rows][.gl]")
+{
+    for (auto quality : {SkyNode2::BALANCED,SkyNode2::HIGH})
+    {
+        SkyNode2::Options options;
+        options.preset = quality;
+        Scene scene(new SkyNode2(options),128,128);
+        scene.models->setNodeMask(0);
+        auto probe = scene.aerialProbe();
+        for (double latitude : {-89.0,-45.0,40.7,89.0})
+        for (double altitude : {100.0,150000.0,3000000.0})
+        {
+            double lat = osg::DegreesToRadians(latitude), lon = osg::DegreesToRadians(-74.0);
+            osg::Vec3d up(std::cos(lat)*std::cos(lon),std::cos(lat)*std::sin(lon),std::sin(lat));
+            osg::Vec3d east(-std::sin(lon),std::cos(lon),0.0);
+            // Work in the atmosphere's ellipsoid-scaled frame, then return to ECEF meters.
+            osg::Matrixd ecef = osg::Matrixd::scale(6378137.0,6378137.0,6356752.314245);
+            osg::Vec3d eye = (up*(1.0+altitude/6378137.0))*ecef;
+            osg::Vec3d target = altitude < 1000.0 ? eye+east*1000.0 : up*ecef;
+            scene.viewer->getCamera()->setViewMatrixAsLookAt(eye,target,altitude < 1000.0 ? up : east);
+            probe->getUniform("sky2TestSurfaceHeight")->set(altitude < 1000.0 ? 1.0f : 12.0f);
+            auto error = aerialError(scene,probe);
+            INFO("quality=" << int(quality) << " latitude=" << latitude << " altitude=" << altitude);
+            CHECK(error.x() < 0.025);
+            CHECK(error.y() < 0.1);
+        }
+    }
+}
+
 // Separates sky depth occlusion from finite-distance aerial interpolation across the horizon on an opaque facade.
 TEST_CASE("SkyNode2 horizon stays behind nearby opaque geometry", "[sky2][sky2wall][.gl]")
 {

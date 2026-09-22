@@ -2,6 +2,7 @@ set(TARGET_SRC
     main.cpp
     CacheTests.cpp
     ChonkTests.cpp
+    ChonkRenderPassTests.cpp
     ChonkPageTests.cpp
     ChonkMaterialTests.cpp
     ConfigTests.cpp
@@ -14,6 +15,8 @@ set(TARGET_SRC
     PathTests.cpp
     PBRMaterialTests.cpp
     SkyNode2Tests.cpp
+    ShadowTests.cpp
+    Shadow46Tests.cpp
     ImageLayerTests.cpp
     SpatialReferenceTests.cpp
     StringUtilsTests.cpp

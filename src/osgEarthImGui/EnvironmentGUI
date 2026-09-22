@@ -147,7 +147,6 @@ namespace osgEarth
         bool _first = true;
         bool _shadows = false;
         float _haze_cutoff = 0.0f, _haze_strength = 16.0f;
-        float _shadow_darkness = 0.0f, _shadow_blur = 0.001f;
         float _wind_power = 1.0f;
 
         //! Applies a UI edit during update traversal, retaining the selected sky until the operation runs.
@@ -156,6 +155,14 @@ namespace osgEarth
             osg::ref_ptr<SkyNode> sky;
             if (_skyNode.lock(sky) && view(ri) && view(ri)->getViewerBase())
                 view(ri)->getViewerBase()->addUpdateOperation(new OneTimer([sky, change]() { change(*sky); }));
+        }
+
+        //! Schedules shadow edits in the update phase so draw/cull never observe a partially applied setting.
+        void changeShadows(osg::RenderInfo& ri, const std::function<void(ShadowCaster&)>& change)
+        {
+            osg::ref_ptr<ShadowCaster> caster;
+            if (_shadowCaster.lock(caster) && view(ri) && view(ri)->getViewerBase())
+                view(ri)->getViewerBase()->addUpdateOperation(new OneTimer([caster, change]() { change(*caster); }));
         }
 
     public:
@@ -277,10 +284,33 @@ namespace osgEarth
                 if (ImGui::Checkbox("Lighting", &lighting))
                     changeSky(ri,[lighting](SkyNode& sky) { sky.setLighting(lighting); });
 
+                findNode(_shadowCaster, ri);
                 if (_shadowCaster.valid()) {
                     ImGui::SameLine();
-                    ImGui::Checkbox("Shadows", &_shadows);
-                    _shadowCaster->setEnabled(_shadows);
+                    _shadows = _shadowCaster->getEnabled();
+                    if (ImGui::Checkbox("Shadows", &_shadows))
+                    {
+                        bool enabled = _shadows;
+                        changeShadows(ri,[enabled](ShadowCaster& caster) { caster.setEnabled(enabled); });
+                    }
+                }
+                else if (ImGui::Button("Install shadows") && view(ri) && view(ri)->getViewerBase())
+                {
+                    osg::ref_ptr<MapNode> map = _mapNode.get();
+                    osg::ref_ptr<SkyNode> sky = _skyNode.get();
+                    osg::ref_ptr<osgViewer::View> targetView = view(ri);
+                    targetView->getViewerBase()->addUpdateOperation(new OneTimer([map, sky, targetView]()
+                    {
+                        if (findTopMostNodeOfType<ShadowCaster>(targetView->getSceneData())) return;
+                        int unit;
+                        if (!map->getTerrainEngine()->getResources()->reserveTextureImageUnit(unit,"ShadowCaster")) return;
+                        osg::ref_ptr<ShadowCaster> caster = new ShadowCaster;
+                        caster->setTextureImageUnit(unit);
+                        caster->setLight(sky->getSunLight());
+                        caster->getShadowCastingGroup()->addChild(map->getLayerNodeGroup());
+                        caster->getShadowCastingGroup()->addChild(map->getTerrainEngine()->getNode());
+                        insertParent(caster.get(),map.get());
+                    }));
                 }
 
                 ImGui::SameLine();
@@ -421,10 +451,6 @@ namespace osgEarth
                             dirtySettings();
                         }
                     }
-                    else
-                    {
-                        _shadows = false;
-                    }
 
                     if (_windLayer.valid())
                     {
@@ -453,13 +479,67 @@ namespace osgEarth
                         ImGui::Separator();
                         ImGuiLTable::Section("Details");
 
-                        if (_shadows)
+                        if (_shadows && _shadowCaster.valid())
                         {
-                            if (ImGuiLTable::SliderFloat("Sunlight in shadow", &_shadow_darkness, 0.0f, 1.0f))
-                                stateset(ri)->addUniform(new osg::Uniform("oe_shadow_color", _shadow_darkness), 0x7);
-
-                            if (ImGuiLTable::SliderFloat("Shadow blur", &_shadow_blur, 0.0f, 0.002f))
-                                stateset(ri)->addUniform(new osg::Uniform("oe_shadow_blur", _shadow_blur), 0x07);
+                            ImGuiLTable::Section("Shadows");
+                            const char* submissions[] = {"Automatic","OpenGL 4.6 core","Reference"};
+                            int submission = int(_shadowCaster->getSubmission());
+                            if (ImGuiLTable::BeginCombo("Draw submission",submissions[submission]))
+                            {
+                                for (int value=0; value<3; ++value)
+                                    if (ImGui::Selectable(submissions[value],value == submission))
+                                        changeShadows(ri,[value](ShadowCaster& c)
+                                            { c.setSubmission(ShadowCaster::Submission(value)); });
+                                ImGuiLTable::EndCombo();
+                            }
+                            bool cached = _shadowCaster->getCacheEnabled();
+                            if (ImGuiLTable::Checkbox("Cache static casters",&cached))
+                                changeShadows(ri,[cached](ShadowCaster& c) { c.setCacheEnabled(cached); });
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("For static caster shaders and render state. Callbacks and paging bypass reuse. "
+                                    "Keep caching off for animated shaders; invalidate custom state changes.");
+                            ImGuiLTable::Text("Cascades this view","%u rendered, %u reused",
+                                _shadowCaster->getRenderedCascades(),_shadowCaster->getReusedCascades());
+                            int count = int(_shadowCaster->getRanges().size()-1);
+                            float distance = _shadowCaster->getRanges().back();
+                            bool splitsChanged = ImGuiLTable::SliderInt("Cascades", &count, 1, 4);
+                            splitsChanged |= ImGuiLTable::SliderFloat("Distance (m)", &distance, 50.0f, 20000.0f,
+                                "%.0f", ImGuiSliderFlags_Logarithmic);
+                            if (splitsChanged)
+                                changeShadows(ri,[count,distance](ShadowCaster& c) { c.setCascades(count,distance); });
+                            unsigned size = _shadowCaster->getTextureSize();
+                            if (ImGuiLTable::BeginCombo("Map resolution", std::to_string(size).c_str()))
+                            {
+                                for (unsigned value : {512u,1024u,2048u,4096u,8192u})
+                                    if (ImGui::Selectable(std::to_string(value).c_str(),value == size))
+                                        changeShadows(ri,[value](ShadowCaster& c) { c.setTextureSize(value); });
+                                ImGuiLTable::EndCombo();
+                            }
+                            const char* filters[] = {"Fast","Balanced","Soft"};
+                            int filter = int(_shadowCaster->getFilter());
+                            if (ImGuiLTable::BeginCombo("Filtering", filters[filter]))
+                            {
+                                for (int value=0; value<3; ++value)
+                                    if (ImGui::Selectable(filters[value],value == filter))
+                                        changeShadows(ri,[value](ShadowCaster& c)
+                                            { c.setFilter(ShadowCaster::Filter(value)); });
+                                ImGuiLTable::EndCombo();
+                            }
+                            float radius = _shadowCaster->getFilterRadius();
+                            if (ImGuiLTable::SliderFloat("Softness (texels)", &radius, 0.0f, 8.0f))
+                                changeShadows(ri,[radius](ShadowCaster& c) { c.setFilterRadius(radius); });
+                            float visibility = _shadowCaster->getShadowColor();
+                            if (ImGuiLTable::SliderFloat("Sunlight in shadow", &visibility, 0.0f, 1.0f))
+                                changeShadows(ri,[visibility](ShadowCaster& c) { c.setShadowColor(visibility); });
+                            float bias = _shadowCaster->getDepthBias();
+                            if (ImGuiLTable::SliderFloat("Depth bias (texels)", &bias, 0.0f, 4.0f))
+                                changeShadows(ri,[bias](ShadowCaster& c) { c.setDepthBias(bias); });
+                            float extrusion = _shadowCaster->getCasterDistance();
+                            if (ImGuiLTable::SliderFloat("Caster reach (m)", &extrusion, 0.0f, 10000.0f))
+                                changeShadows(ri,[extrusion](ShadowCaster& c) { c.setCasterDistance(extrusion); });
+                            float blend = _shadowCaster->getCascadeBlend();
+                            if (ImGuiLTable::SliderFloat("Cascade blend", &blend, 0.0f, 0.3f))
+                                changeShadows(ri,[blend](ShadowCaster& c) { c.setCascadeBlend(blend); });
                         }
 
                         if (!sky2)

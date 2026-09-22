@@ -92,8 +92,11 @@ namespace
         void* (GL_APIENTRY* MapNamedBufferRange)(GLuint name, GLintptr offset, GLsizeiptr length, GLbitfield access);
         void (GL_APIENTRY* UnmapNamedBuffer)(GLuint name);
 
-        void (GL_APIENTRY* CopyBufferSubData)(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizei size);
-        void (GL_APIENTRY* CopyNamedBufferSubData)(GLuint readName, GLuint writeName, GLintptr readOffset, GLintptr writeOffset, GLsizei size);
+        // Buffer-copy sizes are pointer-sized; GLsizei corrupts the fifth argument on 64-bit Windows.
+        void (GL_APIENTRY* CopyBufferSubData)(GLenum readTarget, GLenum writeTarget,
+            GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
+        void (GL_APIENTRY* CopyNamedBufferSubData)(GLuint readName, GLuint writeName,
+            GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
         void (GL_APIENTRY* GetNamedBufferSubData)(GLuint name, GLintptr offset, GLsizei size, void*);
 
         bool useNamedBuffers;
@@ -1027,14 +1030,14 @@ GLBuffer::bufferData(GLsizei datasize, const GLvoid* data, GLbitfield flags) con
         if (alloc_size > _alloc_size)
             gl.NamedBufferData(name(), alloc_size, nullptr, flags);
 
-        gl.NamedBufferSubData(name(), 0, datasize, data);
+        if (data) gl.NamedBufferSubData(name(), 0, datasize, data);
     }
     else
     {
         if (alloc_size > _alloc_size)
             ext()->glBufferData(_target, alloc_size, nullptr, flags);
 
-        ext()->glBufferSubData(_target, 0, datasize, data);
+        if (data) ext()->glBufferSubData(_target, 0, datasize, data);
     }
 
     _alloc_size = alloc_size;

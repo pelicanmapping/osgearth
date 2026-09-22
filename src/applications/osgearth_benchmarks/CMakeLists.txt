@@ -8,7 +8,7 @@ set(TARGET_SRC
     VirtualProgramProfileBenchmarks.cpp
     CacheBenchmarks.cpp)
 
-list(APPEND TARGET_SRC SkyNode2Benchmarks.cpp)
+list(APPEND TARGET_SRC SkyNode2Benchmarks.cpp ShadowBenchmarks.cpp)
 
 add_osgearth_app(
     TARGET osgearth_benchmarks

@@ -118,8 +118,9 @@ void oe_sky2_lighting(inout vec4 color)
     if (oe_sky2_settings.z > 0.0)
     {
 #ifdef OE_SKY2_ATMOSPHERE
-        vec3 en = normalize(oe_sky2_viewToEarth*N);
-        vec3 reflection = normalize(oe_sky2_viewToEarth*reflect(-V,N));
+        // The two uniform rotations are composed once per view instead of twice per fragment.
+        vec3 en = normalize(oe_sky2_viewToSky*N);
+        vec3 reflection = normalize(oe_sky2_viewToSky*reflect(-V,N));
         vec3 irradiance = oe_s2_environment(en,6.0);
         vec3 specular = oe_s2_environment(reflection,roughness*5.0);
         // Analytic split-sum DFG approximation (Karis), no extra BRDF texture.

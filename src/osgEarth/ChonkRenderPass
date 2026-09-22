@@ -1,0 +1,92 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarth/Common>
+#include <osg/Matrixd>
+#include <osg/State>
+#include <osg/StateSet>
+#include <osg/Vec2f>
+#include <array>
+#include <cstdint>
+
+namespace osgEarth
+{
+    /** Optional multi-view visibility/submission contract for any Chonk renderer (OpenGL 4.6).
+     * The caller owns cameras, render targets, projection shaders and map reuse. Chonk only selects
+     * instances/LODs and submits geometry. No shadow-camera define or ShadowCaster is required.
+     * Build a new immutable Batch for each submission; share it between that submission's passes.
+     * Install passes during update/cull with the same synchronization as ordinary camera state.
+     */
+    class OSGEARTH_EXPORT ChonkRenderPass : public osg::Object
+    {
+    public:
+        enum { MAX_VIEWS = 8 };
+        enum Output
+        {
+            PER_VIEW, //!< Independent compact lists consumed by separate render passes.
+            UNION,    //!< Each instance/LOD emitted once if it overlaps any active view.
+            MERGED    //!< One command per mesh/LOD, containing all visible instance/view pairs.
+        };
+        struct Parameters
+        {
+            std::uint64_t viewID = 0; //!< Allocate once per logical view group/cull visitor with createViewID().
+            unsigned frameNumber = 0, count = 0, activeViews = 0;
+            Output output = PER_VIEW;
+            bool coreDraws = false; //!< Otherwise prefer NV bindless indirect-count submission when available.
+            bool retainOutsideLODView = false; //!< Retain the coarsest LOD outside the reference view's XY bounds.
+            std::array<osg::Matrixd,MAX_VIEWS> clipFromWorld; //!< OpenGL clip volumes, -w <= x,y,z <= w.
+            osg::Matrixd lodView, lodProjection; //!< Common world-to-view and projection for LOD/distance fading.
+            osg::Vec2f lodViewport{1.0f,1.0f}; //!< Reference viewport dimensions in pixels.
+        };
+
+        //! Validated snapshot retained by every pass and uniquely identified even within the same frame number.
+        class OSGEARTH_EXPORT Batch : public osg::Referenced
+        {
+        public:
+            const Parameters parameters;
+            const std::uint64_t serial;
+        private:
+            friend class ChonkRenderPass;
+            //! Copies validated inputs; callers cannot mutate a batch after publishing it to cull/draw.
+            Batch(const Parameters&, std::uint64_t);
+        };
+
+        //! Allocates a process-unique, nonzero identity; reuse it across frames for persistent GPU storage.
+        static std::uint64_t createViewID();
+        //! Copies finite inputs for 1..MAX_VIEWS; returns null for invalid IDs, masks, modes or LOD viewport.
+        static osg::ref_ptr<const Batch> createBatch(const Parameters&);
+        //! Creates a disabled pass that explicitly blocks an inherited multi-view packet.
+        ChonkRenderPass();
+        //! Retains the immutable batch; PER_VIEW consumes index, other modes require index zero.
+        //! renderView must match the camera model-view used while drawing. Invalid arguments disable the pass.
+        ChonkRenderPass(const Batch*, unsigned index, const osg::Matrixd& renderView);
+        //! Shares immutable parameters when OSG copies camera state.
+        ChonkRenderPass(const ChonkRenderPass&, const osg::CopyOp& = osg::CopyOp::SHALLOW_COPY);
+        //! Creates a disabled pass for OSG's object interface.
+        osg::Object* cloneType() const override;
+        //! Copies this immutable pass for OSG's object interface.
+        osg::Object* clone(const osg::CopyOp&) const override;
+        //! Identifies this optional submission contract for OSG type inspection.
+        const char* className() const override { return "ChonkRenderPass"; }
+        //! Reports the library owning this contract.
+        const char* libraryName() const override { return "osgEarth"; }
+        //! Returns the retained parameters, or null for an explicitly disabled pass.
+        const Batch* getBatch() const { return _batch.get(); }
+        //! Returns the selected output list (zero for UNION and MERGED).
+        unsigned getIndex() const { return _index; }
+        //! Reconstructs drawable-local to world coordinates from OSG's applied model-view matrix.
+        const osg::Matrixd& getInverseRenderView() const { return _inverseRenderView; }
+        //! Attaches/replaces a named packet and shader define without replacing application user data.
+        //! Passing null installs a disabled packet, blocking inheritance from enclosing cameras.
+        static void set(osg::StateSet*, const ChonkRenderPass*);
+        //! Finds the nearest packet; disabled packets stop lookup. Ordinary cameras return null.
+        static const ChonkRenderPass* find(osg::State&);
+
+    private:
+        osg::ref_ptr<const Batch> _batch;
+        unsigned _index = 0;
+        osg::Matrixd _inverseRenderView;
+    };
+}

@@ -49,6 +49,11 @@ visitor owns two frame slots to avoid mutating a previous frame's uniforms durin
 OSG's pipelined draw. The background renders at far depth in bin 5, between ordinary
 opaque geometry and transparent bin 10, avoiding shading sky hidden by terrain.
 
+The 32 aerial elevation-row intersections and distance warps are cached in small
+per-view uniform arrays when the observer moves. Environment-coordinate transforms
+are also composed once per view, reducing repeated fragment work without changing
+the atmosphere's sampling quality.
+
 The aerial volume uses 64 azimuths by 32 horizon-centered elevations. Distance
 slices cover only the atmospheric part of each ray, with extra resolution near
 its lowest altitude. The same continuous mapping works from the ground through
@@ -77,6 +82,7 @@ point and spot lights with distance/cone attenuation. Install
 `GenerateGL3LightingUniforms` on application light sources as usual. The sun uses
 the existing `oe_shadow_visibility` interface, so a ShadowCaster can use
 `sky->getSunLight()`. SkyNode2 does not automatically allocate shadow maps.
+See [Sun shadows](shadows.md) for installation, quality controls, and texture-unit reservation.
 
 `sunIntensity` sets incident solar irradiance in the model's relative radiometric
 units (default 10). The sun light's diffuse RGB and intensity also tint and scale
@@ -131,5 +137,5 @@ The atmosphere architecture is informed by Sébastien Hillaire's
 The implementation is new; it does not wrap or copy the old osgEarth sky shaders.
 Material shading uses the standard GGX/Smith/Schlick model and a split-sum environment
 approximation. Validation and measured timings are recorded in
-`tests/sky2-performance.md`, `tests/sky2-descent-validation.md`, and
-`tests/sky2-horizon-validation.md`.
+`tests/sky2-performance.md`, `tests/sky2-descent-validation.md`,
+`tests/sky2-horizon-validation.md`, and `tests/sky2-lighting-performance.md`.

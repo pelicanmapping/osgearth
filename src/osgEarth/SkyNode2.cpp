@@ -283,6 +283,7 @@ struct SkyNode2::Impl
         f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_sky2_basis"));
         f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_sky2_earthToECI"));
         f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_sky2_viewToEarth"));
+        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_sky2_viewToSky"));
         f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT4,"oe_sky2_inverseProjection"));
         unsigned width = options.preset == HIGH ? 256 : 192, height = options.preset == HIGH ? 144 : 108;
         unsigned slices = options.preset == HIGH ? 32 : 16;
@@ -290,6 +291,8 @@ struct SkyNode2::Impl
         f.state->addUniform(new osg::Uniform("oe_sky2_aerialSlices",float(slices)));
         if (atmospheric)
         {
+            f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_VEC2,"oe_sky2_rowInterval",32));
+            f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_VEC4,"oe_sky2_rowWarp",32));
             f.sky = target(width,height,true);
             f.environment = target(64,224,true);
             f.aerial = target(64*slices,64); // 64 azimuths x 32 elevations; RGB radiance and transmission halves.
@@ -313,6 +316,44 @@ struct SkyNode2::Impl
         for (unsigned r=0; r<3; ++r)
         for (unsigned c=0; c<3; ++c) result(r,c) = float(m(r,c));
         return result;
+    }
+
+    //! Tabulates the 32 elevation-row geometries once per eye position, on this view's cull thread.
+    static void updateAerialRows(Frame& f, const osg::Vec3& eye, const osg::Matrix3& basis, float horizon)
+    {
+        auto intervals = f.state->getUniform("oe_sky2_rowInterval");
+        auto warps = f.state->getUniform("oe_sky2_rowWarp");
+        float radius = eye.length(), top = float(Sky2Atmosphere::top), groundRadius = float(Sky2Atmosphere::radius);
+        for (unsigned row=0; row<32; ++row)
+        {
+            float y = 2.0f*(float(row)/31.0f)-1.0f;
+            float theta = horizon+(y < 0.0f ? -1.0f : 1.0f)*y*y*(y < 0.0f ? horizon : float(osg::PI)-horizon);
+            float sine = std::sin(theta), cosine = std::cos(theta);
+            osg::Vec3 direction;
+            for (unsigned i=0; i<3; ++i) direction[i] = sine*basis(0,i)+cosine*basis(2,i);
+            float b = eye*direction;
+            // Match the shader's stable altitude product; subtracting squared planet radii loses ground precision.
+            float shell = b*b-(radius-top)*(radius+top);
+            float start = 0.0f, finish = -1.0f;
+            if (shell >= 0.0f)
+            {
+                float root = std::sqrt(shell);
+                start = std::max(0.0f,-b-root);
+                finish = -b+root;
+            }
+            float ground = b*b-(radius-groundRadius)*(radius+groundRadius);
+            if (ground >= 0.0f)
+            {
+                float hit = -b-std::sqrt(ground);
+                if (hit > 0.0f) finish = std::min(finish,hit);
+            }
+            finish = std::max(start,finish);
+            float closest = osg::clampBetween(-b,start,finish);
+            float nearWarp = -std::sqrt(std::max(0.0f,closest-start));
+            float farWarp = std::sqrt(std::max(0.0f,finish-closest));
+            intervals->setElement(row,osg::Vec2(start,finish));
+            warps->setElement(row,osg::Vec4(nearWarp,farWarp,closest,1.0f/std::max(1e-6f,farWarp-nearWarp)));
+        }
     }
 
     //! Culls bounded GPU lookup work only when the corresponding view or ephemeris has changed.
@@ -364,12 +405,19 @@ struct SkyNode2::Impl
         f.state->getUniform("oe_sky2_sun")->set(osg::Vec3(sun));
         f.state->getUniform("oe_sky2_solarIrradiance")->set(solar);
         f.state->getUniform("oe_sky2_sunIndex")->set(light->getLightNum());
-        f.state->getUniform("oe_sky2_basis")->set(matrix3(basis));
+        auto shaderBasis = matrix3(basis);
+        f.state->getUniform("oe_sky2_basis")->set(shaderBasis);
         f.state->getUniform("oe_sky2_viewToEarth")->set(matrix3(toEarth));
+        osg::Matrixd earthToSky;
+        earthToSky.transpose(basis);
+        f.state->getUniform("oe_sky2_viewToSky")->set(matrix3(toEarth*earthToSky));
         f.state->getUniform("oe_sky2_inverseProjection")->set(osg::Matrixf::inverse(*cv.getProjectionMatrix()));
         f.state->getUniform("oe_sky2_earthToECI")->set(matrix3(earthToECI));
-        f.state->getUniform("oe_sky2_horizon")->set(float(std::acos(-std::sqrt(std::max(0.0,
-            1.0-Sky2Atmosphere::radius*Sky2Atmosphere::radius/eye.length2())))));
+        float horizon = float(std::acos(-std::sqrt(std::max(0.0,
+            1.0-Sky2Atmosphere::radius*Sky2Atmosphere::radius/eye.length2()))));
+        f.state->getUniform("oe_sky2_horizon")->set(horizon);
+        if (atmospheric && (!f.valid || shaderEye != f.lastEye))
+            updateAerialRows(f,shaderEye,shaderBasis,horizon);
         f.state->getUniform("oe_sky2_settings")->set(osg::Vec4(options.sunIntensity,options.exposure,
             options.environmentIntensity,validScalar(options.ambient().get(),0.033f)));
         f.state->getUniform("oe_sky2_flags")->set(osg::Vec4(owner.getAtmosphereVisible(),owner.getSunVisible(),

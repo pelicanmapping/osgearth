@@ -154,6 +154,7 @@ Capabilities::Capabilities() :
     _supportsVertexArrayObjects(true),
     _supportsInt64(false),
     _supportsNVGL(false),
+    _supportsShaderViewportLayerArray(false),
     _vendor("Unknown"),
     _renderer("Unknown"),
     _version("3.30")
@@ -376,6 +377,7 @@ Capabilities::Capabilities() :
         _supportsVertexArrayObjects = osg::isGLExtensionOrVersionSupported(id, "GL_ARB_vertex_array_object", 3.0);
 
         _supportsInt64 = osg::isGLExtensionSupported(id, "GL_ARB_gpu_shader_int64");
+        _supportsShaderViewportLayerArray = osg::isGLExtensionSupported(id, "GL_ARB_shader_viewport_layer_array");
     }
     else
     {

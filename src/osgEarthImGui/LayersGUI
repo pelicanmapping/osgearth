@@ -865,6 +865,28 @@ namespace osgEarth
                         if (grimeLayer)
                         {
                             ImGuiLTable::Section("GrimeLayer");
+                            float maxDistance = grimeLayer->getMaxDistance();
+                            if (ImGuiLTable::SliderFloat("Grime max distance (m)", &maxDistance, 1.0f, 5000.0f,
+                                "%.1f", ImGuiSliderFlags_Logarithmic))
+                                grimeLayer->setMaxDistance(maxDistance);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Eye-to-surface distance where grime disappears. "
+                                    "Fades color and roughness; buildings remain visible.");
+
+                            float fadeDistance = grimeLayer->getFadeDistance();
+                            if (ImGuiLTable::SliderFloat("Grime fade width (m)", &fadeDistance, 0.0f, 1000.0f,
+                                "%.1f", ImGuiSliderFlags_Logarithmic))
+                                grimeLayer->setFadeDistance(fadeDistance);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Fade over this distance before the maximum. Zero uses a hard cutoff.");
+
+                            float upAttenuation = grimeLayer->getUpAttenuation();
+                            if (ImGuiLTable::SliderFloat("Roof suppression", &upAttenuation, 0.0f, 1.0f))
+                                grimeLayer->setUpAttenuation(upAttenuation);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Reduce grime on upward-facing geometry. "
+                                    "1 suppresses nearly flat roofs; 0 disables suppression. Walls stay unchanged.");
+
                             double macro = grimeLayer->getMacroPeriod();
                             if (ImGuiLTable::SliderDouble("Macro period (m)", &macro, 0.1, 2000.0,
                                 "%.2f", ImGuiSliderFlags_Logarithmic))

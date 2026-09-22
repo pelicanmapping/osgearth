@@ -384,6 +384,11 @@ namespace osgEarth
                     if (sky2)
                     {
                         ImGuiLTable::Section("Lighting:");
+                        bool prepass = sky2->getOptions().depthPrepass;
+                        if (ImGuiLTable::Checkbox("Depth prepass", &prepass))
+                            changeSky(ri,[prepass](SkyNode& sky) { static_cast<SkyNode2&>(sky).setDepthPrepass(prepass); });
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Reject hidden instanced surfaces before lighting. Disable for sparse or vertex-bound scenes.");
                         if (ImGuiLTable::SliderFloat("Exposure", &_exposure, 0.01f, 16.0f,
                             "%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
                         {

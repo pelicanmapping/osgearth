@@ -1,0 +1,133 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/VisibleLayer>
+#include <osgEarth/TiledModelLayer>
+#include <osg/Image>
+#include <memory>
+
+namespace osgEarth
+{
+    /**
+     * Adds generated, geographically anchored weathering to a model layer.
+     * Configure options before opening. Attach/detach and setters belong on the
+     * update thread; cull traversals use independent, immutable uniform snapshots.
+     * One grime layer per target is supported. The regional frame is intended
+     * for city-scale data. Model texture units 0-7 are left available.
+     * Inherited setVisible toggles only the effect, preserving its texture and amount.
+     * Inherited setOpacity scales grime strength without changing the target's alpha.
+     */
+    class OSGEARTH_EXPORT GrimeLayer : public VisibleLayer
+    {
+    public:
+        struct OSGEARTH_EXPORT Options : public VisibleLayer::Options
+        {
+            META_LayerOptions(osgEarth, Options, VisibleLayer::Options);
+            OE_OPTION(std::string, model);
+            OE_OPTION(osg::Vec3d, anchor, osg::Vec3d(0, 0, 0));
+            OE_OPTION(unsigned, seed, 17u);
+            OE_OPTION(unsigned, volumeSize, 64u);
+            OE_OPTION(float, amount, 0.5f);
+            OE_OPTION(osg::Vec3f, tint, osg::Vec3f(0.42f, 0.38f, 0.32f));
+            OE_OPTION(double, macroPeriod, 180.0);
+            OE_OPTION(osg::Vec3d, streakPeriod, osg::Vec3d(12.0, 12.0, 96.0));
+            OE_OPTION(float, roughness, 0.9f);
+            OE_OPTION(float, roughnessAmount, 0.0f);
+            OE_OPTION(bool, roughenOnly, false);
+            OE_OPTION(float, smoothThreshold, 0.2f);
+            OE_OPTION(float, smoothFeather, 0.15f);
+            OE_OPTION(float, smoothAmount, 0.15f);
+            OE_OPTION(float, maxDistance, 250.0f);
+            OE_OPTION(float, fadeDistance, 100.0f);
+            OE_OPTION(float, upAttenuation, 1.0f);
+
+            //! Serialize the target, WGS84 anchor, and procedural material controls.
+            Config getConfig() const override;
+            //! Read configuration; distances are meters, anchor is lon/lat/height.
+            void fromConfig(const Config& conf);
+        };
+
+        META_Layer(osgEarth, GrimeLayer, Options, VisibleLayer, Grime);
+
+        //! Select an existing target without taking ownership; call before open.
+        void setModelLayer(TiledModelLayer* layer);
+        //! Return the currently selected target, or nullptr while unresolved.
+        TiledModelLayer* getModelLayer() const;
+        //! Set coverage in [0,1] without regenerating the texture; zero disables it.
+        void setAmount(float value);
+        //! Return the configured coverage.
+        float getAmount() const;
+        //! Set the broad repeat distance in meters live; ignore nonfinite/nonpositive values.
+        void setMacroPeriod(double value);
+        //! Return the configured broad repeat distance in meters.
+        double getMacroPeriod() const;
+        //! Set east/north/up repeat distances live; ignore invalid vectors. No texture rebuild.
+        void setStreakPeriod(const osg::Vec3d& value);
+        //! Return a copy of the configured east/north/up repeat distances in meters.
+        osg::Vec3d getStreakPeriod() const;
+        //! Set the PBR roughness target live; clamp to [0,1], ignoring nonfinite values.
+        void setRoughness(float value);
+        //! Return the configured PBR roughness target.
+        float getRoughness() const;
+        //! Set roughness blending strength live; clamp to [0,1], ignoring nonfinite values.
+        void setRoughnessAmount(float value);
+        //! Return the configured roughness blending strength; zero preserves the material.
+        float getRoughnessAmount() const;
+        //! Restrict live roughness blending to increases for dry deposits.
+        void setRoughenOnly(bool value);
+        //! Return whether grime is prevented from smoothing the underlying material.
+        bool getRoughenOnly() const;
+        //! Set the original-roughness cutoff for smooth surfaces; clamp [0,1], ignore nonfinite.
+        void setSmoothThreshold(float value);
+        //! Return the cutoff below which roughness is preserved and stains are attenuated.
+        float getSmoothThreshold() const;
+        //! Set the roughness transition width above the cutoff; clamp [0,1], ignore nonfinite.
+        void setSmoothFeather(float value);
+        //! Return the transition width; zero selects a hard cutoff.
+        float getSmoothFeather() const;
+        //! Set the retained stain strength on smooth surfaces; clamp [0,1], ignore nonfinite.
+        void setSmoothAmount(float value);
+        //! Return the color-only stain multiplier below the smooth-surface cutoff.
+        float getSmoothAmount() const;
+        //! Set the maximum eye-to-surface distance in meters live; ignore nonfinite/nonpositive values.
+        void setMaxDistance(float value);
+        //! Return the distance at which both stain color and roughness contributions reach zero.
+        float getMaxDistance() const;
+        //! Set the fade width before maximum distance live; ignore nonfinite/negative values.
+        void setFadeDistance(float value);
+        //! Return the fade width in meters; zero uses a hard distance cutoff.
+        float getFadeDistance() const;
+        //! Set upward-surface suppression live; clamp [0,1], ignoring nonfinite values.
+        void setUpAttenuation(float value);
+        //! Return roof suppression strength; zero disables it, one fully suppresses flat roofs.
+        float getUpAttenuation() const;
+        //! Inspect the owned procedural volume, including mipmaps; nullptr if closed.
+        const osg::Image* getNoiseImage() const;
+
+        //! Observe map changes and resolve the target regardless of insertion order.
+        void addedToMap(const Map* map) override;
+        //! Detach only this effect and unregister its map observer.
+        void removedFromMap(const Map* map) override;
+
+    protected:
+        //! Initialize implementation state without creating GPU resources.
+        void init() override;
+        //! Validate settings and generate the volume; return a status on failure.
+        Status openImplementation() override;
+        //! Detach and release generated data and texture-unit reservations.
+        Status closeImplementation() override;
+        //! Acquire the terrain resource tracker and attach to the target.
+        void prepareForRendering(TerrainEngine* engine) override;
+        //! Release observers and callbacks even when destroyed outside a Map.
+        ~GrimeLayer() override;
+
+    private:
+        //! Reconcile target attachment after map/resource/lifecycle changes.
+        void refresh();
+        struct Impl;
+        std::shared_ptr<Impl> _impl;
+    };
+}

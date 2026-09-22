@@ -575,6 +575,7 @@ SkyNode2::Options::Options(const ConfigOptions& input) : SkyOptions(input)
     input.getConfig().get("environment_intensity",environmentIntensity);
     input.getConfig().get("output_srgb",outputSRGB);
     input.getConfig().get("tone_mapping",toneMapping);
+    input.getConfig().get("depth_prepass",depthPrepass);
     clouds = input.getConfig().child("clouds");
 }
 
@@ -587,6 +588,7 @@ Config SkyNode2::Options::getConfig() const
     config.set("environment_intensity",environmentIntensity);
     config.set("output_srgb",outputSRGB);
     config.set("tone_mapping",toneMapping);
+    config.set("depth_prepass",depthPrepass);
     if (!clouds.empty()) config.add(clouds);
     return config;
 }
@@ -600,6 +602,7 @@ SkyNode2::SkyNode2(const Options& options) : SkyNode(options), _impl(new Impl(op
     auto ss = getOrCreateStateSet();
     ss->setDefine("OE_SKY2");
     ss->setDefine("OE_USE_PBR");
+    setDepthPrepass(options.depthPrepass);
     // Fixed small capacity handles sparse OSG light indices without shader recompilation.
     ss->setDefine("OE_NUM_LIGHTS","8",osg::StateAttribute::ON|osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
     if (_impl->options.outputSRGB) ss->setDefine("OE_SKY2_SRGB");
@@ -642,6 +645,12 @@ void SkyNode2::setExposure(float value)
 void SkyNode2::setEnvironmentIntensity(float value)
 {
     if (std::isfinite(value) && value >= 0.0f) _impl->options.environmentIntensity = value;
+}
+
+void SkyNode2::setDepthPrepass(bool value)
+{
+    _impl->options.depthPrepass = value;
+    getOrCreateStateSet()->setDefine("OE_CHONK_PREPASS_ENABLED",value ? osg::StateAttribute::ON : osg::StateAttribute::OFF);
 }
 
 void SkyNode2::setSunIntensity(float value)

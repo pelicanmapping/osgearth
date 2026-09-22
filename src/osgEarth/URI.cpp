@@ -12,7 +12,9 @@
 #include <osgDB/FileNameUtils>
 #include <osgDB/ReadFile>
 #include <osgDB/Archive>
+#include <osgDB/ObjectWrapper>
 #include <limits>
+#include <osgDB/ObjectWrapper>
 
 #ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
 #include <Superluminal/PerformanceAPI.h>
@@ -316,20 +318,38 @@ namespace
         if ( input.is_open() )
         {
             std::string bufStr;
-            const auto size = osgEarth::getFileSize(uri);
-            if (size > bufStr.max_size() ||
-                size > static_cast<std::uint64_t>((std::numeric_limits<std::streamsize>::max)()))
-                return ReadResult();
+            // Detect gzip by its header, since compressed assets may retain
+            // their original extension (e.g. .gltf, .glb, or external .bin).
+            unsigned char magic[2] = {};
+            input.read(reinterpret_cast<char*>(magic), sizeof(magic));
+            const bool gzip = input.gcount() == 2 && magic[0] == 0x1f && magic[1] == 0x8b;
+            input.clear();
+            input.seekg(0, std::ios::beg);
 
-            // Allocate once and read directly into
-            // the string instead of copying through an intermediate stream.
-            bufStr.resize(static_cast<std::size_t>(size));
-            if (size > 0)
+            if (gzip)
             {
-                if (!input.read(&bufStr[0], static_cast<std::streamsize>(size)))
-                    return ReadResult(ReadResult::RESULT_READER_ERROR);
+                osg::ref_ptr<osgDB::BaseCompressor> compressor =
+                    osgDB::Registry::instance()->getObjectWrapperManager()->findCompressor("zlib");
+                if (!compressor.valid())
+                {
+                    ReadResult error(ReadResult::RESULT_NO_READER);
+                    error.setErrorDetail("Gzip decompression is unavailable");
+                    return error;
+                }
+                if (!compressor->decompress(input, bufStr))
+                {
+                    ReadResult error(ReadResult::RESULT_READER_ERROR);
+                    error.setErrorDetail("Failed to decompress gzip data");
+                    return error;
+                }
             }
-            ReadResult result( new StringObject(std::move(bufStr)) );
+            else
+            {
+                std::stringstream buf;
+                buf << input.rdbuf();
+                bufStr = buf.str();
+            }
+            ReadResult result( new StringObject(bufStr) );
             result.setLastModifiedTime( osgEarth::getLastModifiedTime(uri) );
             return result;
         }

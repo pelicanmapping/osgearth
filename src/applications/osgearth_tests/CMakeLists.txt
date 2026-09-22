@@ -4,6 +4,7 @@ set(TARGET_SRC
     ChonkTests.cpp
     ChonkPageTests.cpp
     ChonkMaterialTests.cpp
+    CompressedURITests.cpp
     ConfigTests.cpp
     CoverageTests.cpp
     EndianTests.cpp

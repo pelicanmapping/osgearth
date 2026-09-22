@@ -8,7 +8,7 @@ permissions:
 env:
   FEED_URL: https://nuget.pkg.github.com/gwaldron/index.json
   VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/gwaldron/index.json,readwrite"
-  VCPKG_VERSION: '2026.01.16'
+  VCPKG_VERSION: '2026.02.27'
 
 jobs:
 

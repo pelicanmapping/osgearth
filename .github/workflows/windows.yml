@@ -91,16 +91,12 @@ jobs:
         if ($LASTEXITCODE -ne 0) {
           throw 'Chocolatey failed to install cmake 3.31.7.'
         }
-        $chocoBin = Join-Path $env:ChocolateyInstall 'bin'
-        $env:PATH = "$chocoBin;$env:PATH"
-        $cmakeExe = Get-Command cmake.exe -All -ErrorAction Stop |
-          Select-Object -ExpandProperty Source -Unique |
-          Where-Object {
-            (& $_ --version | Select-Object -First 1) -match 'cmake version 3\.31\.7'
-          } |
-          Select-Object -First 1
-        if (-not $cmakeExe) {
-          throw 'Unable to resolve cmake 3.31.7 after Chocolatey installation.'
+        $cmakeExe = Join-Path $env:ChocolateyInstall 'lib\cmake\tools\bin\cmake.exe'
+        if (-not (Test-Path $cmakeExe)) {
+          throw 'Unable to resolve the Chocolatey-installed cmake 3.31.7 executable.'
+        }
+        if ((& $cmakeExe --version | Select-Object -First 1) -notmatch 'cmake version 3\.31\.7') {
+          throw 'Chocolatey-installed cmake does not report version 3.31.7.'
         }
         $cmakeDir = Split-Path -Parent $cmakeExe
         $cmakeDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append

@@ -93,7 +93,7 @@ jobs:
         }
         $cmakeExe = Get-ChildItem -Path (Join-Path $env:ChocolateyInstall 'lib') -Filter cmake.exe -File -Recurse |
           Where-Object {
-            $_.FullName -match '[\\/]cmake(\.[^\\/]+)?[\\/]tools[\\/]bin[\\/]cmake\.exe$'
+            (& $_.FullName --version | Select-Object -First 1) -match 'cmake version 3\.31\.7'
           } |
           Select-Object -ExpandProperty FullName -First 1
         if (-not $cmakeExe) {

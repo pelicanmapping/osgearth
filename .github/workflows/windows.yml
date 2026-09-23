@@ -81,15 +81,20 @@ jobs:
           throw 'Chocolatey package cmake 3.31.7 is unavailable.'
         }
         $installedCmakePackage = choco list --local-only --exact cmake --limit-output
-        if ($installedCmakePackage | Select-String '^cmake\|') {
-          choco uninstall cmake --no-progress -y
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Chocolatey failed to remove the existing cmake package.'
-          }
+        if ($installedCmakePackage | Select-String '^cmake\|3\.31\.7$') {
+          Write-Host 'Chocolatey cmake 3.31.7 is already installed.'
         }
-        choco install cmake --version=3.31.7 --force --no-progress -y
-        if ($LASTEXITCODE -ne 0) {
-          throw 'Chocolatey failed to install cmake 3.31.7.'
+        else {
+          if ($installedCmakePackage | Select-String '^cmake\|') {
+            choco uninstall cmake --no-progress -y
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Chocolatey failed to remove the existing cmake package.'
+            }
+          }
+          choco install cmake --version=3.31.7 --force --no-progress -y
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Chocolatey failed to install cmake 3.31.7.'
+          }
         }
         $cmakeCandidates = @(
           Get-ChildItem -Path (Join-Path $env:ChocolateyInstall 'bin') -Filter cmake.exe -File -ErrorAction SilentlyContinue |

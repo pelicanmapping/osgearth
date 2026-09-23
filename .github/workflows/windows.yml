@@ -102,9 +102,10 @@ jobs:
             throw 'Chocolatey failed to install cmake 3.31.7.'
           }
         }
+        Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+        Update-SessionEnvironment
         $cmakeCandidates = @(
-          Join-Path (Join-Path (Join-Path $env:ChocolateyInstall 'lib') 'cmake') 'tools\bin\cmake.exe'
-          Join-Path (Join-Path $env:ChocolateyInstall 'bin') 'cmake.exe'
+          Join-Path $env:ProgramFiles 'CMake\bin\cmake.exe'
         ) |
           Where-Object { Test-Path $_ } |
           Select-Object -Unique

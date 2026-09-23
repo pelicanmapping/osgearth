@@ -18,6 +18,7 @@ set(TARGET_SRC
     PBRMaterialTests.cpp
     SkyNode2Tests.cpp
     CloudLayerTests.cpp
+    CloudFilteringTests.cpp
     CloudRayReferenceTests.cpp
     ShadowTests.cpp
     Shadow46Tests.cpp

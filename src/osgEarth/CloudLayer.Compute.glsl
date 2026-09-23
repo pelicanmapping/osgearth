@@ -7,15 +7,28 @@ void main()
 {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy), size = imageSize(oe_cloud_shadowOutput);
     if (any(greaterThanEqual(pixel,size))) return;
-    vec2 xy = ((vec2(pixel)+0.5)/vec2(size)*2.0-1.0)*oe_cloud_shadowOrigin.w;
-    vec3 p = oe_cloud_shadowOrigin.xyz+oe_cloud_basis*vec3(xy,0.0);
+    bool farTile = pixel.x >= size.y;
+    vec4 origin = farTile ? oe_cloud_shadowFarOrigin : oe_cloud_shadowOrigin;
+    mat3 basis = farTile ? oe_cloud_shadowFarBasis : oe_cloud_basis;
+    vec2 tilePixel = vec2(pixel.x%size.y,pixel.y);
+    vec2 xy = ((tilePixel+0.5)/float(size.y)*2.0-1.0)*origin.w;
+    vec3 p = origin.xyz+basis*vec3(xy,0.0);
+    float footprint = farTile ? 2.0*origin.w/float(size.y) : 0.0;
     p = normalize(p)*(oe_cloud_shell.x+0.001);
     float transmission = dot(oe_cloud_sun,normalize(p)) > 0.02 ?
-        oe_cloud_light(p,max(16,oe_cloud_lightSamples*4),true) : 1.0;
+        oe_cloud_light(p,max(16,oe_cloud_lightSamples*4),true,footprint) : 1.0;
     imageStore(oe_cloud_shadowOutput,pixel,vec4(transmission));
 }
 #else
 layout(rgba16f,binding=0) uniform writeonly image3D oe_cloud_output;
+
+// Reconstructs a pixel ray for perspective or the all-sky capture; neighboring rays define its metric footprint.
+vec3 oe_cloud_pixelDirection(vec2 uv)
+{
+    if (!oe_cloud_screenSpace) return oe_cloud_direction(uv);
+    vec4 view = oe_cloud_inverseProjection*vec4(uv*2.0-1.0,0.0,1.0);
+    return normalize(oe_cloud_viewToEarth*view.xyz);
+}
 
 // Writes cumulative cloud transport per ray; all distance slices are produced by one invocation, without atomics.
 void main()
@@ -24,13 +37,11 @@ void main()
     ivec3 size = imageSize(oe_cloud_output);
     if (any(greaterThanEqual(pixel,size.xy))) return;
     vec2 uv = vec2((float(pixel.x)+0.5)/float(size.x),float(pixel.y)/float(size.y-1));
-    vec3 direction = oe_cloud_direction(uv);
-    if (oe_cloud_screenSpace)
-    {
-        uv = (vec2(pixel)+0.5)/vec2(size.xy);
-        vec4 view = oe_cloud_inverseProjection*vec4(uv*2.0-1.0,0.0,1.0);
-        direction = normalize(oe_cloud_viewToEarth*view.xyz);
-    }
+    if (oe_cloud_screenSpace) uv = (vec2(pixel)+0.5)/vec2(size.xy);
+    vec3 direction = oe_cloud_pixelDirection(uv);
+    vec2 texel = 1.0/vec2(size.x,oe_cloud_screenSpace ? size.y : size.y-1);
+    float angularWidth = max(length(oe_cloud_pixelDirection(uv+vec2(texel.x,0))-direction),
+        length(oe_cloud_pixelDirection(uv+vec2(0,uv.y > 0.5 ? -texel.y : texel.y))-direction));
     vec4 span = oe_cloud_intervals(oe_cloud_eye,direction);
     float total = span.y-span.x+span.w-span.z;
     vec4 transport = vec4(0,0,0,1);
@@ -52,7 +63,8 @@ void main()
             float along = first+(float(step)+0.5)*ds;
             float distance = oe_cloud_distance(span,along);
             vec3 p = oe_cloud_eye+direction*distance;
-            float extinction = oe_cloud_density(p,true);
+            float footprint = oe_cloud_detailFiltering ? max(ds,distance*angularWidth) : 0.0;
+            float extinction = oe_cloud_density(p,true,footprint);
             if (extinction <= 1e-5) continue;
             float absorbed = transport.a*(1.0-exp(-extinction*ds));
             float sunT = oe_cloud_light(p,oe_cloud_lightSamples,false);

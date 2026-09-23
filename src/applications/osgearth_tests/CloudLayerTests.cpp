@@ -12,6 +12,7 @@
 #include <osgEarth/WindLayer>
 #include <osgEarth/TerrainEngineNode>
 #include "SkyNode2TestScene.h"
+#include "CloudShadowTestScene.h"
 #include <limits>
 #include <iostream>
 #include <chrono>
@@ -64,8 +65,8 @@ namespace
         return std::sqrt(sum/(height-height/2-2));
     }
 
-    //! Displays ground-shadow transmission beside the visible cloud column toward the sun at the observer.
-    void shadowProbe(Scene& scene)
+    //! Displays shadow/cloud transmission; returns the scene-owned state for optional diagnostic uniforms or shaders.
+    osg::StateSet* shadowProbe(Scene& scene)
     {
         osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry;
         osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array;
@@ -96,6 +97,7 @@ namespace
             }
         )");
         scene.sky->addChild(geometry);
+        return state;
     }
 
     //! Advances both cloud frame slots at an explicit simulation time, retaining shader/GL error detection.
@@ -416,7 +418,7 @@ TEST_CASE("Ground cloud shadows track the visible wind-advected cloud column", "
                 << " erosion=" << erosion << " mean=" << error/24.0
                 << " max=" << largest << " shadow range=" << maximum-minimum << '\n';
             INFO(elevation); INFO(quality); INFO(erosion);
-            // The 100 km / 256 shadow footprint softens edges, so compare mean column error across the animation.
+            // The finite shadow footprint softens edges, so compare mean column error across the animation.
             CHECK(error/24.0 < 0.04);
             CHECK(maximum-minimum > 0.1f);
             drawAtTime(scene,230.0);
@@ -440,6 +442,8 @@ TEST_CASE("Cloud controls sanitize and round trip", "[clouds]")
     options.density = std::numeric_limits<float>::quiet_NaN();
     options.coverage = 3.0f; options.resolution = 999999; options.samples = 1;
     options.lightSamples = 99999; options.depthSlices = 99999;
+    options.shadowCoverage = 42000.0f;
+    options.farShadows = true; options.farShadowCoverage = 150000.0f;
     osg::ref_ptr<CloudLayer> layer = new CloudLayer(options);
     const auto& sanitized = layer->getOptions();
     CHECK(sanitized.coverage == 1.0f);
@@ -455,6 +459,148 @@ TEST_CASE("Cloud controls sanitize and round trip", "[clouds]")
     osg::ref_ptr<SkyNode2> sky = new SkyNode2(SkyNode2::Options(config));
     REQUIRE(sky->getCloudLayer());
     CHECK(sky->getCloudLayer()->getOptions().resolution == 768u);
+    CHECK(sky->getCloudLayer()->getOptions().shadowCoverage == 42000.0f);
+    CHECK(sky->getCloudLayer()->getOptions().farShadows);
+    CHECK(sky->getCloudLayer()->getOptions().farShadowCoverage == 150000.0f);
+    for (float width : {-1.0f,100.0f,1e9f,std::numeric_limits<float>::quiet_NaN()})
+    {
+        options.farShadowCoverage = width; layer->setOptions(options);
+        CHECK(layer->getOptions().farShadowCoverage >= 1.25f*layer->getOptions().shadowCoverage);
+        CHECK(layer->getOptions().farShadowCoverage <= 1000000.0f);
+    }
+}
+
+// Exercise the real shadow lookup at fixed ground positions to catch width/radius/unit errors and stale frame slots.
+TEST_CASE("Ground cloud shadow coverage updates and fades at its configured boundary", "[clouds][cloudshadowcoverage][.gl]")
+{
+    osg::ref_ptr<SkyNode2> sky = new SkyNode2;
+    auto options = weather();
+    CHECK(options.shadowCoverage == 20000.0f);
+    CHECK_FALSE(options.farShadows);
+    CHECK(options.farShadowCoverage == 100000.0f);
+    options.coverage = 1.0f; options.density = 10.0f; options.erosion = 0.0f; options.shadowStrength = 1.0f;
+    osg::ref_ptr<CloudLayer> clouds = new CloudLayer(options);
+    sky->setCloudLayer(clouds);
+    Scene scene(sky,32,32); scene.skyView(2.0);
+    auto state = shadowProbe(scene);
+    osg::ref_ptr<osg::Uniform> offset = new osg::Uniform("cloudTestGroundOffset",0.0f);
+    state->addUniform(offset);
+    ShaderLoader::load(VirtualProgram::getOrCreate(state),R"(
+        #pragma vp_function cloudTestCoverage, fragment_output, 0.99
+        uniform float cloudTestGroundOffset;
+        uniform vec3 oe_cloud_eye;
+        uniform vec4 oe_cloud_shell;
+        uniform mat3 oe_cloud_basis;
+        layout(location=0) out vec4 cloudTestCoverageResult;
+        float oe_cloud_shadow(vec3 position);
+        // Measure transmission on the curved ground at a fixed offset, bypassing atmosphere and tone mapping.
+        void cloudTestCoverage(inout vec4 color)
+        {
+            vec3 p = normalize(oe_cloud_eye+oe_cloud_basis*vec3(cloudTestGroundOffset,0,0))*(oe_cloud_shell.x+0.002);
+            cloudTestCoverageResult = color = vec4(vec3(oe_cloud_shadow(p)),1);
+        }
+    )");
+    for (float width : {20000.0f,100000.0f,20000.0f})
+    {
+        options.shadowCoverage = width; clouds->setOptions(options);
+        // Cycle both frame slots at each size; the receiver stays 12 km from the camera's ground position.
+        offset->set(12.0f);
+        for (unsigned frame=0; frame<2; ++frame)
+        {
+            scene.draw();
+            float transmission = scene.pixels()[0];
+            if (width == 20000.0f) CHECK(transmission == Approx(1.0f));
+            else CHECK(transmission < 0.1f);
+        }
+    }
+    offset->set(0.0f); scene.draw(); CHECK(scene.pixels()[0] < 0.1f);
+    offset->set(9.0f); scene.draw();
+    CHECK(scene.pixels()[0] > 0.4f);
+    CHECK(scene.pixels()[0] < 0.6f);
+    // A dense column must stay dark through the overlap, and strength must be applied once.
+    for (bool far : {true,false,true})
+    {
+        options.farShadows = far;
+        options.crepuscularRays = far; // Validate shared texture bindings with the optional ray passes active.
+        clouds->setOptions(options);
+        for (float distance : {0.0f,8.5f,9.5f,12.0f,35.0f,45.0f,55.0f})
+        {
+            offset->set(distance);
+            for (unsigned frame=0; frame<2; ++frame)
+            {
+                scene.draw(); float transmission = scene.pixels()[0];
+                INFO("far=" << far << " offset=" << distance << " frame=" << frame);
+                if (far && distance <= 35.0f) CHECK(transmission < 0.1f);
+                if (far && distance == 45.0f)
+                {
+                    CHECK(transmission > 0.4f); CHECK(transmission < 0.6f);
+                }
+                if (distance == 55.0f || (!far && distance >= 12.0f)) CHECK(transmission == Approx(1.0f));
+            }
+        }
+    }
+    options.shadowStrength = 0.5f; clouds->setOptions(options);
+    offset->set(9.0f); scene.draw(); CHECK(std::abs(scene.pixels()[0]-0.5f) < 0.01f);
+    options.farShadowCoverage = 50000.0f; clouds->setOptions(options);
+    offset->set(30.0f); scene.draw(); CHECK(scene.pixels()[0] == Approx(1.0f));
+    offset->set(15.0f); scene.draw(); CHECK(std::abs(scene.pixels()[0]-0.5f) < 0.01f);
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+// Verify the near field is preserved and the anchored far grid follows wind, independently of camera translation.
+TEST_CASE("Cloud shadow cascades preserve near detail and stabilize distant receivers", "[clouds][cloudcascades][.gl]")
+{
+    osg::ref_ptr<SkyNode2> sky = new SkyNode2;
+    auto options = weather(); options.coverage = 0.6f; options.density = 4.0f;
+    options.topAltitude = 2300.0f; options.seed = 3;
+    options.size = 1500.0f; options.erosion = 0.4f; options.shadowStrength = 1.0f;
+    osg::ref_ptr<CloudLayer> clouds = new CloudLayer(options); sky->setCloudLayer(clouds);
+    Scene scene(sky,256,256); scene.skyView(1000.0);
+    groundShadowProbe(scene,256,256,60.0f);
+    drawAtTime(scene,0.0); auto nearOnly = scene.pixels();
+    REQUIRE(scene.save("cloud-shadow-cascades-off.png"));
+    options.farShadows = true; clouds->setOptions(options);
+    drawAtTime(scene,0.0); auto both = scene.pixels();
+    REQUIRE(scene.save("cloud-shadow-cascades-on.png"));
+    double nearError = 0.0, farShadow = 0.0; unsigned nearCount = 0, farCount = 0;
+    for (unsigned y=0; y<256; ++y)
+    for (unsigned x=0; x<256; ++x)
+    {
+        float radius = std::max(std::abs((x+0.5f)/256.0f*120.0f-60.0f),
+            std::abs((y+0.5f)/256.0f*120.0f-60.0f));
+        unsigned i=(y*256+x)*4;
+        if (radius < 7.0f) { nearError += std::abs(nearOnly[i]-both[i]); ++nearCount; }
+        if (radius > 12.0f && radius < 35.0f) { farShadow += 1.0f-both[i]; ++farCount; }
+    }
+    CHECK(nearError/nearCount < 0.0001);
+    CHECK(farShadow/farCount > 0.05);
+    // Sub-texel and multi-texel camera translations must not resample a stationary world field.
+    osg::Vec3d eye, center, up;
+    scene.viewer->getCamera()->getViewMatrixAsLookAt(eye,center,up);
+    for (double meters : {50.0,750.0,4000.0})
+    {
+        osg::Vec3d shift(0,meters,0);
+        scene.viewer->getCamera()->setViewMatrixAsLookAt(eye+shift,center+shift,up);
+        drawAtTime(scene,0.0); auto moved = scene.pixels();
+        double error = 0.0; unsigned count = 0;
+        for (unsigned y=0; y<256; ++y)
+        for (unsigned x=0; x<256; ++x)
+        {
+            float radius = std::max(std::abs((x+0.5f)/256.0f*120.0f-60.0f),
+                std::abs((y+0.5f)/256.0f*120.0f-60.0f));
+            if (radius > 16.0f && radius < 35.0f)
+            {
+                unsigned i=(y*256+x)*4; error += std::abs(moved[i]-both[i]); ++count;
+            }
+        }
+        INFO("camera shift=" << meters << " mean far transmission error=" << error/count);
+        CHECK(error/count < 0.005);
+    }
+    scene.viewer->getCamera()->setViewMatrixAsLookAt(eye,center,up);
+    options.wind.set(0,100,0); clouds->setOptions(options);
+    drawAtTime(scene,10.0);
+    CHECK(difference(both,scene.pixels()) > 0.01);
+    CHECK(glGetError() == GL_NO_ERROR);
 }
 
 // Below-horizon pixels cannot contain clouds here: moving, bright shaft structure must come from scattering in air.

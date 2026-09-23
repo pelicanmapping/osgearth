@@ -91,11 +91,16 @@ jobs:
         if ($LASTEXITCODE -ne 0) {
           throw 'Chocolatey failed to install cmake 3.31.7.'
         }
-        $cmakeExe = Get-ChildItem -Path (Join-Path $env:ChocolateyInstall 'lib') -Filter cmake.exe -File -Recurse |
+        $cmakeCandidates = @(
+          Get-Command cmake.exe -All -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          Get-ChildItem -Path (Join-Path $env:ChocolateyInstall 'lib') -Filter cmake.exe -File -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName
+        ) | Select-Object -Unique
+        $cmakeExe = $cmakeCandidates |
           Where-Object {
-            (& $_.FullName --version | Select-Object -First 1) -match 'cmake version 3\.31\.7'
+            $_ -and ((& $_ --version | Select-Object -First 1) -match 'cmake version 3\.31\.7')
           } |
-          Select-Object -ExpandProperty FullName -First 1
+          Select-Object -First 1
         if (-not $cmakeExe) {
           throw 'Unable to resolve the Chocolatey-installed cmake 3.31.7 executable.'
         }

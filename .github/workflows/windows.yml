@@ -94,7 +94,7 @@ jobs:
         $cmakeCandidates = @(
           Get-ChildItem -Path (Join-Path $env:ChocolateyInstall 'bin') -Filter cmake.exe -File -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty FullName
-          Get-ChildItem -Path (Join-Path $env:ChocolateyInstall 'lib') -Filter cmake.exe -File -Recurse -ErrorAction SilentlyContinue |
+          Get-ChildItem -Path (Join-Path (Join-Path $env:ChocolateyInstall 'lib') 'cmake*') -Filter cmake.exe -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty FullName
         ) | Select-Object -Unique
         $cmakeExe = $cmakeCandidates |

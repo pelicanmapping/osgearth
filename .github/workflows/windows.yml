@@ -84,6 +84,9 @@ jobs:
           throw 'Chocolatey package cmake 3.31.7 is unavailable.'
         }
         $installedCmakePackage = choco list --local-only --exact cmake --limit-output
+        if ($LASTEXITCODE -ne 0) {
+          throw 'Chocolatey failed to query the installed cmake package.'
+        }
         if ($installedCmakePackage | Select-String '^cmake\|3\.31\.7$') {
           Write-Host 'Chocolatey cmake 3.31.7 is already installed.'
         }

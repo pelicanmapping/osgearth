@@ -70,7 +70,12 @@ jobs:
       shell: powershell
       run: |
         Invoke-WebRequest -Uri "https://pelican-public.s3.us-east-1.amazonaws.com/cesium-native-v0.37.0-vs2019.zip" -OutFile "C:\cesium-native.zip"
-        Expand-Archive -Path "C:\cesium-native.zip" -DestinationPath "C:\cesium-native"
+        Expand-Archive -Path "C:\cesium-native.zip" -DestinationPath "C:\cesium-native"    
+        
+    - name: Install compatible CMake
+      uses: lukka/get-cmake@v4.0.0
+      with:
+        cmakeVersion: 3.31.8
 
     - name: Configure CMake
       shell: bash

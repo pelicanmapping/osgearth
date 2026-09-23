@@ -92,7 +92,8 @@ jobs:
           throw 'Chocolatey failed to install cmake 3.31.7.'
         }
         $cmakeCandidates = @(
-          Get-Command cmake.exe -All -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          Get-ChildItem -Path (Join-Path $env:ChocolateyInstall 'bin') -Filter cmake.exe -File -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName
           Get-ChildItem -Path (Join-Path $env:ChocolateyInstall 'lib') -Filter cmake.exe -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty FullName
         ) | Select-Object -Unique

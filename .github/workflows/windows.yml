@@ -72,6 +72,22 @@ jobs:
         Invoke-WebRequest -Uri "https://pelican-public.s3.us-east-1.amazonaws.com/cesium-native-v0.37.0-vs2019.zip" -OutFile "C:\cesium-native.zip"
         Expand-Archive -Path "C:\cesium-native.zip" -DestinationPath "C:\cesium-native"
 
+    - name: Pin CMake
+      shell: pwsh
+      run: |
+        choco upgrade cmake --version=3.31.7 --allow-downgrade --force --no-progress
+        $chocoBin = Join-Path $env:ChocolateyInstall 'bin'
+        $env:PATH = "$chocoBin;$env:PATH"
+        $cmakeExe = Get-Command cmake.exe -All -ErrorAction Stop |
+          Select-Object -ExpandProperty Source -Unique |
+          Where-Object {
+            (& $_ --version | Select-Object -First 1) -match 'cmake version 3\.31\.7'
+          } |
+          Select-Object -First 1
+        $cmakeDir = Split-Path -Parent $cmakeExe
+        $cmakeDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        & $cmakeExe --version
+
     - name: Configure CMake
       shell: bash
       working-directory: ${{ runner.workspace }}/build

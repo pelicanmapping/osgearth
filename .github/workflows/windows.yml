@@ -80,6 +80,9 @@ jobs:
           throw 'Chocolatey package cmake 3.31.7 is unavailable.'
         }
         choco upgrade cmake --version=3.31.7 --allow-downgrade --force --no-progress
+        if ($LASTEXITCODE -ne 0) {
+          throw 'Chocolatey failed to install cmake 3.31.7.'
+        }
         $chocoBin = Join-Path $env:ChocolateyInstall 'bin'
         $env:PATH = "$chocoBin;$env:PATH"
         $cmakeExe = Get-Command cmake.exe -All -ErrorAction Stop |

@@ -75,6 +75,7 @@ jobs:
     - name: Pin CMake
       shell: pwsh
       run: |
+        $ErrorActionPreference = 'Stop'
         $cmakePackage = choco search cmake --exact --version=3.31.7 --limit-output
         if (-not ($cmakePackage | Select-String '^cmake\|3\.31\.7$')) {
           throw 'Chocolatey package cmake 3.31.7 is unavailable.'

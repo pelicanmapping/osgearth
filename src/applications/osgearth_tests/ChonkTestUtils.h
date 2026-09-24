@@ -151,5 +151,15 @@ namespace ChonkTest
             result->readPixels(0, 0, 256, 256, GL_RGBA, GL_UNSIGNED_BYTE);
             return result;
         }
+
+        //! Releases Chonk's shared render-bin programs while this context is current. A later
+        //! context that reuses its ID then compiles fresh programs instead of using dead names.
+        ~Renderer()
+        {
+            if (!context || !context->valid() || !context->makeCurrent())
+                return;
+            osgEarth::ChonkRenderBin::releaseSharedGLObjects(context->getState());
+            context->releaseContext();
+        }
     };
 }

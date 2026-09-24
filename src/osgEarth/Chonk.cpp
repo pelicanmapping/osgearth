@@ -18,9 +18,15 @@
 #include "Math"
 #include "InstancedExternalNode"
 #include "ExternalNode"
+#include "CameraUtils"
 #include <osg/MatrixTransform>
 #include <osg/CullFace>
 #include <osg/FrontFace>
+#include <osg/FrameBufferObject>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <cstdlib>
 #include <stdexcept>
 #include <limits>
@@ -78,6 +84,66 @@ namespace
         const osg::Vec3d c(matrix(2,0), matrix(2,1), matrix(2,2));
         return (a ^ b)*c > 1e-12 && matrix(0,3) == 0 && matrix(1,3) == 0 &&
             matrix(2,3) == 0 && matrix(3,3) == 1;
+    }
+
+    //! Scans one image for texels below full alpha. Exact for uncompressed and DXT data,
+    //! which includes every Basis transcode target; unknown formats with alpha report true.
+    bool imageMayBeTranslucent(const osg::Image& image)
+    {
+        switch (image.getPixelFormat())
+        {
+        case GL_RGB:
+        case 0x80E0: // GL_BGR
+        case GL_RED:
+        case 0x8227: // GL_RG
+        case GL_LUMINANCE:
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+            return false; // no alpha channel: samples read alpha = 1
+        case GL_RGBA:
+        case GL_BGRA:
+        case GL_ALPHA:
+        case GL_LUMINANCE_ALPHA:
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+            return image.isImageTranslucent();
+        default:
+            return true;
+        }
+    }
+
+    //! Conservatively reports whether sampling a texture can yield alpha below one.
+    //! Thread-safe; caches per live image and modification count, since scans are O(texels).
+    bool textureMayBeTranslucent(const osg::Texture* texture)
+    {
+        if (!texture) return false;
+        struct Entry { osg::observer_ptr<const osg::Image> image; unsigned modified; bool translucent; };
+        static std::mutex mutex;
+        static std::unordered_map<const osg::Image*, Entry> cache;
+        for (unsigned i = 0; i < texture->getNumImages(); ++i)
+        {
+            const osg::Image* image = texture->getImage(i);
+            if (!image) continue;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                auto entry = cache.find(image);
+                if (entry != cache.end() && entry->second.image.get() == image &&
+                    entry->second.modified == image->getModifiedCount())
+                {
+                    if (entry->second.translucent) return true;
+                    continue;
+                }
+            }
+            const bool translucent = imageMayBeTranslucent(*image);
+            std::lock_guard<std::mutex> lock(mutex);
+            // Drop entries for released images before they can alias a new allocation.
+            if (cache.size() > 4096)
+                for (auto e = cache.begin(); e != cache.end(); )
+                    e = e->second.image.valid() ? std::next(e) : cache.erase(e);
+            cache[image] = { image, image->getModifiedCount(), translucent };
+            if (translucent) return true;
+        }
+        return false;
     }
 
     struct SendIndices
@@ -150,6 +216,7 @@ namespace
         TextureArena* _textures = nullptr;
         ChonkFactory::GetOrCreateFunction _getOrCreateTexture;
         std::stack<ChonkMaterial::Ptr> _materialStack;
+        std::stack<bool> _alphaStack; // parallel to _materialStack: albedo may be translucent
         std::stack<osg::Matrix> _transformStack;
         std::unordered_map<osg::Texture*, Texture::Ptr> _textureLUT;
         // Optional page writer runs with the current inherited material stack.
@@ -223,6 +290,7 @@ namespace
             try
             {
                 _materialStack.push(reuseOrCreateMaterial(nullptr, nullptr, nullptr, nullptr, nullptr));
+                _alphaStack.push(false);
                 node.accept(*this);
             }
             catch (const std::exception& error)
@@ -327,6 +395,7 @@ namespace
             {
                 Texture::Ptr albedo_tex, normal_tex, pbr_tex, ao_tex;
                 Texture::Ptr material_tex1, material_tex2;
+                bool albedoAlpha = false;
 
                 auto combo = dynamic_cast<PBRTexture*>(stateset->getTextureAttribute(ALBEDO_UNIT, osg::StateAttribute::TEXTURE));
                 if (combo)
@@ -335,12 +404,15 @@ namespace
                     normal_tex = addTexture(combo->normal);
                     pbr_tex = addTexture(combo->pbr);
                     ao_tex = addTexture(combo->occlusion);
+                    albedoAlpha = albedo_tex && textureMayBeTranslucent(combo->albedo.get());
                 }
                 else
                 {
                     albedo_tex = addTexture(ALBEDO_UNIT, stateset);
                     normal_tex = addTexture(NORMAL_UNIT, stateset);
                     pbr_tex = addTexture(PBR_UNIT, stateset);
+                    albedoAlpha = albedo_tex && textureMayBeTranslucent(dynamic_cast<osg::Texture*>(
+                        stateset->getTextureAttribute(ALBEDO_UNIT, osg::StateAttribute::TEXTURE)));
                 }
 
                 material_tex1 = findExternalTexture(MAT1_SLOT, stateset);
@@ -352,6 +424,7 @@ namespace
                         albedo_tex, normal_tex, pbr_tex, material_tex1, material_tex2,
                         ao_tex, combo ? combo->layoutAndFactors : osg::Vec4(0, 1, 1, 1));
                     _materialStack.push(material);
+                    _alphaStack.push(albedoAlpha);
                     pushed = true;
                 }
             }
@@ -361,6 +434,7 @@ namespace
         void popStateSet()
         {
             _materialStack.pop();
+            _alphaStack.pop();
         }
 
         void apply(osg::Node& node)
@@ -420,6 +494,10 @@ namespace
 
                 auto& material = _materialStack.top();
                 retainMaterial(chonk, material);
+                // Record alpha-capable materials so each LOD can be classified after ripping.
+                const bool alphaMaterial = _alphaStack.top();
+                if (alphaMaterial)
+                    chonk->_alphaMaterials.insert(material->index);
                 std::unordered_map<GLshort, ChonkMaterial::Ptr> extendedVariants;
                 osg::Vec3f n;
                 const osg::Matrixd normalMatrix = osg::Matrixd::inverse(matrix);
@@ -510,6 +588,8 @@ namespace
                             variant = _textures->getMaterialArena()->getOrCreate(*_textures,
                                 material->textures, osg::Vec2i(id, -1), material->occlusion, material->layoutAndFactors);
                             retainMaterial(chonk, variant);
+                            if (alphaMaterial) // same albedo as its base material
+                                chonk->_alphaMaterials.insert(variant->index);
                         }
                         v.material_index = variant->index;
                     }
@@ -663,6 +743,19 @@ Chonk::getBound()
             _box.expandBy(_vbo_store[index].position);
     }
     return _box;
+}
+
+bool
+Chonk::hasAlphaTest(std::size_t first, std::size_t end) const
+{
+    end = std::min(end, _vbo_store.size());
+    for (std::size_t i = first; i < end; ++i)
+    {
+        const auto& v = _vbo_store[i];
+        if (v.color.a() < 255 || (!_alphaMaterials.empty() && _alphaMaterials.count(v.material_index)))
+            return true;
+    }
+    return false;
 }
 
 ChonkFactory::ChonkFactory()
@@ -1113,7 +1206,7 @@ namespace
                 // example:
                 // auto chonk = _factory->getOrCreateChonk(payload.get(), 1.0f, 100.0f);
                 // By default no scales are set meaning no pixel-size culling.
-                
+
                 auto chonk = _factory->getOrCreateChonk(payload.get());
                 if (!chonk) return node;
                 for (const auto& matrix : external->getMatrices())
@@ -1340,6 +1433,7 @@ ChonkGeometryPageBuilder::append(const std::function<bool(Chonk*)>& writer,
         if (!std::isfinite(mesh.bounds.radius()))
             throw std::invalid_argument("Chonk mesh bounds overflow");
         storage._lods.push_back({ mesh.firstIndex, mesh.indexCount, farScale, nearScale, mesh.firstVertex });
+        storage._lods.back().alphaTested = storage.hasAlphaTest(mesh.firstVertex, mesh.firstVertex + mesh.vertexCount);
         _page->_meshes.push_back(mesh);
         return unsigned(meshes);
     }
@@ -1409,6 +1503,7 @@ ChonkFactory::getOrCreateChonk(osg::Node* node, float farScale, float nearScale)
     if (!ripper.rip(*node)) return {};
     if (chonk->_ebo_store.empty()) return {};
     chonk->_lods.push_back({0u, chonk->_ebo_store.size(), farScale, nearScale});
+    chonk->_lods.back().alphaTested = chonk->hasAlphaTest(0, chonk->_vbo_store.size());
     chonk->getBound(); // publish an initialized immutable bound to paging threads
     _chonkCache.push_back({node, chonk, farScale, nearScale});
     return chonk;
@@ -1460,6 +1555,7 @@ ChonkFactory::load(osg::Node* node, Chonk* chonk, float far_pixel_scale, float n
     chonk->_ebo_store.reserve(chonk->_ebo_store.size() + counter._numElements);
 
     unsigned offset = chonk->_ebo_store.size();
+    const std::size_t firstVertex = chonk->_vbo_store.size();
 
     // rip geometry and textures into a new Asset object
     Ripper ripper(chonk, textures.get(), getOrCreateTexture);
@@ -1470,6 +1566,7 @@ ChonkFactory::load(osg::Node* node, Chonk* chonk, float far_pixel_scale, float n
     {
         chonk->_lods.push_back({ offset, chonk->_ebo_store.size() - offset,
             far_pixel_scale, std::min(near_pixel_scale, MAX_NEAR_PIXEL_SCALE) });
+        chonk->_lods.back().alphaTested = chonk->hasAlphaTest(firstVertex, chonk->_vbo_store.size());
     }
     chonk->_box.init();
 
@@ -1500,6 +1597,7 @@ ChonkFactory::load(osg::Node* node, ChonkDrawable* drawable, float far_pixel_sca
         auto finishChonk = [&](const Chonk::Ptr& chonk)
         {
             chonk->_lods.push_back({0u, chonk->_ebo_store.size(), far_pixel_scale, near_pixel_scale});
+            chonk->_lods.back().alphaTested = chonk->hasAlphaTest(0, chonk->_vbo_store.size());
             chonk->getBound();
         };
         // Reuse the same encoder and material stack for both storage policies.
@@ -1893,32 +1991,45 @@ ChonkDrawable::drawImplementation(osg::RenderInfo& ri) const
 }
 
 void
-ChonkDrawable::update_and_cull_batches(osg::State& state) const
+ChonkDrawable::update_and_cull_batches(osg::State& state, int pass, const OcclusionFrame* frame) const
 {
     auto& globjects = GLObjects::get(_globjects, state);
 
-    // if something changed, we need to refresh the GPU tables.
-    update_gl_objects(globjects, state);
+    if (pass == RESET)
+    {
+        // if something changed, we need to refresh the GPU tables.
+        // Only here, so every later pass this frame sees the same tables.
+        update_gl_objects(globjects, state);
+    }
 
     if (_gpucull)
     {
-        auto pass = ChonkRenderPass::find(state);
-        if (pass) globjects.cullViews(state,*pass);
-        else globjects.cull(state);
+        auto views = ChonkRenderPass::find(state);
+        if (views)
+        {
+            // Multi-view submissions run their own reset/cull/compact sequence and keep a
+            // single ordinary list.
+            if (pass == RESET) globjects.cullViews(state,*views);
+        }
+        else if (pass == RESET) globjects.reset(state);
+        else globjects.cull(state, pass, frame);
     }
 }
 
 void
-ChonkDrawable::draw_batches(osg::State& state) const
+ChonkDrawable::draw_batches(osg::State& state, int list) const
 {
     auto& globjects = GLObjects::get(_globjects, state);
 
-    auto pass = _gpucull ? ChonkRenderPass::find(state) : nullptr;
-    if (pass) globjects.drawViews(state,*pass);
+    auto views = _gpucull ? ChonkRenderPass::find(state) : nullptr;
+    if (views)
+    {
+        if (list == EARLY_CUTOUT) globjects.drawViews(state,*views);
+    }
     else
     {
         state.bindVertexArrayObject(globjects._vao->name());
-        globjects.draw(state);
+        globjects.draw(state, list);
     }
 }
 
@@ -2210,12 +2321,13 @@ ChonkDrawable::GLObjects::update(
         initialize(host, state);
     }
 
-    // build a list of draw commands, each of which will 
+    // build a list of draw commands, each of which will
     // have N instances, one per chonk meta.
     _commands.clear();
     _drawGroups.clear();
     ++_dataRevision;
     _viewBatches.clear();
+    _visibility.clear(); // source indices change; cameras restart with everything visible
 
     // record for each variant (LOD) of each chonk
     _chonk_lods.clear();
@@ -2261,6 +2373,7 @@ ChonkDrawable::GLObjects::update(
                 meta.fade_near = fadeNear;
                 meta.fade_far = fadeFar;
                 meta.draw_group = unsigned(_drawGroups.size()-1);
+                meta.flags = lods[lod].alphaTested ? FLAG_ALPHA_TESTED : 0u;
                 _chonk_lods.push_back(meta);
             }
         }
@@ -2355,6 +2468,23 @@ ChonkDrawable::GLObjects::update(
             _chonkBuf->unbind();
         }
         _chonkBuf->uploadData(_chonk_lods, GL_STATIC_DRAW);
+
+        // Four copies of the commands, one per List, each with its own output range. Culling
+        // zeroes the counts on the GPU, so the templates upload only when the content changes.
+        if (std::size_t(NUM_LISTS) * outputOffset > std::size_t(std::numeric_limits<GLsizei>::max()) / sizeof(VisibleInstance))
+            throw std::length_error("Chonk drawable exceeds GPU buffer capacity");
+        std::vector<Chonk::DrawCommand> lists;
+        lists.reserve(NUM_LISTS * _commands.size());
+        for (unsigned list = 0; list < NUM_LISTS; ++list)
+        {
+            for (auto command : _commands)
+            {
+                command.cmd.baseInstance += list * outputOffset;
+                command.cmd.instanceCount = 0;
+                lists.push_back(command);
+            }
+        }
+        _commandBuf->uploadData(lists);
     }
     else
     {
@@ -2363,7 +2493,7 @@ ChonkDrawable::GLObjects::update(
 
     // Reserve one small record for every possible survivor in the CPU-assigned
     // command ranges. Source-buffer allocation padding needs no output records.
-    GLsizei outputSize = (_gpucull ? outputOffset : unculledInstances.size()) * sizeof(VisibleInstance);
+    GLsizei outputSize = (_gpucull ? NUM_LISTS * outputOffset : unculledInstances.size()) * sizeof(VisibleInstance);
     if (!_instanceOutputBuf)
     {
         _instanceOutputBuf = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state, outputSize, OUTPUT_BUF_CHUNK_SIZE);
@@ -2383,7 +2513,24 @@ ChonkDrawable::GLObjects::update(
 }
 
 void
-ChonkDrawable::GLObjects::cull(osg::State& state)
+ChonkDrawable::GLObjects::reset(osg::State& state)
+{
+    if (_commands.empty() || _commandBuf == nullptr)
+        return;
+
+    auto program = state.getLastAppliedProgramObject();
+    OE_HARD_ASSERT(program != nullptr, "Check for shader errors!");
+    auto location = [&](const char* name) { return program->getUniformLocation(osg::Uniform::getNameID(name)); };
+    _ext->glUniform4ui(location("oe_chonk_views"),0,0,0,0);
+    _ext->glUniform1ui(location("oe_chonk_list_stride"), GLuint(_commands.size()));
+    _ext->glUniform1i(location("oe_chonk_pass"), RESET);
+    _commandBuf->bindBufferBase(29);
+    _ext->glDispatchCompute(GLuint((NUM_LISTS*_commands.size() + GPU_CULLING_LOCAL_WG_SIZE-1) /
+        GPU_CULLING_LOCAL_WG_SIZE), 1, 1);
+}
+
+void
+ChonkDrawable::GLObjects::cull(osg::State& state, int pass, const OcclusionFrame* frame)
 {
     if (_commands.empty() || _commandBuf == nullptr)
         return;
@@ -2395,31 +2542,66 @@ ChonkDrawable::GLObjects::cull(osg::State& state)
 
     auto ext = _vao->ext();
 
-    OE_HARD_ASSERT(state.getLastAppliedProgramObject() != nullptr, "Check for shader errors!");
-    ext->glUniform4ui(state.getLastAppliedProgramObject()->getUniformLocation(
-        osg::Uniform::getNameID("oe_chonk_views")),0,0,0,0);
-
-    // Start each dispatch with empty output ranges. Surviving instance/LOD
-    // pairs atomically increment these counts as they write their records.
-    for (auto& command : _commands)
-    {
-        command.cmd.instanceCount = 0;
-    }
-    _commandBuf->uploadData(_commands);
+    auto program = state.getLastAppliedProgramObject();
+    OE_HARD_ASSERT(program != nullptr, "Check for shader errors!");
+    // Resolve locations on the active program: define variants have different locations.
+    auto location = [&](const char* name) { return program->getUniformLocation(osg::Uniform::getNameID(name)); };
+    ext->glUniform4ui(location("oe_chonk_views"),0,0,0,0);
+    ext->glUniform1ui(location("oe_chonk_list_stride"), GLuint(_commands.size()));
+    ext->glUniform1ui(location("oe_chonk_max_lods"), GLuint(_maxNumLODs));
 
     _instanceOutputBuf->bindBufferBase(0);
     _commandBuf->bindBufferBase(29);
     _chonkBuf->bindBufferBase(30);
     _instanceInputBuf->bindBufferBase(31);
 
-    // calculate number of workgroups.
-    // (todo: this is probably unnecessary since we already padded the 
-    // instances array before computing _numInstances)
+    if (pass != CULL && frame)
+        visibility(state, *frame)->bindBufferBase(23);
+
+    if (pass == LATE)
+    {
+        // The pyramid is optional: without it every instance counts as visible.
+        const bool valid = frame && frame->hizValid && ext->glUniformHandleui64;
+        if (valid) ext->glUniformHandleui64(location("oe_chonk_hiz"), frame->hiz);
+        const osg::Vec4f params = valid ? frame->hizParams : osg::Vec4f();
+        ext->glUniform4fv(location("oe_chonk_hiz_params"), 1, params.ptr());
+    }
+
+    // _numInstances is already padded to the workgroup size.
     unsigned workgroups = (_numInstances + (GPU_CULLING_LOCAL_WG_SIZE-1)) / GPU_CULLING_LOCAL_WG_SIZE;
 
     // Fixed CPU-assigned output ranges let each invocation cull and compact
     // independently. DrawLeaf publishes the results before the first draw.
+    ext->glUniform1i(location("oe_chonk_pass"), pass);
     ext->glDispatchCompute(workgroups, _maxNumLODs, 1);
+}
+
+GLBuffer::Ptr
+ChonkDrawable::GLObjects::visibility(osg::State& state, const OcclusionFrame& frame)
+{
+    for (auto i = _visibility.begin(); i != _visibility.end(); )
+    {
+        if (!i->camera.valid() || frame.frameNumber - i->lastUsed > 240u) i = _visibility.erase(i);
+        else ++i;
+    }
+    for (auto& entry : _visibility)
+    {
+        if (entry.key == frame.camera)
+        {
+            entry.lastUsed = frame.frameNumber;
+            return entry.bits;
+        }
+    }
+    _visibility.emplace_back();
+    auto& entry = _visibility.back();
+    entry.key = frame.camera;
+    entry.camera = frame.camera;
+    entry.lastUsed = frame.frameNumber;
+    entry.bits = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+    entry.bits->bind(); // Instantiate the generated name before GLBuffer's direct-state-access upload.
+    // A new camera draws everything in its first early pass; the late pass then learns what is hidden.
+    entry.bits->uploadData(std::vector<GLuint>(_numInstances * std::max<std::size_t>(_maxNumLODs, 1u), 1u));
+    return entry.bits;
 }
 
 namespace
@@ -2613,11 +2795,15 @@ void ChonkDrawable::GLObjects::drawViews(osg::State& state, const ChonkRenderPas
 }
 
 void
-ChonkDrawable::GLObjects::draw(osg::State& state)
+ChonkDrawable::GLObjects::draw(osg::State& state, int list)
 {
     OE_GL_ZONE_NAMED("draw");
 
-    if (_commandBuf == nullptr)
+    if (_commandBuf == nullptr || _commands.empty())
+        return;
+
+    // Unculled drawables keep one precomputed list and always take the alpha-tested path.
+    if (!_gpucull && list != EARLY_CUTOUT)
         return;
 
     // transmit the uniforms
@@ -2635,10 +2821,11 @@ ChonkDrawable::GLObjects::draw(osg::State& state)
         GL_UNSIGNED_SHORT :
         GL_UNSIGNED_INT;
 
+    const std::size_t first = _gpucull ? std::size_t(list) * _commands.size() : 0u;
     _glMultiDrawElementsIndirectBindlessNV(
         GL_TRIANGLES,
         elementType,
-        (const GLvoid*)0,
+        (const GLvoid*)(first * sizeof(Chonk::DrawCommand)),
         _commands.size(),
         sizeof(Chonk::DrawCommand),
         1);
@@ -2657,9 +2844,482 @@ ChonkDrawable::GLObjects::release()
     _groupBuf = nullptr;
     _coreVAO = nullptr;
     _viewBatches.clear();
+    _visibility.clear();
     _drawGroups.clear();
     _commands.clear();
     _dirty = true;
+}
+
+// GL enums used by the occlusion pyramid that OSG's headers may not define.
+#ifndef GL_DEPTH_STENCIL_ATTACHMENT
+#define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
+#endif
+#ifndef GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE
+#define GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE 0x8211
+#endif
+#ifndef GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE
+#define GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE 0x8216
+#endif
+#ifndef GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE
+#define GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE 0x8217
+#endif
+#ifndef GL_DEPTH32F_STENCIL8
+#define GL_DEPTH32F_STENCIL8 0x8CAD
+#endif
+#ifndef GL_READ_WRITE
+#define GL_READ_WRITE 0x88BA
+#endif
+
+namespace
+{
+    //! Process-wide render-bin switches, all on by default; set through ChonkRenderBin.
+    std::atomic<bool>& opaquePathFlag()
+    {
+        static std::atomic<bool> flag{true};
+        return flag;
+    }
+
+    std::atomic<bool>& occlusionCullingFlag()
+    {
+        static std::atomic<bool> flag{true};
+        return flag;
+    }
+
+    std::atomic<bool>& frontToBackFlag()
+    {
+        static std::atomic<bool> flag{true};
+        return flag;
+    }
+
+    //! GL 4.5 direct-state-access and bindless entry points for the occlusion pyramid. None of them
+    //! binds a texture unit, image unit or framebuffer, so OSG's state tracking stays valid.
+    //! Load with the owning context current.
+    struct HiZFunctions
+    {
+        void (GL_APIENTRY* createTextures)(GLenum, GLsizei, GLuint*) = nullptr;
+        void (GL_APIENTRY* textureStorage2D)(GLuint, GLsizei, GLenum, GLsizei, GLsizei) = nullptr;
+        void (GL_APIENTRY* textureParameteri)(GLuint, GLenum, GLint) = nullptr;
+        void (GL_APIENTRY* createFramebuffers)(GLsizei, GLuint*) = nullptr;
+        void (GL_APIENTRY* namedFramebufferTexture)(GLuint, GLenum, GLuint, GLint) = nullptr;
+        void (GL_APIENTRY* namedFramebufferDrawBuffer)(GLuint, GLenum) = nullptr;
+        void (GL_APIENTRY* namedFramebufferReadBuffer)(GLuint, GLenum) = nullptr;
+        GLenum (GL_APIENTRY* checkNamedFramebufferStatus)(GLuint, GLenum) = nullptr;
+        void (GL_APIENTRY* getNamedFramebufferAttachmentParameteriv)(GLuint, GLenum, GLenum, GLint*) = nullptr;
+        void (GL_APIENTRY* blitNamedFramebuffer)(GLuint, GLuint, GLint, GLint, GLint, GLint,
+            GLint, GLint, GLint, GLint, GLbitfield, GLenum) = nullptr;
+        GLuint64 (GL_APIENTRY* getTextureHandle)(GLuint) = nullptr;
+        void (GL_APIENTRY* makeTextureHandleResident)(GLuint64) = nullptr;
+        GLuint64 (GL_APIENTRY* getImageHandle)(GLuint, GLint, GLboolean, GLint, GLenum) = nullptr;
+        // Loaded here because OSG declares glMakeImageHandleResident without its access argument.
+        void (GL_APIENTRY* makeImageHandleResident)(GLuint64, GLenum) = nullptr;
+        void (GL_APIENTRY* uniformHandleui64)(GLint, GLuint64) = nullptr;
+        bool valid = false;
+
+        HiZFunctions()
+        {
+            osg::setGLExtensionFuncPtr(createTextures, "glCreateTextures");
+            osg::setGLExtensionFuncPtr(textureStorage2D, "glTextureStorage2D");
+            osg::setGLExtensionFuncPtr(textureParameteri, "glTextureParameteri");
+            osg::setGLExtensionFuncPtr(createFramebuffers, "glCreateFramebuffers");
+            osg::setGLExtensionFuncPtr(namedFramebufferTexture, "glNamedFramebufferTexture");
+            osg::setGLExtensionFuncPtr(namedFramebufferDrawBuffer, "glNamedFramebufferDrawBuffer");
+            osg::setGLExtensionFuncPtr(namedFramebufferReadBuffer, "glNamedFramebufferReadBuffer");
+            osg::setGLExtensionFuncPtr(checkNamedFramebufferStatus, "glCheckNamedFramebufferStatus");
+            osg::setGLExtensionFuncPtr(getNamedFramebufferAttachmentParameteriv,
+                "glGetNamedFramebufferAttachmentParameteriv");
+            osg::setGLExtensionFuncPtr(blitNamedFramebuffer, "glBlitNamedFramebuffer");
+            osg::setGLExtensionFuncPtr(getTextureHandle, "glGetTextureHandleARB");
+            osg::setGLExtensionFuncPtr(makeTextureHandleResident, "glMakeTextureHandleResidentARB");
+            osg::setGLExtensionFuncPtr(getImageHandle, "glGetImageHandleARB");
+            osg::setGLExtensionFuncPtr(makeImageHandleResident, "glMakeImageHandleResidentARB");
+            osg::setGLExtensionFuncPtr(uniformHandleui64, "glUniformHandleui64ARB");
+            valid = createTextures && textureStorage2D && textureParameteri && createFramebuffers &&
+                namedFramebufferTexture && namedFramebufferDrawBuffer && namedFramebufferReadBuffer &&
+                checkNamedFramebufferStatus && getNamedFramebufferAttachmentParameteriv &&
+                blitNamedFramebuffer && getTextureHandle && makeTextureHandleResident && getImageHandle &&
+                makeImageHandleResident && uniformHandleui64;
+        }
+    };
+
+    //! A texture or framebuffer created with direct state access and handed to osgEarth's object
+    //! pool, which deletes it on its own context once nothing else references it. Dropping the
+    //! last reference is therefore safe on any thread.
+    class HiZObject : public GLObject
+    {
+    public:
+        using Ptr = std::shared_ptr<HiZObject>;
+
+        //! Creates a 2D texture with immutable storage; call with the context current.
+        static Ptr texture(osg::State& state, const HiZFunctions& gl,
+            GLsizei levels, GLenum format, GLsizei width, GLsizei height, std::size_t bytes)
+        {
+            Ptr object(new HiZObject(GL_TEXTURE, state, bytes));
+            gl.createTextures(GL_TEXTURE_2D, 1, &object->_name);
+            gl.textureStorage2D(object->_name, levels, format, width, height);
+            GLObjectPool::get(state)->watch(object);
+            return object;
+        }
+
+        //! Creates a framebuffer object; call with the context current.
+        static Ptr framebuffer(osg::State& state, const HiZFunctions& gl)
+        {
+            Ptr object(new HiZObject(GL_FRAMEBUFFER_EXT, state, 0));
+            gl.createFramebuffers(1, &object->_name);
+            GLObjectPool::get(state)->watch(object);
+            return object;
+        }
+
+        //! Called by the pool with the context current. Deleting a texture also deletes its
+        //! bindless handles.
+        void release() override
+        {
+            if (_name == 0) return;
+            if (ns() == GL_FRAMEBUFFER_EXT) ext()->glDeleteFramebuffers(1, &_name);
+            else glDeleteTextures(1, &_name);
+            _name = 0;
+        }
+
+        GLsizei size() const override { return _bytes; }
+
+    private:
+        HiZObject(GLenum ns, osg::State& state, std::size_t bytes) :
+            GLObject(ns, state),
+            _bytes(GLsizei(std::min<std::size_t>(bytes, std::size_t(std::numeric_limits<GLsizei>::max())))) { }
+        GLsizei _bytes;
+    };
+
+    //! One camera's single-sample depth copy and max-depth pyramid in one graphics context.
+    //! Only that context's draw thread uses it.
+    struct HiZTarget
+    {
+        unsigned contextID = 0;
+        const osg::Camera* key = nullptr; // identity only
+        osg::observer_ptr<const osg::Camera> camera;
+        unsigned lastUsed = 0;
+        GLint source = -1; // framebuffer last copied from
+        GLenum sourceFormat = 0; // its depth format, or zero when it cannot be copied
+        GLint width = 0, height = 0, levels = 0;
+        GLenum format = 0; // format of the depth copy
+        HiZObject::Ptr depth, fbo, pyramid;
+        GLuint64 depthHandle = 0, pyramidHandle = 0;
+        std::vector<GLuint64> images; // one image handle per pyramid level
+        bool validated = false; // the first blit into this allocation raised no GL error
+        bool failed = false; // the camera's framebuffer cannot be copied: it keeps drawing everything
+
+        //! Drops the GL objects for the pool to delete; safe on any thread.
+        void release()
+        {
+            depth = fbo = pyramid = nullptr;
+            depthHandle = pyramidHandle = 0;
+            images.clear();
+            width = height = levels = 0;
+            format = 0;
+            validated = false;
+        }
+    };
+
+    //! Occlusion pyramids for every camera and context. The mutex guards the containers; entry
+    //! points stay loaded for the life of the process, and targets are shared so a concurrent
+    //! release cannot pull one out from under a draw.
+    struct HiZRegistry
+    {
+        std::mutex mutex;
+        std::unordered_map<unsigned, std::unique_ptr<HiZFunctions>> functions;
+        std::vector<std::shared_ptr<HiZTarget>> targets;
+    };
+
+    HiZRegistry& hizRegistry()
+    {
+        static HiZRegistry registry;
+        return registry;
+    }
+
+    //! Internal format matching a framebuffer's depth buffer, which a depth blit requires; zero when
+    //! there is no depth buffer or its format is unusual.
+    GLenum matchingDepthFormat(const HiZFunctions& gl, GLint fbo)
+    {
+        const GLenum depthAttachment = fbo ? GL_DEPTH_ATTACHMENT_EXT : GL_DEPTH;
+        const GLenum stencilAttachment = fbo ? GL_STENCIL_ATTACHMENT_EXT : GL_STENCIL;
+        GLint type = GL_NONE, bits = 0, component = GL_NONE, stencilType = GL_NONE, stencil = 0;
+        gl.getNamedFramebufferAttachmentParameteriv(fbo, depthAttachment,
+            GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE_EXT, &type);
+        if (type == GL_NONE)
+            return 0;
+        gl.getNamedFramebufferAttachmentParameteriv(fbo, depthAttachment, GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &bits);
+        gl.getNamedFramebufferAttachmentParameteriv(fbo, depthAttachment,
+            GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, &component);
+        gl.getNamedFramebufferAttachmentParameteriv(fbo, stencilAttachment,
+            GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE_EXT, &stencilType);
+        if (stencilType != GL_NONE)
+            gl.getNamedFramebufferAttachmentParameteriv(fbo, stencilAttachment,
+                GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &stencil);
+        if (component == GL_FLOAT && bits == 32) return stencil ? GL_DEPTH32F_STENCIL8 : GL_DEPTH_COMPONENT32F;
+        if (bits == 24) return stencil ? GL_DEPTH24_STENCIL8_EXT : GL_DEPTH_COMPONENT24;
+        if (stencil == 0 && bits == 16) return GL_DEPTH_COMPONENT16;
+        if (stencil == 0 && bits == 32) return GL_DEPTH_COMPONENT32;
+        return 0;
+    }
+
+    //! (Re)allocates a target's depth copy and floor-sized R32F pyramid, with resident handles.
+    //! Call with the context current; returns false when any piece is unavailable.
+    bool allocateHiZ(HiZTarget& t, osg::State& state, const HiZFunctions& gl, GLint width, GLint height,
+        GLenum format)
+    {
+        t.release();
+        t.width = width;
+        t.height = height;
+        t.format = format;
+
+        const std::size_t texels = std::size_t(width) * std::size_t(height);
+        const std::size_t texelBytes = format == GL_DEPTH32F_STENCIL8 ? 8u : format == GL_DEPTH_COMPONENT16 ? 2u : 4u;
+        t.depth = HiZObject::texture(state, gl, 1, format, width, height, texels * texelBytes);
+        t.depth->debugLabel("Chonk", "occlusion depth copy");
+        gl.textureParameteri(t.depth->name(), GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.textureParameteri(t.depth->name(), GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        t.fbo = HiZObject::framebuffer(state, gl);
+        const bool stencil = format == GL_DEPTH24_STENCIL8_EXT || format == GL_DEPTH32F_STENCIL8;
+        gl.namedFramebufferTexture(t.fbo->name(),
+            stencil ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT_EXT, t.depth->name(), 0);
+        gl.namedFramebufferDrawBuffer(t.fbo->name(), GL_NONE);
+        gl.namedFramebufferReadBuffer(t.fbo->name(), GL_NONE);
+        if (gl.checkNamedFramebufferStatus(t.fbo->name(), GL_DRAW_FRAMEBUFFER_EXT) != GL_FRAMEBUFFER_COMPLETE_EXT)
+            return false;
+
+        // Level 0 halves the viewport; like GL mipmaps, sizes round down, to 1x1 at the top.
+        const GLint w0 = std::max(1, width/2), h0 = std::max(1, height/2);
+        t.levels = 1;
+        while ((std::max(w0, h0) >> t.levels) > 0) ++t.levels;
+        t.pyramid = HiZObject::texture(state, gl, t.levels, GL_R32F, w0, h0,
+            std::size_t(w0) * std::size_t(h0) * 16u / 3u);
+        t.pyramid->debugLabel("Chonk", "occlusion pyramid");
+        gl.textureParameteri(t.pyramid->name(), GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+        gl.textureParameteri(t.pyramid->name(), GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.textureParameteri(t.pyramid->name(), GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.textureParameteri(t.pyramid->name(), GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        // Handles freeze the sampler state set above.
+        t.depthHandle = gl.getTextureHandle(t.depth->name());
+        t.pyramidHandle = gl.getTextureHandle(t.pyramid->name());
+        if (t.depthHandle == 0 || t.pyramidHandle == 0)
+            return false;
+        gl.makeTextureHandleResident(t.depthHandle);
+        gl.makeTextureHandleResident(t.pyramidHandle);
+        for (GLint level = 0; level < t.levels; ++level)
+        {
+            const GLuint64 image = gl.getImageHandle(t.pyramid->name(), level, GL_FALSE, 0, GL_R32F);
+            if (image == 0)
+                return false;
+            gl.makeImageHandleResident(image, GL_READ_WRITE);
+            t.images.push_back(image);
+        }
+        return true;
+    }
+
+    //! What buildHiZ publishes for the late culling pass.
+    struct HiZResult
+    {
+        GLuint64 handle = 0; // resident sampler handle of the pyramid
+        osg::Vec4f params; // viewport width and height in pixels, levels, 1
+    };
+
+    //! Copies the draw framebuffer's depth under the current viewport and reduces it into the camera's
+    //! pyramid with the applied pyramid program. Call on the camera's draw thread. Returns false,
+    //! publishing nothing, when anything is unavailable; the late pass then keeps every instance.
+    bool buildHiZ(osg::State& state, const osg::Camera* camera, unsigned frameNumber, HiZResult& result)
+    {
+        const osg::Viewport* viewport = state.getCurrentViewport();
+        auto program = state.getLastAppliedProgramObject();
+        if (!camera || !viewport || !program || !program->isLinked())
+            return false;
+
+        // A missing uniform means some other program is active (a broken build or an override).
+        auto location = [&](const char* name) { return program->getUniformLocation(osg::Uniform::getNameID(name)); };
+        const GLint depthLoc = location("oe_hiz_depth");
+        const GLint sourceLoc = location("oe_hiz_source");
+        const GLint targetLoc = location("oe_hiz_target");
+        const GLint sourceSizeLoc = location("oe_hiz_source_size");
+        const GLint targetSizeLoc = location("oe_hiz_target_size");
+        const GLint fromDepthLoc = location("oe_hiz_from_depth");
+        if (depthLoc < 0 || sourceLoc < 0 || targetLoc < 0 || sourceSizeLoc < 0 || targetSizeLoc < 0 ||
+            fromDepthLoc < 0)
+            return false;
+
+        const GLint x = GLint(viewport->x()), y = GLint(viewport->y());
+        const GLint width = GLint(viewport->width()), height = GLint(viewport->height());
+        if (width < 2 || height < 2)
+            return false;
+
+        auto& registry = hizRegistry();
+        const unsigned contextID = state.getContextID();
+        HiZFunctions* gl = nullptr;
+        std::shared_ptr<HiZTarget> target;
+        {
+            std::lock_guard<std::mutex> lock(registry.mutex);
+            auto& functions = registry.functions[contextID];
+            if (!functions) functions.reset(new HiZFunctions());
+            gl = functions.get();
+            if (!gl->valid)
+                return false;
+
+            // Retire this context's targets for dead cameras (even one whose address was reused)
+            // and for cameras that stopped drawing.
+            auto& targets = registry.targets;
+            for (auto i = targets.begin(); i != targets.end(); )
+            {
+                const HiZTarget& t = **i;
+                if (t.contextID == contextID &&
+                    (!t.camera.valid() || (t.key != camera && frameNumber - t.lastUsed > 600u)))
+                    i = targets.erase(i);
+                else
+                    ++i;
+            }
+            for (auto& t : targets)
+                if (t->contextID == contextID && t->key == camera) target = t;
+            if (!target)
+            {
+                target = std::make_shared<HiZTarget>();
+                target->contextID = contextID;
+                target->key = camera;
+                target->camera = camera;
+                targets.push_back(target);
+            }
+        }
+
+        HiZTarget& t = *target;
+        t.lastUsed = frameNumber;
+        if (t.failed)
+            return false;
+
+        GLint source = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING_EXT, &source);
+        if (source != t.source)
+        {
+            t.source = source;
+            t.sourceFormat = matchingDepthFormat(*gl, source);
+        }
+        if (!t.depth || width != t.width || height != t.height || t.sourceFormat != t.format)
+        {
+            // A target without a depth buffer (or with an unusual one) simply keeps drawing everything.
+            if (t.sourceFormat == 0)
+            {
+                t.release();
+                t.failed = true;
+                OE_INFO << LC << "Occlusion culling off for camera \"" << camera->getName()
+                    << "\": no copyable depth buffer" << std::endl;
+                return false;
+            }
+            if (!allocateHiZ(t, state, *gl, width, height, t.sourceFormat))
+            {
+                t.release();
+                t.failed = true;
+                OE_WARN << LC << "Occlusion culling disabled for camera \"" << camera->getName()
+                    << "\": depth pyramid allocation failed" << std::endl;
+                return false;
+            }
+        }
+
+        // Errors raised earlier by other code are not the blit's; drain them before checking it.
+        if (!t.validated)
+            for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; ++i) { }
+
+        // A depth blit keeps one sample of each multisampled pixel. The scissor test is the only
+        // fragment operation that applies to blits, so lift it for the copy.
+        const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+        if (scissor) glDisable(GL_SCISSOR_TEST);
+        gl->blitNamedFramebuffer(source, t.fbo->name(), x, y, x + width, y + height, 0, 0, width, height,
+            GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+        if (scissor) glEnable(GL_SCISSOR_TEST);
+
+        if (!t.validated)
+        {
+            if (glGetError() != GL_NO_ERROR)
+            {
+                t.release();
+                t.failed = true;
+                OE_WARN << LC << "Occlusion culling disabled for camera \"" << camera->getName()
+                    << "\": its depth buffer cannot be copied" << std::endl;
+                return false;
+            }
+            t.validated = true;
+        }
+
+        // Each dispatch halves the previous level, keeping the farthest depth.
+        auto ext = state.get<osg::GLExtensions>();
+        gl->uniformHandleui64(depthLoc, t.depthHandle);
+        GLint sw = width, sh = height;
+        GLint tw = std::max(1, sw/2), th = std::max(1, sh/2);
+        for (GLint level = 0; level < t.levels; ++level)
+        {
+            ext->glUniform1i(fromDepthLoc, level == 0 ? 1 : 0);
+            gl->uniformHandleui64(sourceLoc, t.images[level > 0 ? level - 1 : 0]);
+            gl->uniformHandleui64(targetLoc, t.images[level]);
+            ext->glUniform2i(sourceSizeLoc, sw, sh);
+            ext->glUniform2i(targetSizeLoc, tw, th);
+            ext->glDispatchCompute(GLuint((tw + 7)/8), GLuint((th + 7)/8), 1u);
+            ext->glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+            sw = tw;
+            sh = th;
+            tw = std::max(1, tw/2);
+            th = std::max(1, th/2);
+        }
+        ext->glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+
+        result.handle = t.pyramidHandle;
+        result.params.set(float(width), float(height), float(t.levels), 1.0f);
+        return true;
+    }
+
+    //! Forgets one context's occlusion pyramids (every context's when state is null). The object
+    //! pool deletes their GL objects on the owning context, so any thread may call this.
+    void releaseHiZ(osg::State* state)
+    {
+        auto& registry = hizRegistry();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        auto& targets = registry.targets;
+        for (auto i = targets.begin(); i != targets.end(); )
+        {
+            if (state == nullptr || (*i)->contextID == state->getContextID())
+                i = targets.erase(i);
+            else
+                ++i;
+        }
+    }
+}
+
+void
+ChonkRenderBin::setOpaquePath(bool value)
+{
+    opaquePathFlag() = value;
+}
+
+bool
+ChonkRenderBin::getOpaquePath()
+{
+    return opaquePathFlag();
+}
+
+void
+ChonkRenderBin::setOcclusionCulling(bool value)
+{
+    occlusionCullingFlag() = value;
+}
+
+bool
+ChonkRenderBin::getOcclusionCulling()
+{
+    return occlusionCullingFlag();
+}
+
+void
+ChonkRenderBin::setFrontToBack(bool value)
+{
+    frontToBackFlag() = value;
+}
+
+bool
+ChonkRenderBin::getFrontToBack()
+{
+    return frontToBackFlag();
 }
 
 ChonkRenderBin::ChonkRenderBin() :
@@ -2670,7 +3330,9 @@ ChonkRenderBin::ChonkRenderBin() :
 
 ChonkRenderBin::ChonkRenderBin(const ChonkRenderBin& rhs, const osg::CopyOp& op) :
     osgUtil::RenderBin(rhs, op),
-    _cullSS(rhs._cullSS)
+    _cullSS(rhs._cullSS),
+    _hizSS(rhs._hizSS),
+    _opaqueSS(rhs._opaqueSS)
 {
     if (!_cullSS.valid())
     {
@@ -2692,35 +3354,59 @@ ChonkRenderBin::ChonkRenderBin(const ChonkRenderBin& rhs, const osg::CopyOp& op)
             // Default far pixel scales per LOD.
             // We expect this to be overriden from above.
             proto->_cullSS->addUniform(new osg::Uniform("oe_lod_scale", osg::Vec4f(1, 1, 1, 1)));
+
+            // Occlusion pyramid reduction program.
+            proto->_hizSS = new osg::StateSet();
+            osg::Program* hiz = new osg::Program();
+            hiz->setName("Chonk occlusion pyramid");
+            hiz->addShader(new osg::Shader(osg::Shader::COMPUTE, ShaderLoader::load(pkg.ChonkHiZ, pkg)));
+            proto->_hizSS->setAttribute(hiz);
+
+            // Opaque lists hold only instances that cannot fail the alpha test.
+            proto->_opaqueSS = new osg::StateSet();
+            proto->_opaqueSS->setDefine("OE_CHONK_OPAQUE");
         }
         _cullSS = proto->_cullSS;
+        _hizSS = proto->_hizSS;
+        _opaqueSS = proto->_opaqueSS;
     }
 
-    // for each render bin instance, create a StateGraph that we
-    // will use to track the OSG state properly when applying the
-    // cull program
-    _cull_sg = new osgUtil::StateGraph();
-    _cull_sg->_stateset = _cullSS.get();
+    // for each render bin instance, create the StateGraphs that we
+    // will use to track the OSG state properly for each pass;
+    // drawImplementation assigns their state sets every frame.
+    for (auto* sg : {&_reset_sg, &_cull_sg, &_hiz_sg, &_cullLate_sg,
+        &_early_sg[0], &_early_sg[1], &_late_sg[0], &_late_sg[1]})
+    {
+        *sg = new osgUtil::StateGraph();
+    }
 }
 
 
-ChonkRenderBin::CullLeaf::CullLeaf(osgUtil::RenderLeaf* leaf) :
-    CustomRenderLeaf(leaf)
+ChonkRenderBin::CullLeaf::CullLeaf(osgUtil::RenderLeaf* leaf, int pass,
+    ChonkDrawable::OcclusionFrame* frame, GLbitfield barrier) :
+    CustomRenderLeaf(leaf),
+    _pass(pass),
+    _barrier(barrier),
+    _frame(frame)
 {
     //nop
 }
 
-void 
+void
 ChonkRenderBin::CullLeaf::draw(osg::State& state)
 {
+    if (_barrier)
+        state.get<osg::GLExtensions>()->glMemoryBarrier(_barrier);
     auto d = static_cast<const ChonkDrawable*>(getDrawable());
-    d->update_and_cull_batches(state);
+    d->update_and_cull_batches(state, _pass, _frame.get());
 }
 
-ChonkRenderBin::DrawLeaf::DrawLeaf(osgUtil::RenderLeaf* leaf, bool first, bool last) :
+ChonkRenderBin::DrawLeaf::DrawLeaf(osgUtil::RenderLeaf* leaf, int list, bool first, bool last, bool publish) :
     CustomRenderLeaf(leaf),
+    _list(list),
     _first(first),
-    _last(last)
+    _last(last),
+    _publish(publish)
 {
     //nop
 }
@@ -2734,27 +3420,48 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
     {
         auto& gl = ChonkDrawable::GLObjects::get(drawable->_globjects, state);
         state.bindVertexArrayObject(gl._vao->name());
-        // Publish all culling dispatches to both the vertex shader's instance
-        // lookup and the indirect draw command reader before drawing the bin.
-        gl._vao->ext()->glMemoryBarrier(
+    }
+
+    // Publish the preceding culling dispatches to both the vertex shader's instance
+    // lookup and the indirect draw command reader before drawing their lists.
+    if (_publish)
+    {
+        state.get<osg::GLExtensions>()->glMemoryBarrier(
             GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
     }
 
-    drawable->draw_batches(state);
+    drawable->draw_batches(state, _list);
 
     if (_last)
     {
-        auto& gl = ChonkDrawable::GLObjects::get(drawable->_globjects, state);
         // Keep OSG's VAO cache in sync so conventional geometry can follow us.
         state.unbindVertexArrayObject();
 
 #ifdef RESET_BUFFER_BASE_BINDINGS
+        auto& gl = ChonkDrawable::GLObjects::get(drawable->_globjects, state);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER,  0, 0);
+        gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 23, 0);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 29, 0);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 30, 0);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 31, 0);
 #endif
     }
+}
+
+ChonkRenderBin::HiZLeaf::HiZLeaf(osgUtil::RenderLeaf* leaf, ChonkDrawable::OcclusionFrame* frame) :
+    CustomRenderLeaf(leaf),
+    _frame(frame)
+{
+    //nop
+}
+
+void
+ChonkRenderBin::HiZLeaf::draw(osg::State& state)
+{
+    HiZResult result;
+    _frame->hizValid = buildHiZ(state, _frame->camera, _frame->frameNumber, result);
+    _frame->hiz = result.handle;
+    _frame->hizParams = result.params;
 }
 
 void
@@ -2771,32 +3478,102 @@ ChonkRenderBin::drawImplementation(
 
     osg::State& state = *ri.getState();
 
-    // rearrange the bin so we have cull leaves followed by draw leaves,
-    // each with the proper shader.
-
-    // draw graph:
+    // draw graph: every pass draws under the first state graph's state, chosen before sorting.
     osgUtil::StateGraph* draw_sg = _renderLeafList.front()->_parent;
     draw_sg->_leaves.clear();
 
-    // cull graph:
-    _cull_sg->_parent = draw_sg;
-    _cull_sg->_leaves.clear();
-
-    for(unsigned i=0; i<_renderLeafList.size(); ++i)
+    // Nearest drawables first, so their depth rejects what they hide before it is shaded.
+    // Stable, so equal depths keep the cull order.
+    if (getFrontToBack())
     {
-        auto leaf = _renderLeafList[i];
-        bool first = (i == 0);
-        bool last = (i == _renderLeafList.size() - 1);
+        std::stable_sort(_renderLeafList.begin(), _renderLeafList.end(),
+            [](const osgUtil::RenderLeaf* a, const osgUtil::RenderLeaf* b) { return a->_depth < b->_depth; });
+    }
 
-        _cull_sg->addLeaf(new CullLeaf(leaf));
-        draw_sg->addLeaf(new DrawLeaf(leaf, first, last));
+    // Occlusion culling is for color cameras; shadow, depth and pick cameras render their own
+    // depth targets.
+    const osg::Camera* camera = ri.getCurrentCamera();
+    const bool color = camera &&
+        !CameraUtils::isShadowCamera(camera) &&
+        !CameraUtils::isDepthCamera(camera) &&
+        !CameraUtils::isPickCamera(camera);
+    // Occlusion culling works on GPU-culled drawables; skip its passes when there are none.
+    bool gpuCulled = false;
+    for (auto* leaf : _renderLeafList)
+        gpuCulled = gpuCulled || static_cast<const ChonkDrawable*>(leaf->getDrawable())->_gpucull;
+    const bool occlusion = color && gpuCulled && getOcclusionCulling();
+    const bool opaque = getOpaquePath();
+
+    osg::ref_ptr<ChonkDrawable::OcclusionFrame> frame = new ChonkDrawable::OcclusionFrame();
+    frame->camera = camera;
+    frame->frameNumber = state.getFrameStamp() ? state.getFrameStamp()->getFrameNumber() : 0u;
+
+    // Every pass graph hangs off the draw graph and adds only its own state. With the opaque path
+    // off, the opaque lists draw with the alpha-tested shader, as everything did before.
+    auto prepare = [draw_sg](osgUtil::StateGraph* sg, const osg::StateSet* ss)
+    {
+        sg->_parent = draw_sg;
+        sg->_stateset = ss;
+        sg->_leaves.clear();
+    };
+    const osg::StateSet* opaqueSS = opaque ? _opaqueSS.get() : nullptr;
+    prepare(_reset_sg.get(), _cullSS.get());
+    prepare(_cull_sg.get(), _cullSS.get());
+    prepare(_hiz_sg.get(), _hizSS.get());
+    prepare(_cullLate_sg.get(), _cullSS.get());
+    for (auto* sg : {_early_sg[0].get(), _late_sg[0].get()})
+        prepare(sg, opaqueSS);
+    for (auto* sg : {_early_sg[1].get(), _late_sg[1].get()})
+        prepare(sg, nullptr);
+
+    const unsigned count = unsigned(_renderLeafList.size());
+    _stateGraphList.clear();
+
+    // One cull leaf per drawable; the first issues the pass's barrier.
+    auto cullPass = [&](osgUtil::StateGraph* sg, int pass, GLbitfield barrier)
+    {
+        for (unsigned i = 0; i < count; ++i)
+            sg->addLeaf(new CullLeaf(_renderLeafList[i], pass, frame.get(), i == 0 ? barrier : 0));
+        _stateGraphList.push_back(sg);
+    };
+    // One draw leaf per drawable for a list; the first publishes culling results when asked.
+    auto drawPass = [&](osgUtil::StateGraph* sg, int list, bool publish)
+    {
+        for (unsigned i = 0; i < count; ++i)
+            sg->addLeaf(new DrawLeaf(_renderLeafList[i], list, false, false, publish && i == 0));
+    };
+    // Installs a draw graph; its first leaf binds a VAO and its last unbinds it.
+    auto finish = [&](osgUtil::StateGraph* sg)
+    {
+        static_cast<DrawLeaf*>(sg->_leaves.front().get())->_first = true;
+        static_cast<DrawLeaf*>(sg->_leaves.back().get())->_last = true;
+        _stateGraphList.push_back(sg);
+    };
+
+    // Zero every drawable's lists, then cull them. The first barrier orders the previous
+    // frame's indirect reads and visibility writes before this frame's writes.
+    cullPass(_reset_sg.get(), ChonkDrawable::RESET, GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
+    cullPass(_cull_sg.get(), occlusion ? ChonkDrawable::EARLY : ChonkDrawable::CULL, GL_SHADER_STORAGE_BARRIER_BIT);
+    drawPass(_early_sg[0].get(), ChonkDrawable::EARLY_OPAQUE, true);
+    finish(_early_sg[0].get());
+    drawPass(_early_sg[1].get(), ChonkDrawable::EARLY_CUTOUT, false);
+    finish(_early_sg[1].get());
+
+    if (occlusion)
+    {
+        // Build the pyramid from everything drawn so far, including earlier bins and terrain,
+        // then test every instance against it and draw what the early pass missed.
+        _hiz_sg->addLeaf(new HiZLeaf(_renderLeafList.front(), frame.get()));
+        _stateGraphList.push_back(_hiz_sg.get());
+        cullPass(_cullLate_sg.get(), ChonkDrawable::LATE, 0);
+        drawPass(_late_sg[0].get(), ChonkDrawable::LATE_OPAQUE, true);
+        finish(_late_sg[0].get());
+        drawPass(_late_sg[1].get(), ChonkDrawable::LATE_CUTOUT, false);
+        finish(_late_sg[1].get());
     }
 
     // install the new state graphs:
     _renderLeafList.clear();
-    _stateGraphList.clear();
-    _stateGraphList.push_back(_cull_sg.get());
-    _stateGraphList.push_back(draw_sg);
 
     // dispatch.
     osgUtil::RenderBin::drawImplementation(ri, previous);
@@ -2808,6 +3585,9 @@ ChonkRenderBin::releaseSharedGLObjects(osg::State* state)
     auto proto = static_cast<ChonkRenderBin*>(osgUtil::RenderBin::getRenderBinPrototype("ChonkBin"));
     if (proto->_cullSS.valid())
         proto->_cullSS->releaseGLObjects(state);
+    if (proto->_hizSS.valid())
+        proto->_hizSS->releaseGLObjects(state);
+    releaseHiZ(state);
 }
 
 

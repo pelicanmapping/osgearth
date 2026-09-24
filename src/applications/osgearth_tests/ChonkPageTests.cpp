@@ -29,7 +29,8 @@ namespace
         {
             std::vector<Instance> sources;
             std::vector<VisibleInstance> visible;
-            Chonk::DrawCommands commands;
+            Chonk::DrawCommands commands; // GPU culling: one list of `stride` commands per List
+            unsigned stride = 0;
         };
         // Read completed commands/visibility for this current GL context only.
         Snapshot snapshot(osg::State& state) const
@@ -41,7 +42,8 @@ namespace
             glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &previous);
             Snapshot result;
             result.sources = objects._all_instances;
-            result.commands.resize(objects._commands.size());
+            result.stride = unsigned(objects._commands.size());
+            result.commands.resize(result.stride * (_gpucull ? unsigned(NUM_LISTS) : 1u));
             result.visible.resize(objects._instanceOutputBuf->size()/sizeof(VisibleInstance));
             objects._commandBuf->bind();
             objects._commandBuf->getBufferSubData(0, result.commands.size()*sizeof(Chonk::DrawCommand), result.commands.data());
@@ -258,7 +260,7 @@ namespace
             const double x = finishEmpty ? 4000.0 : 0.0;
             auto snapshot = drawable->snapshot(*renderer.context->getState());
             REQUIRE(snapshot.sources.size() == 96); // global padding only
-            REQUIRE(snapshot.commands.size() == 68); // 65 + legacy's two LODs + repeated mesh
+            REQUIRE(snapshot.stride == 68); // 65 + legacy's two LODs + repeated mesh
             std::size_t survivors = 0, valid = 0;
             for (const auto& s : snapshot.sources) valid += s.first_lod_cmd_index >= 0;
             REQUIRE(valid == 68);
@@ -271,7 +273,8 @@ namespace
                 {
                     const auto& visible = snapshot.visible[draw.cmd.baseInstance+j];
                     REQUIRE(visible.sourceIndex < snapshot.sources.size());
-                    REQUIRE(unsigned(snapshot.sources[visible.sourceIndex].first_lod_cmd_index) + visible.lod == command);
+                    REQUIRE(unsigned(snapshot.sources[visible.sourceIndex].first_lod_cmd_index) + visible.lod ==
+                        command % snapshot.stride);
                 }
             }
             if (cull && x > 0) REQUIRE(survivors == 0);

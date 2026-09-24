@@ -9,6 +9,7 @@
 #include <osgEarth/MemoryUtils>
 #include <osgEarth/GLUtils>
 #include <osgEarth/ShaderLoader>
+#include <osgEarth/Chonk>
 #include <chrono>
 #include <list>
 #include <unordered_map>
@@ -341,6 +342,18 @@ namespace osgEarth
                         else
                             stateset(ri)->setDefine("OE_GPUCULL_DEBUG", "0");
                     }
+
+                    bool opaquePath = ChonkRenderBin::getOpaquePath();
+                    if (ImGui::Checkbox("Chonk opaque path (no discard)", &opaquePath))
+                        ChonkRenderBin::setOpaquePath(opaquePath);
+
+                    bool occlusion = ChonkRenderBin::getOcclusionCulling();
+                    if (ImGui::Checkbox("Chonk occlusion culling", &occlusion))
+                        ChonkRenderBin::setOcclusionCulling(occlusion);
+
+                    bool frontToBack = ChonkRenderBin::getFrontToBack();
+                    if (ImGui::Checkbox("Chonk front-to-back order", &frontToBack))
+                        ChonkRenderBin::setFrontToBack(frontToBack);
                 }
 
                 ImGui::Separator();

@@ -26,36 +26,57 @@ namespace
         {
             std::vector<Instance> sources;
             std::vector<VisibleInstance> visible;
-            Chonk::DrawCommands commands;
+            Chonk::DrawCommands commands; // GPU culling: one list of `stride` commands per List
+            unsigned stride = 0;
             bool sourceUnchanged;
         };
 
-        // Read completed GPU results with this drawable's context current.
-        // Publish shader writes for readback and preserve the generic SSBO binding.
+        // Read completed GPU results with this drawable's context current. Safe between frames: see
+        // readBuffer. Publishes shader writes for the copies.
         Snapshot snapshot(osg::State& state) const
         {
             auto& objects = GLObjects::get(_globjects, state);
-            auto* ext = state.get<osg::GLExtensions>();
-            ext->glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
-            GLint previous = 0;
-            glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &previous);
+            state.get<osg::GLExtensions>()->glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
             Snapshot result;
             result.sources.resize(objects._all_instances.size());
             result.visible.resize(objects._instanceOutputBuf->size() / sizeof(VisibleInstance));
-            result.commands.resize(objects._commands.size());
-            objects._instanceInputBuf->bind();
-            objects._instanceInputBuf->getBufferSubData(0,
-                result.sources.size() * sizeof(Instance), result.sources.data());
-            objects._instanceOutputBuf->bind();
-            objects._instanceOutputBuf->getBufferSubData(0,
-                result.visible.size() * sizeof(VisibleInstance), result.visible.data());
-            objects._commandBuf->bind();
-            objects._commandBuf->getBufferSubData(0,
-                result.commands.size() * sizeof(Chonk::DrawCommand), result.commands.data());
-            ext->glBindBuffer(GL_SHADER_STORAGE_BUFFER, previous);
+            result.stride = unsigned(objects._commands.size());
+            result.commands.resize(result.stride * (_gpucull ? unsigned(NUM_LISTS) : 1u));
+            readBuffer(*objects._instanceInputBuf, result.sources.size() * sizeof(Instance), result.sources.data());
+            readBuffer(*objects._instanceOutputBuf, result.visible.size() * sizeof(VisibleInstance),
+                result.visible.data());
+            readBuffer(*objects._commandBuf, result.commands.size() * sizeof(Chonk::DrawCommand),
+                result.commands.data());
             result.sourceUnchanged = std::memcmp(result.sources.data(), objects._all_instances.data(),
                 result.sources.size() * sizeof(Instance)) == 0;
             return result;
+        }
+
+        // Copies the start of a buffer to host memory through a temporary buffer. Reading a live
+        // buffer directly lets the NVIDIA driver move it to host memory, where the culler's atomic
+        // command counts fault the GPU on the next frame. Call with the owning context current.
+        static void readBuffer(const GLBuffer& source, std::size_t bytes, void* data)
+        {
+            static void (GL_APIENTRY* createBuffers)(GLsizei, GLuint*) = nullptr;
+            static void (GL_APIENTRY* namedBufferData)(GLuint, GLsizeiptr, const void*, GLenum) = nullptr;
+            static void (GL_APIENTRY* copyNamedBufferSubData)(GLuint, GLuint, GLintptr, GLintptr, GLsizeiptr) = nullptr;
+            static void (GL_APIENTRY* getNamedBufferSubData)(GLuint, GLintptr, GLsizeiptr, void*) = nullptr;
+            static void (GL_APIENTRY* deleteBuffers)(GLsizei, const GLuint*) = nullptr;
+            if (!createBuffers)
+            {
+                osg::setGLExtensionFuncPtr(namedBufferData, "glNamedBufferData");
+                osg::setGLExtensionFuncPtr(copyNamedBufferSubData, "glCopyNamedBufferSubData");
+                osg::setGLExtensionFuncPtr(getNamedBufferSubData, "glGetNamedBufferSubData");
+                osg::setGLExtensionFuncPtr(deleteBuffers, "glDeleteBuffers");
+                osg::setGLExtensionFuncPtr(createBuffers, "glCreateBuffers");
+            }
+            if (bytes == 0) return;
+            GLuint staging = 0;
+            createBuffers(1, &staging);
+            namedBufferData(staging, GLsizeiptr(bytes), nullptr, GL_STREAM_READ);
+            copyNamedBufferSubData(source.name(), staging, 0, 0, GLsizeiptr(bytes));
+            getNamedBufferSubData(staging, 0, GLsizeiptr(bytes), data);
+            deleteBuffers(1, &staging);
         }
     };
 }
@@ -405,7 +426,7 @@ static void validateChonkVisibility(bool cull)
                 REQUIRE(visible.sourceIndex < snapshot.sources.size());
                 const auto& source = snapshot.sources[visible.sourceIndex];
                 REQUIRE(source.first_lod_cmd_index >= 0);
-                REQUIRE(unsigned(source.first_lod_cmd_index) + visible.lod == command);
+                REQUIRE(unsigned(source.first_lod_cmd_index) + visible.lod == command % snapshot.stride);
                 REQUIRE(actual.emplace(visible.sourceIndex, visible.lod).second);
                 REQUIRE(visible.alphaCutoff == (drawable == first.get() ? 0.371234f : 0.612345f));
                 if (cull && source.uv.x() < 0.3f && visible.lod == 0)
@@ -414,6 +435,14 @@ static void validateChonkVisibility(bool cull)
                     REQUIRE(visible.fade < 1.0f);
                 }
                 else REQUIRE(visible.fade == 1.0f);
+                if (cull)
+                {
+                    // These materials cannot fail the alpha test, so only fading instances belong in
+                    // the cutout list; a settled static view leaves the late occlusion lists empty.
+                    const unsigned list = command / snapshot.stride;
+                    REQUIRE(list <= 1u);
+                    REQUIRE((list == 1u) == (visible.fade < 1.0f));
+                }
             }
         }
         REQUIRE(actual == expected);

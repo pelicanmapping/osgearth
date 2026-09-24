@@ -49,6 +49,9 @@ LogarithmicDepthBuffer::install(osg::Camera* camera)
         {
             pkg.load( vp, pkg.LogDepthBuffer_VertOnly );
         }
+
+        // Lets depth-aware shaders (such as Chonk's occlusion culling) match the stored depth.
+        stateset->setDefine("OE_LOG_DEPTH_BUFFER", _useFragDepth ? "2" : "1");
     }
 }
 
@@ -67,6 +70,7 @@ LogarithmicDepthBuffer::uninstall(osg::Camera* camera)
                 pkg.unload( vp, pkg.LogDepthBuffer );
                 pkg.unload( vp, pkg.LogDepthBuffer_VertOnly );
             }
+            stateset->removeDefine("OE_LOG_DEPTH_BUFFER");
         }
     }
 }

@@ -155,6 +155,7 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
 #pragma import_defines(OE_GL_RG_COMPRESSED_NORMALS)
 #pragma import_defines(OE_GPUCULL_DEBUG)
 #pragma import_defines(OE_CHONK_SINGLE_SIDED)
+#pragma import_defines(OE_CHONK_OPAQUE)
 
 struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;
 #pragma include PBRMaterial.glsl
@@ -233,8 +234,10 @@ void oe_chonk_default_fragment(inout vec4 color)
 
     // for shadowing cameras, just do a simple step discard.
     color.a = step(oe_shadow_alpha_discard_threshold, color.a * oe_fade);
+  #ifndef OE_CHONK_OPAQUE // opaque, unfaded instances never fail it; omitting keeps early-Z
     if (color.a < 1.0)
         discard;
+  #endif
 
 #else // !OE_IS_SHADOW_CAMERA && !OE_IS_DEPTH_CAMERA
 
@@ -272,8 +275,12 @@ void oe_chonk_default_fragment(inout vec4 color)
     // (TODO: consider a cheap alpha-only pass that we can sample to prevent overdraw
     // and discard in the expensive shader)
     color.a = step(oe_alpha_discard_threshold, color.a);
+    #ifndef OE_CHONK_OPAQUE
+    // The culler routes only opaque, unfaded instances to the OE_CHONK_OPAQUE lists. Just
+    // compiling a discard makes the GPU test depth after shading once depth writes are on.
     if (color.a < 1.0)
         discard;
+    #endif
 
   #endif // !OE_USE_ALPHA_TO_COVERAGE
 

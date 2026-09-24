@@ -17,6 +17,7 @@ namespace osgEarth { namespace Util
         std::string CascadeDraping;
         std::string Chonk;
         std::string ChonkCulling;
+        std::string ChonkHiZ;
         std::string Decals_Headers;
         std::string Decals;
         std::string DecalsCulling;

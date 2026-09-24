@@ -56,14 +56,14 @@ namespace
         return sum;
     }
 
-    //! Generates one tileable value/Worley texture shared by all layers and GL contexts.
+    //! Generates shared tileable noise and second moments; mip levels retain unresolved shape/erosion variance.
     osg::Texture3D* noiseTexture()
     {
         static osg::ref_ptr<osg::Texture3D> texture = []()
         {
             constexpr int size = 64, cells = 8;
             osg::ref_ptr<osg::Image> image = new osg::Image;
-            image->allocateImage(size,size,size,GL_RGBA,GL_UNSIGNED_BYTE);
+            image->allocateImage(size,size,size,GL_RGBA,GL_FLOAT);
             for (int z=0; z<size; ++z)
             for (int y=0; y<size; ++y)
             for (int x=0; x<size; ++x)
@@ -82,14 +82,18 @@ namespace
                     closest = std::min(closest,dx*dx+dy*dy+dz*dz);
                 }
                 float value = 0.65f*noise(px*0.5f,py*0.5f,pz*0.5f,4)+0.35f*noise(px,py,pz,8);
-                auto pixel = image->data(x,y,z);
-                pixel[0] = static_cast<unsigned char>(255.0f*value);
-                pixel[1] = static_cast<unsigned char>(255.0f*std::max(0.0f,1.0f-std::sqrt(closest)));
-                pixel[2] = pixel[0]; pixel[3] = 255;
+                auto pixel = reinterpret_cast<float*>(image->data(x,y,z));
+                // Retain the original quantized field so enabling filtering does not regenerate the weather.
+                pixel[0] = std::floor(255.0f*value)/255.0f;
+                pixel[1] = std::floor(255.0f*std::max(0.0f,1.0f-std::sqrt(closest)))/255.0f;
+                float shape = pixel[0]*0.65f+pixel[1]*0.35f;
+                pixel[2] = shape*shape;
+                pixel[3] = pixel[1]*pixel[1];
             }
             osg::ref_ptr<osg::Texture3D> result = new osg::Texture3D(image);
-            result->setInternalFormat(GL_RGBA8);
-            result->setFilter(osg::Texture::MIN_FILTER,osg::Texture::LINEAR);
+            result->setInternalFormat(GL_RGBA16F_ARB);
+            result->setUseHardwareMipMapGeneration(true);
+            result->setFilter(osg::Texture::MIN_FILTER,osg::Texture::LINEAR_MIPMAP_LINEAR);
             result->setFilter(osg::Texture::MAG_FILTER,osg::Texture::LINEAR);
             for (auto axis : {osg::Texture::WRAP_S,osg::Texture::WRAP_T,osg::Texture::WRAP_R})
                 result->setWrap(axis,osg::Texture::REPEAT);
@@ -163,6 +167,9 @@ CloudLayer::Options::Options(const ConfigOptions& input) : ConfigOptions(input)
     c.get("base_altitude",baseAltitude); c.get("top_altitude",topAltitude); c.get("size",size);
     c.get("fade_start_altitude",fadeStartAltitude); c.get("fade_end_altitude",fadeEndAltitude);
     c.get("erosion",erosion); c.get("shadow_strength",shadowStrength); c.get("seed",seed);
+    c.get("shadow_coverage",shadowCoverage);
+    c.get("far_shadows",farShadows); c.get("far_shadow_coverage",farShadowCoverage);
+    c.get("detail_filtering",detailFiltering);
     c.get("crepuscular_rays",crepuscularRays); c.get("ray_strength",rayStrength); c.get("ray_distance",rayDistance);
     c.get("ray_haze",rayHaze);
     c.get("ray_intensity",rayIntensity);
@@ -182,6 +189,9 @@ Config CloudLayer::Options::getConfig() const
     c.set("base_altitude",baseAltitude); c.set("top_altitude",topAltitude); c.set("size",size);
     c.set("fade_start_altitude",fadeStartAltitude); c.set("fade_end_altitude",fadeEndAltitude);
     c.set("erosion",erosion); c.set("shadow_strength",shadowStrength); c.set("seed",seed);
+    c.set("shadow_coverage",shadowCoverage);
+    c.set("far_shadows",farShadows); c.set("far_shadow_coverage",farShadowCoverage);
+    c.set("detail_filtering",detailFiltering);
     c.set("crepuscular_rays",crepuscularRays); c.set("ray_strength",rayStrength); c.set("ray_distance",rayDistance);
     c.set("ray_haze",rayHaze);
     c.set("ray_intensity",rayIntensity);
@@ -219,6 +229,10 @@ void CloudLayer::setOptions(const Options& input)
     _options.size = bounded(input.size,200.0f,50000.0f,4000.0f);
     _options.erosion = bounded(input.erosion,0.0f,1.0f,0.3f);
     _options.shadowStrength = bounded(input.shadowStrength,0.0f,1.0f,0.8f);
+    _options.shadowCoverage = bounded(input.shadowCoverage,1000.0f,200000.0f,20000.0f);
+    float minimumFarCoverage = _options.shadowCoverage*1.25f;
+    _options.farShadowCoverage = bounded(input.farShadowCoverage,minimumFarCoverage,1000000.0f,
+        std::max(100000.0f,minimumFarCoverage));
     if (input.rayQuality != LOW && input.rayQuality != BALANCED && input.rayQuality != HIGH) _options.rayQuality = BALANCED;
     _options.rayStrength = bounded(input.rayStrength,0.0f,1.0f,1.0f);
     _options.rayDistance = bounded(input.rayDistance,1000.0f,100000.0f,50000.0f);
@@ -248,12 +262,15 @@ struct CloudLayerRenderer::Impl
         osg::ref_ptr<osg::Camera> volumePass, shadowPass, environmentPass;
         osg::ref_ptr<osg::Camera> sunPass, raysPass, environmentRaysPass;
         unsigned rayWidth = 0, rayHeight = 0, rayDepth = 0, sunWidth = 0;
-        unsigned width = 0, height = 0, depth = 0, frame = ~0u;
+        unsigned width = 0, height = 0, depth = 0, frame = ~0u, shadowWidth = 0;
     };
     struct View
     {
         osg::observer_ptr<osg::Camera> camera;
         std::array<Slot,2> slots;
+        osg::Vec3d shadowAnchor;
+        osg::Matrix3 shadowBasis;
+        float shadowRadius = 0.0f;
     };
     std::map<std::pair<osg::Camera*,osgUtil::CullVisitor*>,View> views;
     mutable std::mutex mutex;
@@ -300,6 +317,56 @@ struct CloudLayerRenderer::Impl
             if (!i->second.camera.valid()) i = views.erase(i); else ++i;
     }
 
+    //! Replaces only this slot's shadow atlas under mutex; no extra sampler or cloud-volume allocation is needed.
+    void initializeShadows(Slot& slot, unsigned width)
+    {
+        osg::ref_ptr<osg::Texture2D> shadow = new osg::Texture2D;
+        shadow->setTextureSize(width,256); shadow->setInternalFormat(GL_R16F);
+        shadow->setSourceFormat(GL_RED); shadow->setSourceType(GL_FLOAT);
+        shadow->setFilter(osg::Texture::MIN_FILTER,osg::Texture::LINEAR);
+        shadow->setFilter(osg::Texture::MAG_FILTER,osg::Texture::LINEAR);
+        shadow->setWrap(osg::Texture::WRAP_S,osg::Texture::CLAMP_TO_EDGE);
+        shadow->setWrap(osg::Texture::WRAP_T,osg::Texture::CLAMP_TO_EDGE);
+        shadow->setResizeNonPowerOfTwoHint(false);
+        slot.state->setTextureAttributeAndModes(shadowUnit.unit(),shadow);
+        slot.shadowPass = computePass(shadow,shadowProgram,width,256,false,volumeUnit.unit());
+        slot.shadowWidth = width;
+        slot.frame = ~0u;
+    }
+
+    //! Anchors the far grid in world space and snaps translation to texels; caller holds the per-view mutex.
+    void updateFarShadow(View& view, Slot& slot, const Frame& input, float coverage)
+    {
+        if (coverage <= 0.0f)
+        {
+            slot.state->getUniform("oe_cloud_shadowFarOrigin")->set(osg::Vec4());
+            return;
+        }
+        osg::Vec3d up(input.eye); up.normalize();
+        osg::Vec3d anchorUp = view.shadowAnchor; anchorUp.normalize();
+        // Keep a fixed tangent plane through local camera motion; reanchor after globe-scale travel or radius changes.
+        if (view.shadowRadius != input.radius || up*anchorUp < 0.995)
+        {
+            view.shadowAnchor = up*(input.radius+0.001);
+            view.shadowBasis = input.basis;
+            view.shadowRadius = input.radius;
+        }
+        osg::Vec3d right, north, normal;
+        for (unsigned i=0; i<3; ++i)
+        {
+            right[i] = view.shadowBasis(0,i);
+            north[i] = view.shadowBasis(1,i);
+            normal[i] = view.shadowBasis(2,i);
+        }
+        osg::Vec3d eye(input.eye);
+        osg::Vec3d delta = eye*((view.shadowAnchor*normal)/(eye*normal))-view.shadowAnchor;
+        double texel = coverage*0.001/256.0;
+        osg::Vec3d center = view.shadowAnchor+right*(std::round(delta*right/texel)*texel)+
+            north*(std::round(delta*north/texel)*texel);
+        slot.state->getUniform("oe_cloud_shadowFarOrigin")->set(osg::Vec4(osg::Vec3(center),coverage*0.0005f));
+        slot.state->getUniform("oe_cloud_shadowFarBasis")->set(view.shadowBasis);
+    }
+
     //! Allocates a slot's bounded volume and shadow target; rebuilding only this slot preserves pipelined draws.
     void initialize(Slot& slot, unsigned width, unsigned height, unsigned depth)
     {
@@ -315,15 +382,7 @@ struct CloudLayerRenderer::Impl
         volume->setWrap(osg::Texture::WRAP_T,osg::Texture::CLAMP_TO_EDGE);
         volume->setWrap(osg::Texture::WRAP_R,osg::Texture::CLAMP_TO_EDGE);
         volume->setResizeNonPowerOfTwoHint(false);
-        osg::ref_ptr<osg::Texture2D> shadow = new osg::Texture2D;
-        shadow->setTextureSize(256,256); shadow->setInternalFormat(GL_R16F);
-        shadow->setSourceFormat(GL_RED); shadow->setSourceType(GL_FLOAT);
-        shadow->setFilter(osg::Texture::MIN_FILTER,osg::Texture::LINEAR);
-        shadow->setFilter(osg::Texture::MAG_FILTER,osg::Texture::LINEAR);
-        shadow->setWrap(osg::Texture::WRAP_S,osg::Texture::CLAMP_TO_EDGE);
-        shadow->setWrap(osg::Texture::WRAP_T,osg::Texture::CLAMP_TO_EDGE);
         slot.state->setTextureAttributeAndModes(volumeUnit.unit(),volume);
-        slot.state->setTextureAttributeAndModes(shadowUnit.unit(),shadow);
         slot.state->addUniform(new osg::Uniform("oe_cloud_volume",volumeUnit.unit()));
         slot.state->addUniform(new osg::Uniform("oe_cloud_shadowMap",shadowUnit.unit()));
         slot.state->addUniform(new osg::Uniform("oe_cloud_raysEnabled",false));
@@ -345,15 +404,18 @@ struct CloudLayerRenderer::Impl
         slot.state->addUniform(new osg::Uniform("oe_cloud_advection",osg::Vec4(0,0,1,0)));
         slot.state->addUniform(new osg::Uniform("oe_cloud_seed",osg::Vec3()));
         slot.state->addUniform(new osg::Uniform("oe_cloud_shadowOrigin",osg::Vec4()));
+        slot.state->addUniform(new osg::Uniform("oe_cloud_shadowFarOrigin",osg::Vec4()));
+        slot.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_cloud_shadowFarBasis"));
         slot.state->addUniform(new osg::Uniform("oe_cloud_samples",64));
         slot.state->addUniform(new osg::Uniform("oe_cloud_lightSamples",4));
+        slot.state->addUniform(new osg::Uniform("oe_cloud_detailFiltering",true));
         slot.state->addUniform(new osg::Uniform("oe_cloud_screenSpace",true));
         slot.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_cloud_viewToEarth"));
         slot.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_cloud_earthToView"));
         slot.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT4,"oe_cloud_projection"));
         slot.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT4,"oe_cloud_inverseProjection"));
         slot.volumePass = computePass(volume,volumeProgram,width,height,true,volumeUnit.unit());
-        slot.shadowPass = computePass(shadow,shadowProgram,256,256,false,volumeUnit.unit());
+        initializeShadows(slot,256);
         osg::ref_ptr<osg::Texture3D> environment = new osg::Texture3D;
         environment->setTextureSize(64,32,2);
         environment->setInternalFormat(GL_RGBA16F_ARB);
@@ -511,6 +573,9 @@ osg::StateSet* CloudLayerRenderer::cull(osgUtil::CullVisitor& cv, const Frame& i
         slot = &view.slots[frame%2];
         if (!slot->state || slot->width != width || slot->height != height || slot->depth != depth)
             _impl->initialize(*slot,width,height,depth);
+        unsigned shadowWidth = options.farShadows ? 512u : 256u;
+        if (slot->shadowWidth != shadowWidth) _impl->initializeShadows(*slot,shadowWidth);
+        _impl->updateFarShadow(view,*slot,input,options.farShadows ? options.farShadowCoverage : 0.0f);
         if (rays) rays = _impl->initializeRays(*slot,rayWidth,rayHeight,rayDepth,sunWidth);
     }
     auto state = slot->state.get();
@@ -538,6 +603,7 @@ osg::StateSet* CloudLayerRenderer::cull(osgUtil::CullVisitor& cv, const Frame& i
         state->getUniform("oe_cloud_sunBasis")->set(basis);
     }
     state->getUniform("oe_cloud_eye")->set(input.eye);
+    state->getUniform("oe_cloud_detailFiltering")->set(options.detailFiltering);
     state->getUniform("oe_cloud_sun")->set(input.sun);
     state->getUniform("oe_cloud_basis")->set(input.basis);
     state->getUniform("oe_cloud_viewToEarth")->set(input.viewToEarth);
@@ -571,7 +637,8 @@ osg::StateSet* CloudLayerRenderer::cull(osgUtil::CullVisitor& cv, const Frame& i
     state->getUniform("oe_cloud_seed")->set(osg::Vec3(hash(options.seed,1,2)*8.0f,
         hash(options.seed,3,4)*8.0f,hash(options.seed,5,6)*8.0f));
     osg::Vec3 center = input.eye; center.normalize(); center *= input.radius+0.001f;
-    state->getUniform("oe_cloud_shadowOrigin")->set(osg::Vec4(center,50.0f));
+    // The shared generation/lookup transform expects half-width in kilometers.
+    state->getUniform("oe_cloud_shadowOrigin")->set(osg::Vec4(center,options.shadowCoverage*0.0005f));
     state->getUniform("oe_cloud_samples")->set(int(std::max(depth-1,options.samples ? options.samples : steps[preset])));
     state->getUniform("oe_cloud_lightSamples")->set(int(options.lightSamples ? options.lightSamples : lights[preset]));
     if (slot->frame != frame)

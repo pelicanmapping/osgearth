@@ -335,6 +335,42 @@ TEST_CASE("SkyNode2 renders finite ground and orbital views at every quality", "
     }
 }
 
+// Verifies shader specialization matches the former eight-slot shader, including sparse sun and point-light slots.
+TEST_CASE("SkyNode2 specializes light capacity without changing PBR output", "[sky2][.gl]")
+{
+    osg::ref_ptr<SkyNode2> sky = new SkyNode2;
+    Scene scene(sky);
+    osg::ref_ptr<LightGL3> point = new LightGL3(3);
+    point->setPosition(osg::Vec4(6378150.0f,0,0,1));
+    point->setDiffuse(osg::Vec4(4,2,1,1));
+    osg::ref_ptr<osg::LightSource> source = new osg::LightSource;
+    source->setLight(point);
+    source->setCullingActive(false);
+    source->addCullCallback(new LightSourceGL3UniformGenerator);
+    sky->addChild(source);
+    auto ss = sky->getOrCreateStateSet();
+    for (int sunIndex : {0,7})
+    for (bool localLight : {false,true})
+    {
+        CAPTURE(sunIndex,localLight);
+        sky->attach(scene.viewer,sunIndex);
+        source->setNodeMask(localLight ? ~0u : 0u);
+        ss->setDefine("OE_NUM_LIGHTS","1");
+        scene.draw();
+        auto actual = scene.pixels();
+        REQUIRE(energy(actual) > 0.01);
+        ss->setDefine("OE_NUM_LIGHTS","8",
+            osg::StateAttribute::ON|osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
+        scene.draw();
+        auto reference = scene.pixels();
+        double maximum = 0.0;
+        for (unsigned i=0; i<actual.size(); ++i)
+            maximum = std::max(maximum,double(std::abs(actual[i]-reference[i])));
+        REQUIRE(maximum <= 1.0/255.0+1e-6);
+    }
+    REQUIRE(glGetError() == GL_NO_ERROR);
+}
+
 // Exercises sparse OSG indices, distance attenuation, cone cutoff, disabled lights and the shadow interface.
 TEST_CASE("SkyNode2 respects OSG point and spot lights and solar shadows", "[sky2][.gl]")
 {

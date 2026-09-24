@@ -600,8 +600,8 @@ SkyNode2::SkyNode2(const Options& options) : SkyNode(options), _impl(new Impl(op
     auto ss = getOrCreateStateSet();
     ss->setDefine("OE_SKY2");
     ss->setDefine("OE_USE_PBR");
-    // Fixed small capacity handles sparse OSG light indices without shader recompilation.
-    ss->setDefine("OE_NUM_LIGHTS","8",osg::StateAttribute::ON|osg::StateAttribute::OVERRIDE|osg::StateAttribute::PROTECTED);
+    // The render stage expands this to its highest OSG light index, leaving sun-only views on a smaller shader.
+    ss->setDefine("OE_NUM_LIGHTS","1");
     if (_impl->options.outputSRGB) ss->setDefine("OE_SKY2_SRGB");
     if (_impl->options.toneMapping) ss->setDefine("OE_SKY2_TONEMAP");
     Lighting::installDefaultMaterial(ss);

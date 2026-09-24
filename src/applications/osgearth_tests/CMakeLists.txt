@@ -11,12 +11,14 @@ set(TARGET_SRC
     EndianTests.cpp
     ExpressionTests.cpp
     GeoExtentTests.cpp
+    GrimeLayerTests.cpp
     FeatureTests.cpp
     ImageUtilsTests.cpp
     PathTests.cpp
     PBRMaterialTests.cpp
     SkyNode2Tests.cpp
     CloudLayerTests.cpp
+    CloudFilteringTests.cpp
     CloudRayReferenceTests.cpp
     ShadowTests.cpp
     Shadow46Tests.cpp

@@ -444,7 +444,36 @@ namespace osgEarth
                                 controls.fadeStartAltitude+100.0f, 200000.0f);
                             changed |= ImGuiLTable::SliderFloat("Cloud size (m)", &controls.size, 500.0f, 15000.0f);
                             changed |= ImGuiLTable::SliderFloat("Cloud erosion", &controls.erosion, 0.0f, 1.0f);
+                            changed |= ImGuiLTable::Checkbox("Filter distant detail", &controls.detailFiltering);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Average detail smaller than a cloud pixel or ray step to reduce shimmer.");
                             changed |= ImGuiLTable::SliderFloat("Cloud shadows", &controls.shadowStrength, 0.0f, 1.0f);
+                            float shadowCoverageKm = controls.shadowCoverage*0.001f;
+                            if (ImGuiLTable::SliderFloat("Shadow coverage (km)", &shadowCoverageKm, 1.0f, 200.0f))
+                            {
+                                controls.shadowCoverage = shadowCoverageKm*1000.0f;
+                                changed = true;
+                            }
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Full width of the ground area receiving cloud shadows. "
+                                    "Smaller values give finer local shadows; distant shadows fade out.");
+                            changed |= ImGuiLTable::Checkbox("Far cloud shadows", &controls.farShadows);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Add a coarser distant shadow cascade. "
+                                    "Extra GPU work; near detail is unchanged.");
+                            if (controls.farShadows)
+                            {
+                                float farKm = controls.farShadowCoverage*0.001f;
+                                if (ImGuiLTable::SliderFloat("Far shadow coverage (km)", &farKm,
+                                    shadowCoverageKm*1.25f, 1000.0f))
+                                {
+                                    controls.farShadowCoverage = farKm*1000.0f;
+                                    changed = true;
+                                }
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("Full width of the far shadow area; blends beyond the near cascade. "
+                                        "At least 25 percent wider than the near area.");
+                            }
                             changed |= ImGuiLTable::Checkbox("Crepuscular rays", &controls.crepuscularRays);
                             if (ImGui::IsItemHovered())
                                 ImGui::SetTooltip("Cloud shadows in atmospheric haze. Optional extra GPU work.");

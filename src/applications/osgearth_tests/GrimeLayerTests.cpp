@@ -48,6 +48,10 @@ namespace
         options.amount() = 0.9f;
         options.macroPeriod() = 37.0;
         options.streakPeriod() = osg::Vec3d(9.0, 9.0, 43.0);
+        // Isolate pattern stability from camera distance and the fixture's upward-facing plane.
+        options.maxDistance() = 10000.0f;
+        options.fadeDistance() = 0.0f;
+        options.upAttenuation() = 0.0f;
         return options;
     }
 

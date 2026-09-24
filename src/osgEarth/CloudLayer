@@ -29,7 +29,11 @@ namespace osgEarth
             float fadeEndAltitude = 100000.0f; // Invisible above this camera altitude, in meters.
             float size = 4000.0f;
             float erosion = 0.3f;
+            bool detailFiltering = true; // Filter unresolved view-ray detail; false retains point density sampling.
             float shadowStrength = 0.8f;
+            float shadowCoverage = 20000.0f; // Full width of the square ground-shadow footprint, in meters.
+            bool farShadows = false; // Optional second 256 x 256 ground-shadow cascade.
+            float farShadowCoverage = 100000.0f; // Full width in meters; at least 1.25 times shadowCoverage.
             bool crepuscularRays = false; // Optional cloud shadows in atmospheric scattering.
             Quality rayQuality = BALANCED; // Independent GPU budget for atmospheric rays.
             float rayStrength = 1.0f; // Blend from existing lighting (0) to shadowed air and additional haze (1).

@@ -22,6 +22,11 @@
             <fade_start_altitude>20000</fade_start_altitude>
             <fade_end_altitude>100000</fade_end_altitude>
             <size>4000</size>
+            <!-- Full width of the ground-shadow area, in meters: 20 x 20 km. -->
+            <shadow_coverage>20000</shadow_coverage>
+            <!-- Optional wider cascade; both coverage values are full widths, in meters. -->
+            <far_shadows>false</far_shadows>
+            <far_shadow_coverage>100000</far_shadow_coverage>
             <!-- Opt in to atmospheric light shafts, or enable them in EnvironmentGUI. -->
             <crepuscular_rays>false</crepuscular_rays>
             <ray_quality>balanced</ray_quality>

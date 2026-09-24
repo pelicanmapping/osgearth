@@ -15,6 +15,7 @@
 #include <osgEarth/FeatureModelLayer>
 #include <osgEarth/TiledFeatureModelLayer>
 #include <osgEarth/ModelLayer>
+#include <osgEarth/GrimeLayer>
 #include <osgEarth/TerrainConstraintLayer>
 #include <osgEarth/NodeUtils>
 #include <osgEarth/TerrainEngineNode>
@@ -858,6 +859,89 @@ namespace osgEarth
                             {
                                 imageLayer->setColorBlending(modulate ? BLEND_MODULATE : BLEND_INTERPOLATE);
                             }
+                        }
+
+                        auto grimeLayer = dynamic_cast<osgEarth::GrimeLayer*>(layer);
+                        if (grimeLayer)
+                        {
+                            ImGuiLTable::Section("GrimeLayer");
+                            float maxDistance = grimeLayer->getMaxDistance();
+                            if (ImGuiLTable::SliderFloat("Grime max distance (m)", &maxDistance, 1.0f, 5000.0f,
+                                "%.1f", ImGuiSliderFlags_Logarithmic))
+                                grimeLayer->setMaxDistance(maxDistance);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Eye-to-surface distance where grime disappears. "
+                                    "Fades color and roughness; buildings remain visible.");
+
+                            float fadeDistance = grimeLayer->getFadeDistance();
+                            if (ImGuiLTable::SliderFloat("Grime fade width (m)", &fadeDistance, 0.0f, 1000.0f,
+                                "%.1f", ImGuiSliderFlags_Logarithmic))
+                                grimeLayer->setFadeDistance(fadeDistance);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Fade over this distance before the maximum. Zero uses a hard cutoff.");
+
+                            float upAttenuation = grimeLayer->getUpAttenuation();
+                            if (ImGuiLTable::SliderFloat("Roof suppression", &upAttenuation, 0.0f, 1.0f))
+                                grimeLayer->setUpAttenuation(upAttenuation);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Reduce grime on upward-facing geometry. "
+                                    "1 suppresses nearly flat roofs; 0 disables suppression. Walls stay unchanged.");
+
+                            double macro = grimeLayer->getMacroPeriod();
+                            if (ImGuiLTable::SliderDouble("Macro period (m)", &macro, 0.1, 2000.0,
+                                "%.2f", ImGuiSliderFlags_Logarithmic))
+                                grimeLayer->setMacroPeriod(macro);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Broad pattern repeat distance. Larger values make larger patches. Ctrl-click to enter meters.");
+
+                            osg::Vec3d streak = grimeLayer->getStreakPeriod();
+                            const char* labels[] = { "Streak east (m)", "Streak north (m)", "Streak up (m)" };
+                            bool changed = false;
+                            for (unsigned axis = 0; axis < 3; ++axis)
+                            {
+                                changed |= ImGuiLTable::SliderDouble(labels[axis], &streak[axis], 0.1, 2000.0,
+                                    "%.2f", ImGuiSliderFlags_Logarithmic);
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("Streak pattern repeat distance. Larger east/north values widen streaks; larger up values lengthen them. Ctrl-click to enter meters.");
+                            }
+                            if (changed)
+                                grimeLayer->setStreakPeriod(streak);
+
+                            float roughness = grimeLayer->getRoughness();
+                            if (ImGuiLTable::SliderFloat("Roughness target", &roughness, 0.0f, 1.0f))
+                                grimeLayer->setRoughness(roughness);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("PBR roughness of the stains: 0 is smooth, 1 is rough. Requires PBR lighting.");
+
+                            float roughnessAmount = grimeLayer->getRoughnessAmount();
+                            if (ImGuiLTable::SliderFloat("Roughness strength", &roughnessAmount, 0.0f, 1.0f))
+                                grimeLayer->setRoughnessAmount(roughnessAmount);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Blend the original roughness toward the target using stain coverage. Zero preserves the original roughness; color stays unchanged.");
+
+                            bool roughenOnly = grimeLayer->getRoughenOnly();
+                            if (ImGuiLTable::Checkbox("Roughen only", &roughenOnly))
+                                grimeLayer->setRoughenOnly(roughenOnly);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("For dry deposits, preserve surfaces already rougher than the target. Turn off to allow smoother, wet-looking stains.");
+
+                            float smoothThreshold = grimeLayer->getSmoothThreshold();
+                            if (ImGuiLTable::SliderFloat("Smooth threshold", &smoothThreshold, 0.0f, 1.0f))
+                                grimeLayer->setSmoothThreshold(smoothThreshold);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Surfaces at or below this original PBR roughness keep their roughness and receive only the smooth stain strength.");
+
+                            float smoothFeather = grimeLayer->getSmoothFeather();
+                            if (ImGuiLTable::SliderFloat("Smooth feather", &smoothFeather, 0.0f, 1.0f))
+                                grimeLayer->setSmoothFeather(smoothFeather);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Roughness interval above the threshold over which full staining and roughness changes fade in. Zero uses a hard cutoff.");
+
+                            float smoothAmount = grimeLayer->getSmoothAmount();
+                            if (ImGuiLTable::SliderFloat("Smooth stain strength", &smoothAmount, 0.0f, 1.0f))
+                                grimeLayer->setSmoothAmount(smoothAmount);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Fraction of color staining retained on smooth surfaces. Does not change their roughness. Requires material roughness data to distinguish glass.");
                         }
 
 #ifdef OSGEARTH_HAVE_CESIUM_NODEKIT

@@ -5,6 +5,7 @@
 #include <benchmark/benchmark.h>
 #include <osgEarth/CloudLayer>
 #include "../osgearth_tests/SkyNode2TestScene.h"
+#include "../osgearth_tests/CloudShadowTestScene.h"
 #include <iostream>
 
 using namespace osgEarth;
@@ -23,6 +24,19 @@ namespace
                 options.quality = static_cast<CloudLayer::Quality>(state.range(0));
                 options.coverage = float(state.range(1))*0.01f;
                 options.wind.set(0,0,0);
+                if (state.range(2) == 4)
+                {
+                    options.detailFiltering = state.range(3) != 0;
+                    options.size = 1000.0f; options.erosion = 0.5f;
+                    options.wind.set(0,100,0);
+                }
+                if (state.range(2) == 5)
+                {
+                    options.farShadows = state.range(3) != 0;
+                    options.size = 1500.0f; options.erosion = 0.4f; options.density = 4.0f;
+                    options.topAltitude = 2300.0f; options.seed = 3;
+                    options.wind.set(0,100,0);
+                }
                 if (state.range(2) == 3)
                 {
                     options.fadeStartAltitude = 200000.0f;
@@ -31,7 +45,13 @@ namespace
                 sky->setCloudLayer(new CloudLayer(options));
             }
             Sky2Tests::Scene scene(sky,1920,1080);
-            if (state.range(2) >= 2) scene.planetView(150000.0);
+            if (state.range(2) == 5)
+            {
+                scene.skyView(1000.0);
+                Sky2Tests::groundShadowProbe(scene,1920,1080,30.0f);
+            }
+            else if (state.range(2) == 4) scene.skyView(1000.0);
+            else if (state.range(2) >= 2) scene.planetView(150000.0);
             else scene.skyView(state.range(2) ? 2500.0 : 2.0);
             scene.readback->enabled = false;
             for (unsigned i=0; i<8; ++i) scene.draw();
@@ -43,9 +63,10 @@ namespace
             auto gl = scene.context->getState()->get<osg::GLExtensions>();
             std::cout << "Cloud benchmark GPU: " << glGetString(GL_RENDERER) << '\n';
             GLuint query = 0; gl->glGenQueries(1,&query);
+            unsigned frame = 0;
             for (auto _ : state)
             {
-                scene.viewer->advance();
+                scene.viewer->advance(double(frame++%120)*0.1);
                 scene.viewer->updateTraversal();
                 gl->glBeginQuery(GL_TIME_ELAPSED,query);
                 scene.viewer->renderingTraversals();
@@ -64,6 +85,17 @@ namespace
         ->Args({-1,80,0})->Args({0,80,0})->Args({1,80,0})->Args({2,80,0})
         ->Args({1,0,0})->Args({1,55,0})->Args({1,100,0})->Args({1,80,1})
         ->Args({-1,80,2})->Args({1,80,2})->Args({1,80,3})
+        ->UseManualTime()->Unit(benchmark::kMillisecond);
+
+    // Paired fixed-wind runs isolate filtering cost for small distant clouds at each existing quality budget.
+    auto filterBenchmarks = benchmark::RegisterBenchmark("CloudLayer/DetailFiltering",clouds)
+        ->Args({0,55,4,0})->Args({0,55,4,1})->Args({1,55,4,0})->Args({1,55,4,1})
+        ->Args({2,55,4,0})->Args({2,55,4,1})
+        ->UseManualTime()->Unit(benchmark::kMillisecond);
+
+    // Paired GPU timings include cloud compute and 1080p ground lookups across near, transition, and far regions.
+    auto shadowBenchmarks = benchmark::RegisterBenchmark("CloudLayer/ShadowCascades",clouds)
+        ->Args({1,60,5,0})->Args({1,60,5,1})->Args({2,60,5,0})->Args({2,60,5,1})
         ->UseManualTime()->Unit(benchmark::kMillisecond);
 
     //! Measures incremental ray cost on identical moving clouds, from below and inside the layer.

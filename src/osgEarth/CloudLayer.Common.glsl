@@ -13,6 +13,8 @@ uniform vec3 oe_cloud_wind;
 uniform vec4 oe_cloud_advection; // east/north sine components, cosine, shared WindLayer active
 uniform vec3 oe_cloud_seed;
 uniform vec4 oe_cloud_shadowOrigin; // center xyz and half width in km
+uniform vec4 oe_cloud_shadowFarOrigin; // anchored tangent-plane center and half width in km; zero width disables
+uniform mat3 oe_cloud_shadowFarBasis;
 uniform bool oe_cloud_screenSpace;
 uniform mat3 oe_cloud_viewToEarth, oe_cloud_earthToView;
 uniform mat4 oe_cloud_projection, oe_cloud_inverseProjection;
@@ -158,7 +160,17 @@ vec3 oe_cloud_apply(vec3 radiance, vec3 direction, float distance)
     return mix(radiance,result,oe_cloud_fade);
 }
 
-// Approximate partial-column terrain shadow, fading outside the bounded local shadow map.
+// Samples one atlas tile without bilinear leakage into its neighbor; applies receiver height before cascade blending.
+float oe_cloud_shadowTile(vec2 uv, bool farTile, float remaining)
+{
+    float tiles = oe_cloud_shadowFarOrigin.w > 0.0 ? 2.0 : 1.0;
+    vec2 size = vec2(textureSize(oe_cloud_shadowMap,0))/vec2(tiles,1.0);
+    uv = clamp(uv,0.5/size,1.0-0.5/size);
+    uv.x = (uv.x+(farTile ? 1.0 : 0.0))/tiles;
+    return pow(max(texture(oe_cloud_shadowMap,uv).r,1e-5),remaining);
+}
+
+// Blends near and optional far transmission over the near edge, then fades the outermost cascade to sunlight.
 float oe_cloud_shadow(vec3 position)
 {
     if (!oe_cloud_enabled || oe_cloud_grid.w <= 0.0) return 1.0;
@@ -171,9 +183,21 @@ float oe_cloud_shadow(vec3 position)
     vec3 local = transpose(oe_cloud_basis)*(onGround-oe_cloud_shadowOrigin.xyz);
     vec2 uv = local.xy/(2.0*oe_cloud_shadowOrigin.w)+0.5;
     float edge = max(abs(uv.x-0.5),abs(uv.y-0.5))*2.0;
-    if (edge >= 1.0) return 1.0;
-    float column = texture(oe_cloud_shadowMap,uv).r;
+    float nearWeight = 1.0-smoothstep(0.8,1.0,edge);
     float remaining = clamp((oe_cloud_shell.z-height)/(oe_cloud_shell.z-oe_cloud_shell.y),0.0,1.0);
-    return mix(1.0,pow(max(column,1e-5),remaining),oe_cloud_fade*oe_cloud_grid.w*(1.0-smoothstep(0.8,1.0,edge)));
+    float shadow = 1.0;
+    if (nearWeight < 1.0 && oe_cloud_shadowFarOrigin.w > 0.0)
+    {
+        // Invert the radial projection used during generation, including the fixed tangent plane's curvature offset.
+        vec3 normal = oe_cloud_shadowFarBasis[2];
+        vec3 plane = onGround*(dot(oe_cloud_shadowFarOrigin.xyz,normal)/max(dot(onGround,normal),1e-4));
+        vec3 farLocal = transpose(oe_cloud_shadowFarBasis)*(plane-oe_cloud_shadowFarOrigin.xyz);
+        vec2 farUV = farLocal.xy/(2.0*oe_cloud_shadowFarOrigin.w)+0.5;
+        float farEdge = max(abs(farUV.x-0.5),abs(farUV.y-0.5))*2.0;
+        if (farEdge < 1.0)
+            shadow = mix(1.0,oe_cloud_shadowTile(farUV,true,remaining),1.0-smoothstep(0.8,1.0,farEdge));
+    }
+    if (nearWeight > 0.0) shadow = mix(shadow,oe_cloud_shadowTile(uv,false,remaining),nearWeight);
+    return mix(1.0,shadow,oe_cloud_fade*oe_cloud_grid.w);
 }
 #endif

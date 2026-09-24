@@ -24,17 +24,15 @@ This will clone the repository into a folder called `repo` and pull down any sub
 First, clone and bootstrap the [vcpkg](https://github.com/Microsoft/vcpkg) package manager by following the instructions.
 
 
-### Step 3 - Configure for GL3 or GLCORE support (OPTIONAL but RECOMMENDED)
+### Step 3 - Configure OpenGL support
 
-If you want to build with OpenSceneGraph that support GL3 or GLCORE OpenGL profile, go into your `vcpkg` installation and locate the file
-```
-ports/osg/portfile.cmake
-```
-In this file, find the line
-```
-set(osg_OPENGL_PROFILE "GL2")
-```
-...and change "GL2" to either "GL3" or "GLCORE".
+The `configure.bat` workflow calls `bootstrap-vcpkg.bat`, which selects the repository's
+`cmake/triplets/x64-windows-release.cmake` overlay triplet. This builds OpenSceneGraph
+with `osg_OPENGL_PROFILE` set to `GL3` by default, without editing your vcpkg installation.
+To use `GLCORE` instead, change this setting in the overlay triplet.
+
+After changing the triplet, rerun `configure.bat` followed by `build.bat` so vcpkg can
+rebuild the affected dependencies before osgEarth is built.
 
 (Note: GLCORE is required for some platforms like MacOSX, Mesa, or VMWare).
 

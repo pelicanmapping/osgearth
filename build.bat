@@ -1,1 +1,2 @@
-cmake --build build --config RelWithDebInfo --parallel --target install install
+@echo off
+cmake --build "%~dp0build" --config RelWithDebInfo --parallel --target install

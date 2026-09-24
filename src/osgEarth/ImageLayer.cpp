@@ -885,6 +885,7 @@ FutureTexture2D::update()
             {
                 this->setImage(image);
                 this->dirtyTextureObject();
+                ImageUtils::fixTextureForGlCoreProfile(this);
             }
 
             else

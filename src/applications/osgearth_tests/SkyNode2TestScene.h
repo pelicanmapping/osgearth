@@ -99,8 +99,9 @@ namespace osgEarth { namespace Sky2Tests
         osg::ref_ptr<osg::MatrixTransform> models = new osg::MatrixTransform;
         unsigned width, height;
 
-        //! Creates a real offscreen OSG pipeline, deterministic PBR spheres, and a flat ground patch.
-        Scene(SkyNode* node, unsigned w = 512, unsigned h = 256) : sky(node), width(w), height(h)
+        //! Creates an OSG pipeline and material probes; coreProfile uses a window because WGL pbuffers are legacy.
+        Scene(SkyNode* node, unsigned w = 512, unsigned h = 256, bool coreProfile = false) :
+            sky(node), width(w), height(h)
         {
             Capabilities::get();
             osg::ref_ptr<osg::GraphicsContext::Traits> traits = new osg::GraphicsContext::Traits;
@@ -108,7 +109,14 @@ namespace osgEarth { namespace Sky2Tests
             traits->setUndefinedScreenDetailsToDefaultScreen();
             traits->width = w; traits->height = h;
             traits->alpha = 8; // Retain probe coverage masks in framebuffer readbacks.
-            traits->pbuffer = true; traits->doubleBuffer = false;
+            traits->pbuffer = !coreProfile; traits->doubleBuffer = false;
+            if (coreProfile)
+            {
+                traits->glContextVersion = "4.3";
+                traits->glContextProfileMask = 0x00000001; // GL_CONTEXT_CORE_PROFILE_BIT
+                traits->windowDecoration = false;
+                traits->x = -32000; traits->y = -32000;
+            }
             context = osg::GraphicsContext::createGraphicsContext(traits);
             if (!context || !context->realize() || !context->makeCurrent())
                 throw std::runtime_error("SkyNode2 offscreen GL context unavailable");

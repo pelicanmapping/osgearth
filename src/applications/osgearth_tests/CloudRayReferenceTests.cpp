@@ -326,3 +326,120 @@ TEST_CASE("Cloud sunlight cache matches a dense independent ray march", "[clouds
     }
     CHECK(glGetError() == GL_NO_ERROR);
 }
+
+// Exact homogeneous transport exposes horizon depth mixing independently of weather, terrain paging, and lighting.
+TEST_CASE("Cloud view volume reconstructs horizon receivers at metric distance", "[clouds][cloudhorizon][.gl]")
+{
+    Probe probe;
+    Shaders shaders;
+    const std::string header = "#version 430\n#define OE_CLOUD_LAYER\n";
+    const std::string common = shaders.context().at("CloudLayer.Common.glsl");
+    const std::string generator = R"(
+        layout(local_size_x=8,local_size_y=8) in;
+        layout(rgba16f,binding=0) uniform writeonly image3D outputImage;
+        // Supplies exact Beer transport for a uniform shell in the renderer's ray-local distance layout.
+        void main()
+        {
+            ivec3 size=imageSize(outputImage);
+            ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);
+            if (any(greaterThanEqual(pixel,size.xy))) return;
+            vec2 uv=(vec2(pixel)+0.5)/vec2(size.xy);
+            vec4 view=oe_cloud_inverseProjection*vec4(uv*2.0-1.0,0,1);
+            vec3 direction=normalize(oe_cloud_viewToEarth*view.xyz);
+            vec4 span=oe_cloud_intervals(oe_cloud_eye,direction);
+            float total=span.y-span.x+span.w-span.z;
+            for (int z=0;z<size.z;++z)
+            {
+                float fraction=float(z)/float(size.z-1), T=exp(-0.03*total*fraction*fraction);
+                imageStore(outputImage,ivec3(pixel,z),vec4(vec3(1,0.5,0.25)*(1.0-T),T));
+            }
+        }
+    )";
+    const std::string comparison = R"(
+        layout(local_size_x=8,local_size_y=8) in;
+        layout(rgba32f,binding=0) uniform writeonly image3D outputImage;
+        uniform float receiverDistance;
+        // Compares finite-distance RGB and transmission to analytic transport, including shell entry and empty rays.
+        void main()
+        {
+            ivec2 size=imageSize(outputImage).xy, pixel=ivec2(gl_GlobalInvocationID.xy);
+            if (any(greaterThanEqual(pixel,size))) return;
+            vec2 uv=(vec2(pixel)+0.5)/vec2(size);
+            vec4 view=oe_cloud_inverseProjection*vec4(uv*2.0-1.0,0,1);
+            vec3 direction=normalize(oe_cloud_viewToEarth*view.xyz);
+            vec4 span=oe_cloud_intervals(oe_cloud_eye,direction);
+            float along=clamp(receiverDistance-span.x,0.0,span.y-span.x)+
+                clamp(receiverDistance-span.z,0.0,span.w-span.z);
+            float T=exp(-0.03*along);
+            vec4 expected=vec4(vec3(1,0.5,0.25)*(1.0-T),T);
+            // Complete sky rays must retain the original filtered terminal slice, including horizon antialiasing.
+            if (receiverDistance>1e7 && along>0.0)
+                expected=texture(oe_cloud_volume,vec3(uv,(oe_cloud_grid.z-0.5)/oe_cloud_grid.z));
+            vec4 actual=oe_cloud_sample(direction,receiverDistance);
+            vec4 error=abs(actual-expected);
+            float maximum=max(max(error.r,error.g),max(error.b,error.a));
+            imageStore(outputImage,ivec3(pixel,0),vec4(actual.r,expected.r,maximum,actual.a));
+        }
+    )";
+    GLuint generate=probe.program(header+common+generator), compare=probe.program(header+common+comparison);
+    const unsigned width=1536, height=768;
+    GLuint volume=probe.texture(384,192,24,false,GL_RGBA16F_ARB);
+    GLuint output=probe.texture(width,height,1,false);
+    osg::Matrixf projection=osg::Matrixf::perspective(10.0,2.0,0.01,1000.0);
+    osg::Matrixf inverse=osg::Matrixf::inverse(projection);
+    for (float altitude : {1.0f,2.0f,3.0f,6.0f})
+    for (float offset : {-0.0004f,0.0f,0.0004f})
+    {
+        float pitch=std::acos(6360.0f/(6360.0f+altitude))+offset, c=std::cos(pitch), s=std::sin(pitch);
+        float view[]={1,0,0,0,s,c,0,-c,s}, earth[]={1,0,0,0,s,-c,0,c,s};
+        for (GLuint program : {generate,compare})
+        {
+            probe.gl->glUseProgram(program);
+            probe.gl->glUniform3f(probe.gl->glGetUniformLocation(program,"oe_cloud_eye"),0,0,6360.0f+altitude);
+            probe.gl->glUniform4f(probe.gl->glGetUniformLocation(program,"oe_cloud_shell"),6360,1.5f,4.5f,1.57f+pitch);
+            probe.gl->glUniform4f(probe.gl->glGetUniformLocation(program,"oe_cloud_grid"),384,192,24,0);
+            probe.gl->glUniform1i(probe.gl->glGetUniformLocation(program,"oe_cloud_enabled"),1);
+            probe.gl->glUniform1i(probe.gl->glGetUniformLocation(program,"oe_cloud_screenSpace"),1);
+            probe.gl->glUniform1i(probe.gl->glGetUniformLocation(program,"oe_cloud_volume"),0);
+            probe.gl->glUniformMatrix3fv(probe.gl->glGetUniformLocation(program,"oe_cloud_viewToEarth"),1,GL_FALSE,view);
+            probe.gl->glUniformMatrix3fv(probe.gl->glGetUniformLocation(program,"oe_cloud_earthToView"),1,GL_FALSE,earth);
+            probe.gl->glUniformMatrix4fv(probe.gl->glGetUniformLocation(program,"oe_cloud_projection"),1,GL_FALSE,
+                projection.ptr());
+            probe.gl->glUniformMatrix4fv(probe.gl->glGetUniformLocation(program,"oe_cloud_inverseProjection"),1,GL_FALSE,
+                inverse.ptr());
+            if (program==generate) probe.dispatch(volume,384,192,false,GL_RGBA16F_ARB);
+        }
+        for (float distance : {0.0f,1.0f,10.0f,30.0f,1e8f})
+        {
+            probe.scalar(compare,"receiverDistance",distance);
+            probe.gl->glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D,volume);
+            probe.dispatch(output,width,height,false);
+            auto pixels=probe.pixels(output,width,height);
+            double maximum=0.0, horizonMaximum=0.0;
+            bool finite=true;
+            for (unsigned i=0;i<pixels.size();i+=4)
+            {
+                for (unsigned channel=0;channel<4;++channel) finite=finite && std::isfinite(pixels[i+channel]);
+                maximum=std::max(maximum,double(pixels[i+2]));
+                unsigned row=(i/4)/width;
+                if (row>height/2-height/32 && row<height/2+height/32)
+                    horizonMaximum=std::max(horizonMaximum,double(pixels[i+2]));
+            }
+            INFO("altitude=" << altitude << "km distance=" << distance << "km pitch offset=" << offset);
+            REQUIRE(finite);
+            std::cout << "Cloud horizon altitude=" << altitude << " distance=" << distance << " offset=" << offset
+                << " maximum=" << maximum << " horizon=" << horizonMaximum << '\n';
+            if (distance==0.0f) CHECK(maximum == 0.0);
+            else if (distance>1e7f) CHECK(maximum < 0.00001);
+            else
+            {
+                // Allow 1% spatial-filter error at shell boundaries; nearby horizon receivers stay within 0.2%.
+                CHECK(maximum < 0.01);
+                if ((altitude==2.0f || altitude==3.0f) && distance<=10.0f) CHECK(horizonMaximum < 0.002);
+            }
+            if (altitude==2.0f && offset==0.0f && distance==10.0f)
+                saveProbe(pixels,width,height,0,1.0f,"cloud-horizon-regression.png");
+        }
+    }
+    CHECK(glGetError() == GL_NO_ERROR);
+}

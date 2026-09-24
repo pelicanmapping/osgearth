@@ -91,6 +91,29 @@ vec4 oe_cloud_row(float azimuth, float row, float distance)
     return vec4(mix(nearValue.rgb,farValue.rgb,scatterWeight),nearValue.a*partial);
 }
 
+// Reconstructs a view-volume texel at metric distance before spatial filtering mixes neighboring ray lengths.
+vec4 oe_cloud_screenRay(ivec2 pixel, float distance)
+{
+    pixel = clamp(pixel,ivec2(0),ivec2(oe_cloud_grid.xy)-1);
+    vec2 uv = (vec2(pixel)+0.5)/oe_cloud_grid.xy;
+    vec4 view = oe_cloud_inverseProjection*vec4(uv*2.0-1.0,0.0,1.0);
+    vec3 direction = normalize(oe_cloud_viewToEarth*view.xyz);
+    vec4 span = oe_cloud_intervals(oe_cloud_eye,direction);
+    float total = span.y-span.x+span.w-span.z;
+    float along = clamp(distance-span.x,0.0,span.y-span.x)+clamp(distance-span.z,0.0,span.w-span.z);
+    if (total < 1e-5 || along <= 0.0) return vec4(0,0,0,1);
+    float fraction = clamp(along/total,0.0,1.0);
+    float z = sqrt(fraction)*(oe_cloud_grid.z-1.0), lo = floor(z), hi = min(lo+1.0,oe_cloud_grid.z-1.0);
+    float a = lo/(oe_cloud_grid.z-1.0), b = hi/(oe_cloud_grid.z-1.0);
+    float weight = clamp((fraction-a*a)/max(b*b-a*a,1e-8),0.0,1.0);
+    vec4 nearValue = texelFetch(oe_cloud_volume,ivec3(pixel,int(lo)),0);
+    vec4 farValue = texelFetch(oe_cloud_volume,ivec3(pixel,int(hi)),0);
+    float segment = clamp(farValue.a/max(nearValue.a,1e-6),1e-6,1.0);
+    float partial = pow(segment,weight);
+    float scatterWeight = segment < 0.9999 ? (1.0-partial)/(1.0-segment) : weight;
+    return vec4(mix(nearValue.rgb,farValue.rgb,scatterWeight),nearValue.a*partial);
+}
+
 // Returns cumulative cloud correction and transmission without introducing cloud in front of its exact entry point.
 vec4 oe_cloud_sample(vec3 direction, float distance)
 {
@@ -100,20 +123,16 @@ vec4 oe_cloud_sample(vec3 direction, float distance)
     if (distance <= entry || span.w <= entry) return vec4(0,0,0,1);
     if (oe_cloud_screenSpace)
     {
-        float total = span.y-span.x+span.w-span.z;
-        float along = clamp(distance-span.x,0.0,span.y-span.x)+clamp(distance-span.z,0.0,span.w-span.z);
-        float fraction = clamp(along/max(total,1e-5),0.0,1.0);
-        float z = sqrt(fraction)*(oe_cloud_grid.z-1.0), lo = floor(z), hi = min(lo+1.0,oe_cloud_grid.z-1.0);
-        float a = lo/(oe_cloud_grid.z-1.0), b = hi/(oe_cloud_grid.z-1.0);
-        float weight = clamp((fraction-a*a)/max(b*b-a*a,1e-8),0.0,1.0);
         vec4 clip = oe_cloud_projection*vec4(oe_cloud_earthToView*direction,0.0);
         vec2 uv = clamp(clip.xy/max(clip.w,1e-8)*0.5+0.5,0.0,1.0);
-        vec4 nearValue = texture(oe_cloud_volume,vec3(uv,(lo+0.5)/oe_cloud_grid.z));
-        vec4 farValue = texture(oe_cloud_volume,vec3(uv,(hi+0.5)/oe_cloud_grid.z));
-        float segment = clamp(farValue.a/max(nearValue.a,1e-6),1e-6,1.0);
-        float partial = pow(segment,weight);
-        float scatterWeight = segment < 0.9999 ? (1.0-partial)/(1.0-segment) : weight;
-        return vec4(mix(nearValue.rgb,farValue.rgb,scatterWeight),nearValue.a*partial);
+        // Beyond every possible shell intersection, all rays share their terminal slice (the sky fast path).
+        if (distance >= length(oe_cloud_eye)+oe_cloud_shell.x+oe_cloud_shell.z)
+            return texture(oe_cloud_volume,vec3(uv,(oe_cloud_grid.z-0.5)/oe_cloud_grid.z));
+        // Slice fractions are ray-local: filtering them first leaks distant clouds across the planetary horizon.
+        vec2 pixel = uv*oe_cloud_grid.xy-0.5, weight = fract(pixel);
+        ivec2 lo = ivec2(floor(pixel));
+        return mix(mix(oe_cloud_screenRay(lo,distance),oe_cloud_screenRay(lo+ivec2(1,0),distance),weight.x),
+            mix(oe_cloud_screenRay(lo+ivec2(0,1),distance),oe_cloud_screenRay(lo+ivec2(1,1),distance),weight.x),weight.y);
     }
     vec2 uv = oe_cloud_uv(direction);
     float row = clamp(uv.y,0.0,1.0)*(oe_cloud_grid.y-1.0);

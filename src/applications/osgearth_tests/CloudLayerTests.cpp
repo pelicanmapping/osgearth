@@ -1203,3 +1203,32 @@ TEST_CASE("Cloud grazing rays converge across altitude and sun changes", "[cloud
         CHECK(bands < (quality == CloudLayer::LOW ? 0.0004 : 0.00015));
     }
 }
+// A configured layer must render in a core context, where legacy automatic 3D mip generation is unavailable.
+TEST_CASE("Configured clouds render in an OpenGL core context", "[clouds][cloudstartup][.gl]")
+{
+    SkyNode2::Options options;
+    Config clouds("clouds");
+    clouds.set("coverage",0.8f);
+    clouds.set("quality","low");
+    options.clouds = clouds;
+    osg::ref_ptr<SkyNode2> sky = new SkyNode2(options);
+    REQUIRE(sky->getCloudLayer() != nullptr);
+    Scene scene(sky,128,128,true);
+    GLint profile = 0;
+    glGetIntegerv(0x9126,&profile); // GL_CONTEXT_PROFILE_MASK
+    REQUIRE((profile & 0x00000001) != 0);
+    scene.skyView(2500.0);
+    scene.draw();
+    auto cloudy = scene.pixels();
+    auto controls = sky->getCloudLayer()->getOptions();
+    controls.enabled = false;
+    sky->getCloudLayer()->setOptions(controls);
+    scene.draw();
+    CHECK(difference(cloudy,scene.pixels()) > 0.02);
+    controls.enabled = true;
+    sky->getCloudLayer()->setOptions(controls);
+    sky->releaseGLObjects(scene.context->getState());
+    scene.draw();
+    CHECK(difference(cloudy,scene.pixels()) < 0.001);
+    CHECK(glGetError() == GL_NO_ERROR);
+}

@@ -63,7 +63,16 @@ namespace
         {
             constexpr int size = 64, cells = 8;
             osg::ref_ptr<osg::Image> image = new osg::Image;
-            image->allocateImage(size,size,size,GL_RGBA,GL_FLOAT);
+            osg::Image::MipmapDataType offsets;
+            unsigned bytes = size*size*size*4*sizeof(float);
+            for (unsigned levelSize=size/2; levelSize; levelSize/=2)
+            {
+                offsets.push_back(bytes);
+                bytes += levelSize*levelSize*levelSize*4*sizeof(float);
+            }
+            image->setImage(size,size,size,GL_RGBA16F_ARB,GL_RGBA,GL_FLOAT,
+                new unsigned char[bytes],osg::Image::USE_NEW_DELETE);
+            image->setMipmapLevels(offsets);
             for (int z=0; z<size; ++z)
             for (int y=0; y<size; ++y)
             for (int x=0; x<size; ++x)
@@ -90,9 +99,29 @@ namespace
                 pixel[2] = shape*shape;
                 pixel[3] = pixel[1]*pixel[1];
             }
+            // Supply the complete 3D mip chain explicitly: legacy automatic generation can leave the texture
+            // incomplete in a core GL context. Average both noise and its moments to retain filtering variance.
+            for (unsigned level=1, width=size/2; width; ++level, width/=2)
+            {
+                auto source = reinterpret_cast<const float*>(image->getMipmapData(level-1));
+                auto target = reinterpret_cast<float*>(image->getMipmapData(level));
+                unsigned parent = width*2;
+                for (unsigned z=0; z<width; ++z)
+                for (unsigned y=0; y<width; ++y)
+                for (unsigned x=0; x<width; ++x)
+                for (unsigned c=0; c<4; ++c)
+                {
+                    float sum = 0.0f;
+                    for (unsigned dz=0; dz<2; ++dz)
+                    for (unsigned dy=0; dy<2; ++dy)
+                    for (unsigned dx=0; dx<2; ++dx)
+                        sum += source[(((z*2+dz)*parent+y*2+dy)*parent+x*2+dx)*4+c];
+                    target[((z*width+y)*width+x)*4+c] = sum*0.125f;
+                }
+            }
             osg::ref_ptr<osg::Texture3D> result = new osg::Texture3D(image);
             result->setInternalFormat(GL_RGBA16F_ARB);
-            result->setUseHardwareMipMapGeneration(true);
+            result->setUseHardwareMipMapGeneration(false);
             result->setFilter(osg::Texture::MIN_FILTER,osg::Texture::LINEAR_MIPMAP_LINEAR);
             result->setFilter(osg::Texture::MAG_FILTER,osg::Texture::LINEAR);
             for (auto axis : {osg::Texture::WRAP_S,osg::Texture::WRAP_T,osg::Texture::WRAP_R})

@@ -46,7 +46,10 @@ namespace osgEarth { namespace Util
         /** is it supported on this platform? */
         bool supported() const { return _supported; }
 
-        /** Installs a logarithmic depth buffer on a camera. */
+        /**
+         * Installs a logarithmic depth buffer on a camera. Also sets the OE_LOG_DEPTH_BUFFER
+         * define on the camera's state set: 1 for per-vertex, 2 for per-fragment log depth.
+         */
         void install(osg::Camera* camera);
 
         /** Uninstalls a logarithmic depth buffer from a camera. */

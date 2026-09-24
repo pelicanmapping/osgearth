@@ -17,8 +17,25 @@ foreach(file ${glsl_files})
     # compress whitespace.
     # "contents" must be quoted, otherwise semicolons get dropped for some reason.
     string(REGEX REPLACE "\n\n+" "\n" tempString "${contents}")
-    
-    set(${file} "\nR\"(${tempString})\"")
+
+    # MSVC rejects string literals over 16K characters (C2026), so a long source becomes
+    # adjacent raw literals, each ending at a newline, which the compiler joins back together.
+    set(literals "")
+    string(LENGTH "${tempString}" length)
+    while(length GREATER 12000)
+        string(SUBSTRING "${tempString}" 0 12000 head)
+        string(FIND "${head}" "\n" split REVERSE)
+        if(split LESS 0)
+            break()
+        endif()
+        math(EXPR split "${split} + 1")
+        string(SUBSTRING "${tempString}" 0 ${split} head)
+        string(SUBSTRING "${tempString}" ${split} -1 tempString)
+        string(APPEND literals "\nR\"(${head})\"")
+        string(LENGTH "${tempString}" length)
+    endwhile()
+
+    set(${file} "${literals}\nR\"(${tempString})\"")
 
 endforeach(file)
 

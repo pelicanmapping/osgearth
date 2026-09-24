@@ -22,6 +22,10 @@ namespace osgEarth { namespace Util
         ChonkCulling = "Chonk.Culling.glsl";
         _sources[ChonkCulling] = @Chonk.Culling.glsl@;
 
+        // Chonk occlusion-culling depth pyramid
+        ChonkHiZ = "Chonk.HiZ.glsl";
+        _sources[ChonkHiZ] = @Chonk.HiZ.glsl@;
+
         // Decaling headers
         Decals_Headers = "Decals.h.glsl";
         _sources[Decals_Headers] = @Decals.h.glsl@;

@@ -10,6 +10,7 @@
 #include <osgEarth/MaterialArena>
 #include <osgEarth/Utils>
 #include <osg/Geometry>
+#include <osg/Camera>
 #include <osgUtil/RenderLeaf>
 #include <osgUtil/RenderBin>
 #include <vector>
@@ -91,7 +92,14 @@ namespace osgEarth
             float far_pixel_scale;
             float near_pixel_scale;
             GLuint base_vertex = 0; // page-relative vertex block; indices stay mesh-local
+            // Whether any texel or vertex alpha can fail the alpha test. Opaque LODs render
+            // without discard, which keeps early depth rejection; unknown means alpha-tested.
+            bool alphaTested = true;
         };
+
+        //! Reports whether vertices [first, end) can fail the alpha test through vertex
+        //! alpha or an alpha-tested material; used to classify each LOD after it is ripped.
+        bool hasAlphaTest(std::size_t first, std::size_t end) const;
 
     public:
 
@@ -106,6 +114,8 @@ namespace osgEarth
         std::vector<element_t> _ebo_store;
         std::vector<LOD> _lods;
         osg::BoundingBoxf _box;
+        // Material IDs whose albedo can contain texels below full alpha.
+        std::unordered_set<GLushort> _alphaMaterials;
 
         // Customed draw command
         using DrawCommand = DrawElementsIndirectBindlessCommandNV;
@@ -443,6 +453,24 @@ namespace osgEarth
         static_assert(offsetof(VisibleInstance, lod) == 4 &&
             offsetof(VisibleInstance, fade) == 8 && offsetof(VisibleInstance, alphaCutoff) == 12,
             "Chonk visibility record layout must match GLSL");
+        //! Single-view draw lists. Opaque lists hold instances that cannot fail the alpha test
+        //! and draw without discard; late lists hold what the second occlusion pass found.
+        enum List { EARLY_OPAQUE = 0, EARLY_CUTOUT = 1, LATE_OPAQUE = 2, LATE_CUTOUT = 3, NUM_LISTS = 4 };
+        //! Single-view culling passes, matching CHONK_PASS_* in Chonk.Culling.glsl. RESET also
+        //! refreshes GPU tables and runs multi-view culling, which keeps its own passes.
+        enum CullPass { RESET = 0, CULL = 1, EARLY = 2, LATE = 3 };
+
+        //! One camera's occlusion-culling state for one bin draw, shared by that draw's leaves on
+        //! the draw thread. The camera pointer is an identity key only.
+        struct OcclusionFrame : public osg::Referenced
+        {
+            const osg::Camera* camera = nullptr;
+            unsigned frameNumber = 0;
+            bool hizValid = false; // the depth pyramid was built for the late pass
+            GLuint64 hiz = 0; // bindless sampler handle of the pyramid
+            osg::Vec4f hizParams; // viewport width and height in pixels, levels, 1 when valid
+        };
+
         using Instances = std::vector<Instance>;
         using Batches = std::unordered_map<Chonk::Ptr, Instances>;
         Batches _batches;
@@ -480,7 +508,20 @@ namespace osgEarth
                 GLfloat fade_far;
                 GLuint num_lods; // chonk-global
                 GLuint draw_group; // shared vertex/index buffers for core indirect draws
+                GLuint flags = 0; // FLAG_*
+                GLuint pad[3] = {0, 0, 0};
             };
+            static constexpr GLuint FLAG_ALPHA_TESTED = 1u;
+
+            //! Per-camera visible-last-frame bits for two-phase occlusion culling.
+            struct Visibility
+            {
+                const osg::Camera* key = nullptr;
+                osg::observer_ptr<const osg::Camera> camera;
+                unsigned lastUsed = 0;
+                GLBuffer::Ptr bits; // one uint per source instance and LOD; 1 = visible
+            };
+            std::vector<Visibility> _visibility;
 
             // re-usable arrays
             std::vector<Chonk::DrawCommand> _commands;
@@ -531,10 +572,18 @@ namespace osgEarth
                 float fadeNear, float fadeFar,
                 double birthday, float alphaCutoff,
                 osg::State&);
-            // Resets draw counts and culls/compacts in one compute dispatch.
-            // Requires the culling program to be active on this context.
-            void cull(osg::State& state);
-            void draw(osg::State& state);
+            //! Zeroes all four lists' instance counts on the GPU. The caller orders it with barriers
+            //! against the previous frame's reads and the following culling dispatches.
+            void reset(osg::State& state);
+            //! Runs one culling pass (CULL, EARLY or LATE) into the draw lists; LATE tests against
+            //! frame's pyramid. The culling program must be active on this context.
+            void cull(osg::State& state, int pass, const OcclusionFrame* frame);
+            //! Draws one List with the currently applied program; unculled drawables draw
+            //! everything as EARLY_CUTOUT.
+            void draw(osg::State& state, int list);
+            //! Finds or creates the camera's visibility bits, initially all visible, pruning
+            //! entries for dead or long-unused cameras.
+            GLBuffer::Ptr visibility(osg::State& state, const OcclusionFrame& frame);
             void release();
             //! Finds persistent per-view/per-placement output storage, allowing a drawable to appear on multiple paths.
             ViewBatch& viewBatch(osg::State&, const ChonkRenderPass&);
@@ -547,9 +596,12 @@ namespace osgEarth
         };
         mutable osg::buffered_object<GLObjects> _globjects;
 
-        void update_and_cull_batches(osg::State& state) const;
+        //! Runs one CullPass: RESET refreshes GPU tables and zeroes the lists (or runs multi-view
+        //! culling); the other passes cull single-view drawables.
+        void update_and_cull_batches(osg::State& state, int pass, const OcclusionFrame* frame) const;
 
-        void draw_batches(osg::State& state) const;
+        //! Draws one List; multi-view passes draw everything as EARLY_CUTOUT.
+        void draw_batches(osg::State& state, int list) const;
 
         void dirtyGLObjects();
 
@@ -595,21 +647,59 @@ namespace osgEarth
 
         static void releaseSharedGLObjects(osg::State* state);
 
+        //! Draws opaque, unfaded instances with a shader variant that has no alpha-test discard.
+        //! Compiling a discard makes the GPU depth-test after shading whenever depth writes are on,
+        //! so hidden fragments get fully shaded. Output is unchanged. Thread-safe; default on.
+        static void setOpaquePath(bool value);
+
+        //! Whether opaque instances draw without the alpha-test discard.
+        static bool getOpaquePath();
+
+        //! Two-phase GPU occlusion culling for single-view color cameras: redraw instances that were
+        //! visible last frame, build a depth pyramid, then test every instance against it and draw
+        //! newly visible ones in the same frame, so nothing pops. Terrain and earlier bins occlude
+        //! too. Needs GL 4.5 and bindless textures (NVGL). Thread-safe; default on.
+        static void setOcclusionCulling(bool value);
+
+        //! Whether color cameras cull occluded Chonk instances.
+        static bool getOcclusionCulling();
+
+        //! Draws each bin's drawables nearest first, so early depth rejection can skip hidden
+        //! fragments. Thread-safe; default on.
+        static void setFrontToBack(bool value);
+
+        //! Whether Chonk drawables draw nearest first.
+        static bool getFrontToBack();
+
     private:
-        osg::ref_ptr<osg::StateSet> _cullSS;
+        osg::ref_ptr<osg::StateSet> _cullSS, _hizSS, _opaqueSS;
 
         friend class ChonkDrawable;
 
-        osg::ref_ptr<osgUtil::StateGraph> _cull_sg;
+        // One graph per pass position, in draw order; several share a state set.
+        osg::ref_ptr<osgUtil::StateGraph> _reset_sg, _cull_sg, _hiz_sg, _cullLate_sg;
+        osg::ref_ptr<osgUtil::StateGraph> _early_sg[2], _late_sg[2]; // [opaque, cutout]
 
         struct CullLeaf : public Util::CustomRenderLeaf {
-            CullLeaf(osgUtil::RenderLeaf*);
+            //! barrier: memory barrier bits issued before this leaf (once per pass, on its first leaf).
+            CullLeaf(osgUtil::RenderLeaf*, int pass, ChonkDrawable::OcclusionFrame*, GLbitfield barrier);
             void draw(osg::State&) override;
+            int _pass;
+            GLbitfield _barrier;
+            osg::ref_ptr<ChonkDrawable::OcclusionFrame> _frame;
         };
         struct DrawLeaf : public Util::CustomRenderLeaf {
-            DrawLeaf(osgUtil::RenderLeaf*, bool, bool);
+            //! publish: this leaf issues the barrier that exposes the preceding culling results.
+            DrawLeaf(osgUtil::RenderLeaf*, int list, bool first, bool last, bool publish);
             void draw(osg::State&) override;
-            bool _first, _last;
+            int _list;
+            bool _first, _last, _publish;
+        };
+        //! Copies the current depth buffer and reduces it into the camera's occlusion pyramid.
+        struct HiZLeaf : public Util::CustomRenderLeaf {
+            HiZLeaf(osgUtil::RenderLeaf*, ChonkDrawable::OcclusionFrame*);
+            void draw(osg::State&) override;
+            osg::ref_ptr<ChonkDrawable::OcclusionFrame> _frame;
         };
     };
 }

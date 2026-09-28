@@ -44,3 +44,10 @@ if(OSGEARTH_BUILD_IMGUI_NODEKIT)
     target_sources(osgearth_tests PRIVATE ImGuiTests.cpp)
     target_link_libraries(osgearth_tests PRIVATE osgEarthImGui)
 endif()
+
+if(OSGEARTH_BUILD_PROCEDURAL2_NODEKIT)
+    target_sources(osgearth_tests PRIVATE
+        Procedural2Tests.cpp Procedural2GrassTests.cpp Procedural2AssetTests.cpp
+        Procedural2FeatureTests.cpp Procedural2LightingTests.cpp Procedural2CanopyAssetTests.cpp)
+    target_link_libraries(osgearth_tests PRIVATE osgEarthProcedural2)
+endif()

@@ -1,0 +1,48 @@
+{
+  "broadleaf": {
+    "source": "broadleaf",
+    "source_trees": 5,
+    "source_triangles": 23180,
+    "proxy_triangles": 6,
+    "bounds_m": [
+      [
+        -9.689610413686319,
+        -8.935940662619096,
+        -0.1348875228347502
+      ],
+      [
+        8.809019999302432,
+        9.700092359065952,
+        13.64610715474947
+      ]
+    ],
+    "atlas_size": [
+      2048,
+      512
+    ],
+    "lighting": "unlit albedo and alpha"
+  },
+  "conifer": {
+    "source": "conifer",
+    "source_trees": 5,
+    "source_triangles": 18080,
+    "proxy_triangles": 6,
+    "bounds_m": [
+      [
+        -9.35174764474403,
+        -8.465257066277237,
+        -0.15132832037598365
+      ],
+      [
+        7.5737958178405735,
+        8.462171121116423,
+        15.51881491213159
+      ]
+    ],
+    "atlas_size": [
+      2048,
+      512
+    ],
+    "lighting": "unlit albedo and alpha"
+  }
+}

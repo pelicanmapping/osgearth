@@ -395,6 +395,7 @@ SimplePager::createChildNode(const TileKey& key, ProgressCallback* progress)
         pagedNode->setMaxPixels(_maxPixels);
         pagedNode->setMaxRange(std::min(loadRange, _maxRange));
 
+        if (_configurePagedNodeFunction) _configurePagedNodeFunction(key, pagedNode.get());
         result = pagedNode;
     }
 
@@ -434,6 +435,8 @@ SimplePager::createPagedChildrenOf(const TileKey& parentKey, ProgressCallback* p
         TileKey childKey = parentKey.createChildKey( i );
 
         osg::ref_ptr<osg::Node> child = createChildNode(childKey, progress);
+        // A failed/canceled child must not publish a partial replacement and punch a hole in its parent.
+        if (progress && progress->canceled()) return {};
         if (child.valid())
         {
             group->addChild(child);

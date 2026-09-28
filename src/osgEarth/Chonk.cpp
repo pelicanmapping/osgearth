@@ -640,6 +640,7 @@ namespace
 GLubyte Chonk::NORMAL_TECHNIQUE_DEFAULT = 0;
 GLubyte Chonk::NORMAL_TECHNIQUE_ZAXIS = 1;
 GLubyte Chonk::NORMAL_TECHNIQUE_HEMISPHERE = 2;
+GLubyte Chonk::NORMAL_TECHNIQUE_VOLUME = 3;
 
 unsigned Chonk::MATERIAL_VERTEX_SLOT = 7;
 
@@ -3382,6 +3383,53 @@ ChonkRenderBin::ChonkRenderBin(const ChonkRenderBin& rhs, const osg::CopyOp& op)
 }
 
 
+namespace
+{
+    //! Snapshots the nearest per-path interval before Chonk flattens its source StateGraphs.
+    osg::Vec2f leafCoverage(osgUtil::RenderLeaf* leaf)
+    {
+        osg::Vec2f result(0,1);
+        for (auto* graph=leaf->_parent; graph; graph=graph->_parent)
+        {
+            auto* uniform = graph->_stateset ? graph->_stateset->getUniform("oe_chonk_coverage") : nullptr;
+            if (uniform && uniform->get(result)) break;
+        }
+        return result;
+    }
+
+    //! Captures each population's live quality policy before the cull bin combines its source StateGraphs.
+    osg::Vec2f leafSSEAdjustment(osgUtil::RenderLeaf* leaf)
+    {
+        osg::Vec2f result(0,1);
+        for (auto* graph=leaf->_parent; graph; graph=graph->_parent)
+        {
+            auto* uniform = graph->_stateset ? graph->_stateset->getUniform("oe_chonk_sse_adjust") : nullptr;
+            if (uniform && uniform->get(result)) break;
+        }
+        return result;
+    }
+
+    //! Applies one population's budget for this dispatch; the default preserves ordinary Chonk cutoff scaling.
+    void applySSEAdjustment(osg::State& state, const osg::Vec2f& adjustment)
+    {
+        auto* program = state.getLastAppliedProgramObject();
+        if (!program) return;
+        static const unsigned name = osg::Uniform::getNameID("oe_chonk_sse_adjust");
+        const GLint location = program->getUniformLocation(name);
+        if (location >= 0) state.get<osg::GLExtensions>()->glUniform2fv(location,1,adjustment.ptr());
+    }
+
+    //! Applies a captured interval to the current cull/draw program, without modifying shared Uniform objects.
+    void applyCoverage(osg::State& state, const osg::Vec2f& coverage)
+    {
+        auto* program = state.getLastAppliedProgramObject();
+        if (!program) return;
+        static const unsigned name = osg::Uniform::getNameID("oe_chonk_coverage");
+        const GLint location = program->getUniformLocation(name);
+        if (location >= 0) state.get<osg::GLExtensions>()->glUniform2fv(location,1,coverage.ptr());
+    }
+}
+
 ChonkRenderBin::CullLeaf::CullLeaf(osgUtil::RenderLeaf* leaf, int pass,
     ChonkDrawable::OcclusionFrame* frame, GLbitfield barrier) :
     CustomRenderLeaf(leaf),
@@ -3389,7 +3437,8 @@ ChonkRenderBin::CullLeaf::CullLeaf(osgUtil::RenderLeaf* leaf, int pass,
     _barrier(barrier),
     _frame(frame)
 {
-    //nop
+    _coverage = leafCoverage(leaf);
+    _sseAdjustment = leafSSEAdjustment(leaf);
 }
 
 void
@@ -3398,6 +3447,8 @@ ChonkRenderBin::CullLeaf::draw(osg::State& state)
     if (_barrier)
         state.get<osg::GLExtensions>()->glMemoryBarrier(_barrier);
     auto d = static_cast<const ChonkDrawable*>(getDrawable());
+    applyCoverage(state,_coverage);
+    applySSEAdjustment(state,_sseAdjustment);
     d->update_and_cull_batches(state, _pass, _frame.get());
 }
 
@@ -3408,7 +3459,7 @@ ChonkRenderBin::DrawLeaf::DrawLeaf(osgUtil::RenderLeaf* leaf, int list, bool fir
     _last(last),
     _publish(publish)
 {
-    //nop
+    _coverage = leafCoverage(leaf);
 }
 
 void
@@ -3430,6 +3481,7 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
             GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
     }
 
+    applyCoverage(state,_coverage);
     drawable->draw_batches(state, _list);
 
     if (_last)

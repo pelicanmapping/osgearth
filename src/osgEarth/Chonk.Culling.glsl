@@ -7,6 +7,8 @@
 #pragma import_defines(OE_CHONK_MULTIVIEW)
 #pragma import_defines(OE_LOD_SCALE_UNIFORM)
 #pragma import_defines(OE_LOG_DEPTH_BUFFER)
+#pragma import_defines(OE_CHONK_DENSITY_LOD)
+#pragma import_defines(OE_CHONK_SSE_ADJUST)
 
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
@@ -92,9 +94,20 @@ layout(binding = 31, std430) readonly buffer InputBuffer
 
 uniform vec3 oe_Camera;
 uniform float oe_sse;
+#ifdef OE_CHONK_SSE_ADJUST
+// Opt-in additive pixel budget. Y converts authored cutoffs from their reference error to per-error coefficients.
+uniform vec2 oe_chonk_sse_adjust = vec2(0.0, 1.0);
+#endif
 uniform vec4 oe_lod_scale;
 uniform float osg_FrameTime;
 uniform float oe_chonk_lod_transition_factor = 0.0;
+// Per-path coverage is captured by ChonkRenderBin; partial pages require the cutout path.
+uniform vec2 oe_chonk_coverage = vec2(0.0,1.0);
+
+#ifdef OE_CHONK_DENSITY_LOD
+// Opt-in population thinning: start/end distances and retained fraction. Instance local_uv.x is a stable rank.
+uniform vec3 oe_chonk_density_lod = vec3(0.0, 0.0, 1.0);
+#endif
 
 #ifdef OE_IS_SHADOW_CAMERA
 // xform from shadow camera view space to primary camera view space
@@ -344,15 +357,10 @@ void cullAndCompact()
         retainOutside = oe_chonk_retain_outside_lod_view;
     }
 #endif
-    // Trivially reject low-LOD instances that intersect the near clip plane:
-    if (!retainOutside && (lod > 0) && (proj[3][3] < 0.01)) // is perspective camera
-    {
-        float near = proj[3][2] / (proj[2][2] - 1.0);
-        if (-(center_view.z + r) <= near)
-        {
-            REJECT(REASON_NEARCLIP);
-        }
-    }
+    // A conservative sphere touching the near plane does not make its coarse LOD invisible.
+    // Log depth can also render geometry entirely in front of the projection's conventional near plane.
+    // Keep all LODs eligible for the same pixel-size transition and let rasterization clip triangles;
+    // rejecting only coarse LODs here leaves a hole after the detailed representation fades out.
     // Clip-space frustum boundary (in each direction)
 #ifdef OE_GPUCULL_DEBUG
     float frustumBoundary = 0.95 * oe_chonk_shadow_buffer_multiplier;
@@ -396,7 +404,11 @@ void cullAndCompact()
         float pixelSize = min(dims.x, dims.y);
         float pixelSizePad = pixelSize * oe_chonk_lod_transition_factor;
 
-        float minPixelSize = oe_sse * chonks[v].far_pixel_scale * oe_lod_scale[lod];
+        float sse = oe_sse;
+#ifdef OE_CHONK_SSE_ADJUST
+        sse = max(1.0, sse + oe_chonk_sse_adjust.x) * oe_chonk_sse_adjust.y;
+#endif
+        float minPixelSize = sse * chonks[v].far_pixel_scale * oe_lod_scale[lod];
         if (pixelSize < (minPixelSize - pixelSizePad))
             REJECT(REASON_SSE);
 
@@ -404,7 +416,7 @@ void cullAndCompact()
         if (lod > 0)
         {
             float near_scale = chonks[v].near_pixel_scale * oe_lod_scale[lod - 1];
-            maxPixelSize = oe_sse * near_scale;
+            maxPixelSize = sse * near_scale;
 
             if (pixelSize > (maxPixelSize + pixelSizePad))
                 REJECT(REASON_SSE);
@@ -425,6 +437,22 @@ void cullAndCompact()
         float birth = clamp((osg_FrameTime - chonks[v].birthday) / fadein_time, 0.0, 1.0);
         fade *= birth;
     }
+
+    // Density LOD shares the primary-view distance for color and shadow cameras. Surviving placements never move.
+#ifdef OE_CHONK_DENSITY_LOD
+    if (oe_chonk_density_lod.z < 1.0 && oe_chonk_density_lod.y > oe_chonk_density_lod.x)
+    {
+        float rank = clamp(input_instances[i].local_uv.x, 0.0, 1.0);
+        if (rank >= oe_chonk_density_lod.z)
+        {
+            float width = (oe_chonk_density_lod.y - oe_chonk_density_lod.x) * 0.1;
+            float order = (1.0 - rank) / (1.0 - oe_chonk_density_lod.z);
+            float start = mix(oe_chonk_density_lod.x, oe_chonk_density_lod.y - width, order);
+            float distance = length(center_view.xyz) * OE_LOD_SCALE_UNIFORM;
+            fade *= 1.0 - smoothstep(start, start + width, distance);
+        }
+    }
+#endif
 
     // Distance-based fade:
     float fade_range = chonks[v].fade_far - chonks[v].fade_near;
@@ -485,7 +513,8 @@ void cullAndCompact()
     }
 #endif
     // Opaque, unfaded instances cannot fail the alpha test, so their list draws without discard.
-    uint list = ((chonks[v].flags & CHONK_FLAG_ALPHA_TESTED) == 0u && fade == 1.0) ? 0u : 1u;
+    bool covered = oe_chonk_coverage.x <= 0.0 && oe_chonk_coverage.y >= 1.0;
+    uint list = ((chonks[v].flags & CHONK_FLAG_ALPHA_TESTED) == 0u && fade == 1.0 && covered) ? 0u : 1u;
     if (oe_chonk_pass >= CHONK_PASS_EARLY)
     {
         // Two-phase occlusion culling: the early pass redraws last frame's visible set; the late

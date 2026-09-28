@@ -5,8 +5,10 @@
 #include <osgEarth/catch.hpp>
 #include "ChonkTestUtils.h"
 #include <osgEarth/ShaderLoader>
+#include <osgEarth/LogarithmicDepthBuffer>
 #include <osg/Texture3D>
 #include <osgDB/FileNameUtils>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <future>
@@ -312,6 +314,195 @@ TEST_CASE("Chonk GPU rendering preserves instances and responds to SSE", "[chonk
     REQUIRE(litPixels[3] == litPixels[0]);
 }
 
+//! Density LOD must preserve source records, restore the same survivors, and dither fades without losing alpha tests.
+TEST_CASE("Chonk density LOD preserves stable survivors and dithered coverage", "[chonk][gpu]")
+{
+    if (!Capabilities::get().supportsNVGL())
+    {
+        WARN("Chonk density LOD test needs NVGL and OSG_GL_CONTEXT_VERSION=4.6");
+        return;
+    }
+    ChonkTest::Renderer renderer;
+    REQUIRE(renderer.initialize());
+    auto state = renderer.root->getOrCreateStateSet();
+    state->setDefine("OE_CHONK_DENSITY_LOD");
+    state->setDefine("OE_CHONK_DITHER_FADE");
+    auto policy = new osg::Uniform("oe_chonk_density_lod", osg::Vec3f(100,200,0.25f));
+    state->addUniform(policy);
+    auto asset = renderer.factory->getOrCreateChonk(ChonkTest::mesh(), 0.0f);
+    REQUIRE(asset);
+    osg::ref_ptr<InspectableDrawable> drawable = new InspectableDrawable();
+    for (unsigned i = 0; i < 4; ++i)
+        drawable->add(asset, osg::Matrixf::translate(float(i%2)*16-8, float(i/2)*16-8, 0),
+            osg::Vec2f((float(i)+0.5f)/4.0f,0));
+    renderer.setScene(drawable);
+    std::vector<std::set<float>> survivors;
+    for (const osg::Vec3f setting : {osg::Vec3f(100,200,0.25f), osg::Vec3f(10,80,0.25f),
+        osg::Vec3f(10,80,0), osg::Vec3f(100,200,0.25f)})
+    {
+        policy->set(setting);
+        for (unsigned frame = 0; frame < 4; ++frame) renderer.frame();
+        auto snapshot = drawable->snapshot(*renderer.context->getState());
+        REQUIRE(snapshot.sourceUnchanged);
+        std::set<float> ranks;
+        for (const auto& command : snapshot.commands)
+        for (unsigned i = 0; i < command.cmd.instanceCount; ++i)
+        {
+            const auto& visible = snapshot.visible[command.cmd.baseInstance+i];
+            REQUIRE(visible.sourceIndex < snapshot.sources.size());
+            ranks.insert(snapshot.sources[visible.sourceIndex].uv.x());
+        }
+        survivors.push_back(ranks);
+    }
+    CHECK(survivors[0].size() == 4);
+    CHECK(survivors[1] == std::set<float>{0.125f});
+    CHECK(survivors[2].empty());
+    CHECK(survivors[3] == survivors[0]);
+
+    // Different population policies must survive sharing a renderer and arena. A common Chonk bin would
+    // incorrectly apply the first population's state to both, so exercise separate bins under one parent.
+    osg::ref_ptr<osg::Group> populations = new osg::Group();
+    populations->getOrCreateStateSet()->setRenderBinDetails(3, "RenderBin");
+    std::vector<osg::ref_ptr<InspectableDrawable>> populationDrawables;
+    for (unsigned population = 0; population < 2; ++population)
+    {
+        auto group = new osg::Group();
+        group->getOrCreateStateSet()->addUniform(new osg::Uniform("oe_chonk_density_lod",
+            osg::Vec3f(10,80,population == 0 ? 0.25f : 0.75f)));
+        osg::ref_ptr<InspectableDrawable> instances = new InspectableDrawable();
+        instances->setRenderBinNumber(1 + int(population));
+        for (unsigned i = 0; i < 4; ++i)
+            instances->add(asset, osg::Matrixf::translate(float(i%2)*16-8 + float(population)*5,
+                float(i/2)*16-8, 0), osg::Vec2f((float(i)+0.5f)/4.0f,0));
+        group->addChild(instances);
+        populations->addChild(group);
+        populationDrawables.push_back(instances);
+    }
+    renderer.setScene(populations);
+    for (unsigned frame = 0; frame < 4; ++frame) renderer.frame();
+    for (unsigned population = 0; population < 2; ++population)
+    {
+        const auto snapshot = populationDrawables[population]->snapshot(*renderer.context->getState());
+        REQUIRE(snapshot.sourceUnchanged);
+        std::set<float> ranks;
+        for (const auto& command : snapshot.commands)
+        for (unsigned i = 0; i < command.cmd.instanceCount; ++i)
+        {
+            const auto& visible = snapshot.visible[command.cmd.baseInstance+i];
+            ranks.insert(snapshot.sources[visible.sourceIndex].uv.x());
+        }
+        CHECK(ranks.size() == (population == 0 ? 1u : 3u));
+    }
+
+    policy->set(osg::Vec3f(0,0,1));
+    osg::ref_ptr<InspectableDrawable> fading = new InspectableDrawable();
+    // Isolate range coverage from the birthday ramp, which uses wall-clock reference time, not viewer.frame(time).
+    fading->setBirthday(-10.0);
+    fading->add(asset, osg::Matrixf::scale(4,4,1));
+    renderer.setScene(fading);
+    std::vector<unsigned> coverage;
+    for (float farRange : {0.0f, 400.0f, 200.0f, 133.33333f})
+    {
+        fading->setFadeNearFar(0.0f, farRange);
+        renderer.frame(); renderer.frame();
+        const auto faded = fading->snapshot(*renderer.context->getState());
+        for (const auto& command : faded.commands)
+            for (unsigned i=0; i<command.cmd.instanceCount; ++i)
+            {
+                const float expected = farRange > 0.0f ? 1.0f-100.0f/farRange : 1.0f;
+                CHECK(std::abs(faded.visible[command.cmd.baseInstance+i].fade-expected) < 1e-5f);
+            }
+        auto pixels = renderer.pixels();
+        unsigned count = 0;
+        for (unsigned i = 0; i < 256u*256u; ++i)
+            if (pixels->data()[4*i+2] > 128) ++count;
+        coverage.push_back(count);
+    }
+    REQUIRE(coverage[0] > 1000);
+    CHECK(std::abs(double(coverage[1])/coverage[0] - 0.75) < 0.08);
+    CHECK(std::abs(double(coverage[2])/coverage[0] - 0.50) < 0.08);
+    CHECK(std::abs(double(coverage[3])/coverage[0] - 0.25) < 0.08);
+    auto cutout = ChonkTest::mesh();
+    static_cast<osg::Vec4Array*>(cutout->getColorArray())->front().a() = 0.25f;
+    auto cutoutAsset = renderer.factory->getOrCreateChonk(cutout, 0.0f);
+    REQUIRE(cutoutAsset);
+    osg::ref_ptr<ChonkDrawable> transparent = new ChonkDrawable();
+    transparent->add(cutoutAsset, osg::Matrixf::scale(4,4,1));
+    renderer.setScene(transparent);
+    renderer.frame(); renderer.frame();
+    auto pixels = renderer.pixels();
+    unsigned remaining = 0;
+    for (unsigned i = 0; i < 256u*256u; ++i)
+        if (pixels->data()[4*i+2] > 0) ++remaining;
+    CHECK(remaining == 0);
+    REQUIRE(glGetError() == GL_NO_ERROR);
+}
+
+// Keep adjacent LODs eligible when only their conservative sphere touches the near plane.
+// The tilted quad is visible with conventional depth; log depth also keeps it visible before the original near plane.
+// GPU readback distinguishes LOD rejection from alpha fading, and pixel checks catch a fully missing transition.
+TEST_CASE("Chonk LOD transitions survive a near-plane intersection", "[chonk][gpu][chonk-lod-transition]")
+{
+    if (!Capabilities::get().supportsNVGL())
+    {
+        WARN("Chonk LOD test needs NVGL and OSG_GL_CONTEXT_VERSION=4.6");
+        return;
+    }
+    unsigned depthMode = 0u;
+    SECTION("Conventional depth") { }
+    SECTION("Vertex logarithmic depth") { depthMode = 1u; }
+    SECTION("Fragment logarithmic depth") { depthMode = 2u; }
+    INFO("Depth mode " << depthMode);
+    ChonkTest::Renderer renderer;
+    REQUIRE(renderer.initialize());
+    auto* ss = renderer.root->getOrCreateStateSet();
+    ss->getUniform("oe_sse")->set(1.0f);
+    ss->addUniform(new osg::Uniform("oe_chonk_lod_transition_factor", 0.15f));
+    ss->setDefine("OE_CHONK_DITHER_FADE");
+    auto asset = renderer.factory->getOrCreateChonk(ChonkTest::mesh(), 20.0f);
+    REQUIRE(asset);
+    asset->_lods.push_back(asset->_lods.front());
+    asset->_lods.back().far_pixel_scale = 0.0f;
+    asset->_lods.back().near_pixel_scale = 20.0f;
+    osg::ref_ptr<InspectableDrawable> drawable = new InspectableDrawable();
+    drawable->setBirthday(-10.0);
+    drawable->add(asset, osg::Matrixf());
+    renderer.setScene(drawable);
+    auto* camera = renderer.viewer.getCamera();
+    if (depthMode != 0u)
+    {
+        Util::LogarithmicDepthBuffer depth;
+        depth.setUseFragDepth(depthMode == 2u);
+        depth.install(camera);
+    }
+    for (double range : {90.0, 100.0, 120.0})
+    {
+        camera->setViewMatrixAsLookAt(osg::Vec3d(0, -range/std::sqrt(2.0), range/std::sqrt(2.0)),
+            osg::Vec3d(), osg::Vec3d(0, 0, 1));
+        std::vector<double> nearPlanes = {1.0, range - 2.0};
+        if (depthMode != 0u) nearPlanes.push_back(1000.0);
+        for (double nearPlane : nearPlanes)
+        {
+            INFO("Range " << range << ", near plane " << nearPlane);
+            camera->setProjectionMatrixAsPerspective(45.0, 1.0, nearPlane, 10000.0);
+            for (unsigned frame = 0; frame < 4u; ++frame) renderer.frame();
+            const auto snapshot = drawable->snapshot(*renderer.context->getState());
+            unsigned coarse = 0u;
+            for (const auto& command : snapshot.commands)
+                for (unsigned i = 0u; i < command.cmd.instanceCount; ++i)
+                    if (snapshot.visible[command.cmd.baseInstance + i].lod == 1u) ++coarse;
+            CHECK(coarse == 1u);
+            const auto pixels = renderer.pixels();
+            unsigned covered = 0u;
+            for (unsigned y = 0u; y < 256u; ++y)
+                for (unsigned x = 0u; x < 256u; ++x)
+                    if (pixels->data(x, y)[2] > 200u) ++covered;
+            CHECK(covered > 0u);
+        }
+    }
+    REQUIRE(glGetError() == GL_NO_ERROR);
+}
+
 // Isolate the visibility regression from viewer tests that reuse context IDs;
 // Chonk's shared render-bin resources can outlive the previous viewer. Each
 // worker chooses its culling mode before the first frame and keeps it fixed.
@@ -559,4 +750,70 @@ TEST_CASE("Prestige detail cell renders through Chonk", "[.prestige-gpu]")
     REQUIRE(lit > 100);
     REQUIRE(different < 256u*256u/100u);
     REQUIRE(glGetError() == GL_NO_ERROR);
+}
+
+//! The opt-in additive budget must affect actual GPU LOD/cull decisions, preserve sources, and remain population-local.
+TEST_CASE("Chonk additive quality shares global SSE without population leakage", "[chonk][gpu]")
+{
+    if (!Capabilities::get().supportsNVGL())
+    {
+        WARN("Additive quality GPU test needs NVGL");
+        return;
+    }
+    ChonkTest::Renderer renderer;
+    REQUIRE(renderer.initialize());
+    auto model = Chonk::create();
+    REQUIRE(model->add(ChonkTest::mesh(),32.0f,FLT_MAX,*renderer.factory));
+    REQUIRE(model->add(ChonkTest::mesh(),4.0f,32.0f,*renderer.factory));
+    osg::ref_ptr<InspectableDrawable> first = new InspectableDrawable(), second = new InspectableDrawable();
+    osg::ref_ptr<osg::Uniform> offsets[2];
+    auto scene = new osg::Group();
+    unsigned index = 0;
+    for (auto* drawable : {first.get(),second.get()})
+    {
+        drawable->setBirthday(-10);
+        drawable->add(model,osg::Matrixf::translate(index ? 5.0f : -5.0f,0,0));
+        auto* branch = new osg::Group();
+        auto* ss = branch->getOrCreateStateSet();
+        ss->setDefine("OE_CHONK_SSE_ADJUST");
+        offsets[index] = new osg::Uniform("oe_chonk_sse_adjust",osg::Vec2f(0,1.0f/25.0f));
+        ss->addUniform(offsets[index]);
+        branch->addChild(drawable); scene->addChild(branch);
+        ++index;
+    }
+    renderer.setScene(scene);
+    renderer.viewer.getCamera()->setViewMatrixAsLookAt(osg::Vec3d(0,0,40),osg::Vec3d(),osg::Vec3d(0,1,0));
+    auto* global = renderer.root->getStateSet()->getUniform("oe_sse");
+    //! Reads emitted LODs after a completed frame; source buffers must stay byte-for-byte unchanged.
+    auto lods = [&](InspectableDrawable* drawable)
+    {
+        const auto snapshot = drawable->snapshot(*renderer.context->getState());
+        REQUIRE(snapshot.sourceUnchanged);
+        std::set<unsigned> result;
+        for (const auto& command : snapshot.commands)
+            for (unsigned j=0; j<command.cmd.instanceCount; ++j)
+                result.insert(snapshot.visible[command.cmd.baseInstance+j].lod);
+        return result;
+    };
+    global->set(25.0f);
+    renderer.frame(); renderer.frame();
+    CHECK(lods(first) == std::set<unsigned>{0u});
+    CHECK(lods(second) == std::set<unsigned>{0u});
+    offsets[0]->set(osg::Vec2f(25,1.0f/25.0f));
+    renderer.frame(); renderer.frame();
+    CHECK(lods(first) == std::set<unsigned>{1u});
+    CHECK(lods(second) == std::set<unsigned>{0u});
+    // Same sum through the global control must produce the same representation, without applying SSE twice.
+    offsets[0]->set(osg::Vec2f(0,1.0f/25.0f)); global->set(50.0f);
+    renderer.frame(); renderer.frame();
+    CHECK(lods(first) == std::set<unsigned>{1u});
+    CHECK(lods(second) == std::set<unsigned>{1u});
+    global->set(1000.0f);
+    renderer.frame(); renderer.frame();
+    CHECK(lods(first).empty()); CHECK(lods(second).empty());
+    global->set(25.0f);
+    renderer.frame(); renderer.frame();
+    CHECK(lods(first) == std::set<unsigned>{0u});
+    CHECK(lods(second) == std::set<unsigned>{0u});
+    CHECK(glGetError() == GL_NO_ERROR);
 }

@@ -296,9 +296,18 @@ namespace osgEarth
                     ImGui::Text("SkyNode2 / %s", sky2->getOptions().preset == SkyNode2::FLAT ? "Flat" :
                         sky2->getOptions().preset == SkyNode2::HIGH ? "High" : "Balanced");
 
-                bool lighting = _skyNode->getLighting();
+                bool lighting = (_skyNode->getLighting() & osg::StateAttribute::ON) != 0;
                 if (ImGui::Checkbox("Lighting", &lighting))
-                    changeSky(ri,[lighting](SkyNode& sky) { sky.setLighting(lighting); });
+                {
+                    // This scene-wide control must win over explicit map/layer lighting; protected states still opt out.
+                    changeSky(ri,[lighting](SkyNode& sky)
+                    {
+                        sky.setLighting((lighting ? osg::StateAttribute::ON : osg::StateAttribute::OFF) |
+                            osg::StateAttribute::OVERRIDE);
+                    });
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Scene lighting override. Atmosphere visibility is controlled separately.");
 
                 findNode(_shadowCaster, ri);
                 if (_shadowCaster.valid()) {

@@ -1,0 +1,61 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarthProcedural2/Scatter>
+#include <osgEarth/Chonk>
+#include <osgEarth/URI>
+#include <memory>
+
+namespace osgEarth { namespace Procedural2
+{
+    //! Static, meter-scale, Z-up models with their root at the ground. No biome hierarchy.
+    struct OSGEARTHPROCEDURAL2_EXPORT ScatterAsset
+    {
+        std::string name;
+        URI nearModel, coarseModel;
+        URI canopyModel; // optional reusable source clump; absent uses coarseModel, never the detailed model
+        //! Constructs an empty catalog entry without reading any model data.
+        ScatterAsset() = default;
+        //! Resolves model URIs relative to the configuration's referrer.
+        explicit ScatterAsset(const Config&);
+        //! Serializes model references, preserving relative URI context.
+        Config getConfig() const;
+    };
+
+    //! Accounted model content, not total CPU/GPU usage: excludes transient decoding, instance and driver buffers.
+    struct AssetResidency
+    {
+        std::size_t bytes = 0, budget = 0;
+        unsigned assets = 0, failedLoads = 0, budgetDenials = 0;
+        std::string lastError;
+    };
+
+    //! Worker-safe weak cache. Live Chonk owners pin models; the final owner releases the accounting lease.
+    //! Near/coarse files form one lazily loaded bundle. Static geometry and standard textures only.
+    class OSGEARTHPROCEDURAL2_EXPORT AssetCatalog
+    {
+    public:
+        //! Copies immutable configuration; no model I/O or GL allocation occurs here.
+        AssetCatalog(const std::vector<ScatterAsset>&, std::size_t budget, const osgDB::Options* = nullptr);
+        //! Releases the cache; outstanding Chonks keep their resources and accounting leases alive.
+        ~AssetCatalog();
+        //! Reads/converts a bundle once across concurrent workers. Empty name requests the built-in fallback/grass.
+        //! Returns null on cancellation, invalid data or budget pressure; callers may request a fallback.
+        Chonk::Ptr acquire(const ScatterGroup&, const std::string& name, ProgressCallback* = nullptr);
+        //! Assembles a shared nine-piece template from this population's source proxies. Empty models use placeholders.
+        //! Holds source content leases; templates share textures and page out with their final owner. CPU/worker-safe.
+        Chonk::Ptr acquireCanopy(const ScatterGroup&, unsigned coverage, unsigned layout, ProgressCallback* = nullptr);
+        //! Returns a nonblocking content-count snapshot; brief error-text locking never waits for model I/O.
+        AssetResidency residency() const;
+        //! Arena shared by this catalog's Chonks; install above draws and update once per scene update.
+        TextureArena* textures() const;
+
+    private:
+        //! Loads either the individual LOD bundle or a single canopy proxy into the same bounded weak cache.
+        Chonk::Ptr acquireModel(const ScatterGroup&, const std::string&, bool canopySource, ProgressCallback*);
+        struct Impl;
+        std::unique_ptr<Impl> _impl;
+    };
+} }

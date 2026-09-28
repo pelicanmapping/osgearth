@@ -44,6 +44,9 @@ set(STOCK_PANELS
     TerrainEditGUI
     TextureSplattingLayerGUI
     VegetationLayerGUI
+
+    # osgEarthProcedural2
+    VegetationLayer2GUI
     
     # osgEarthCesium
     CesiumIonGUI

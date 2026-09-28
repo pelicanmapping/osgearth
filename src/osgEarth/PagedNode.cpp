@@ -98,6 +98,16 @@ PagedNode2::traverse(osg::NodeVisitor& nv)
                 }
             }
 
+            if (_refinementFunction) inRange = _refinementFunction(nv, inRange);
+
+            if (_replacementFunction && _refinePolicy == REFINE_REPLACE)
+            {
+                if (inRange && _load_function && _loaded.empty() && !_loadGate.exchange(true)) startLoad(&nv);
+                const bool retain = _replacementFunction(nv,_merged.has_value(true) ? _payload.get() : nullptr,inRange);
+                if (inRange || retain) touch();
+                return;
+            }
+
             if (inRange)
             {
                 if (_load_function && _loaded.empty() && !_loadGate.exchange(true))
@@ -172,7 +182,7 @@ PagedNode2::touch()
 }
 
 bool
-PagedNode2::merge(int revision)
+PagedNode2::merge(int revision, double referenceTime)
 {
     // Check the revision, b/c it is possible for a node in the merge queue
     // to be expired before it pops to the front of the merge queue and
@@ -205,6 +215,7 @@ PagedNode2::merge(int revision)
         //    _loaded.value()->setCullCallback(cb);
         //}
 
+        _mergeTime = referenceTime;
         _merged.resolve(true);
         return true;
     }
@@ -539,7 +550,7 @@ PagingManager::update(osg::NodeVisitor* nv)
         osg::ref_ptr<PagedNode2> next;
         if (entry._node.lock(next))
         {
-            next->merge(entry._revision);
+            next->merge(entry._revision,nv && nv->getFrameStamp() ? nv->getFrameStamp()->getReferenceTime() : 0.0);
         }
     }
 }

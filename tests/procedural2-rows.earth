@@ -1,0 +1,83 @@
+<!-- Synthetic land use: enlarged shrub and fern proxies make layout patterns visible. -->
+<map name="Procedural2 - pluggable land-use layouts">
+    <libraries>osgEarthProcedural2</libraries>
+    <sky2>
+        <hours>17.0</hours>
+    </sky2>
+    <options>
+        <lighting>true</lighting>
+        <terrain>
+            <color>#555744</color>
+        </terrain>
+    </options>
+    <OGRFeatures name="data:obstacles">
+        <url>../data/procedural2/rows/exclusions.geojson</url>
+    </OGRFeatures>
+    <OGRFeatures name="data:fields">
+        <url>../data/procedural2/rows/fields.geojson</url>
+    </OGRFeatures>
+    <TMSElevation name="ReadyMap 90m Elevation">
+        <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
+        <vdatum>egm96</vdatum>
+    </TMSElevation>
+    <Vegetation2 name="Structured land use and natural cover">
+        <sources>
+            <source name="fields">
+                <features>data:fields</features>
+            </source>
+            <source name="obstacles">
+                <features>data:obstacles</features>
+            </source>
+        </sources>
+        <coverage>
+            <rule group="trees" key="natural" value="wood" action="include" />
+            <rule name="orchard" group="trees" source="fields" key="landuse" value="orchard" action="include" strategy="rows" priority="10">
+                <placement origin_longitude="-75" origin_latitude="40.65" heading_attribute="row_heading" row_spacing="18" plant_spacing="12" />
+            </rule>
+            <rule name="vineyard" group="shrubs" source="fields" key="landuse" value="vineyard" action="include" strategy="rows" priority="10">
+                <placement origin_longitude="-75" origin_latitude="40.65" heading_attribute="row_heading" row_spacing="8" plant_spacing="3" />
+            </rule>
+            <rule name="crop-rows" group="grass" source="fields" key="landuse" value="farmland" action="include" strategy="rows" priority="10">
+                <placement origin_longitude="-75" origin_latitude="40.65" heading_attribute="row_heading" row_spacing="4.5" plant_spacing="1.8" />
+            </rule>
+            <rule source="obstacles" key="building" value="*" action="exclude" />
+            <rule source="obstacles" key="natural" value="water" action="exclude" />
+            <rule source="obstacles" key="highway" value="*" action="exclude" buffer="5" />
+        </coverage>
+        <seed>17</seed>
+        <asset_budget_mb>64</asset_budget_mb>
+        <assets>
+            <asset name="broadleaf" near="../data/procedural2/starter/broadleaf-near.osg" coarse="../data/procedural2/starter/broadleaf-coarse.osg" />
+            <asset name="conifer" near="../data/procedural2/starter/conifer-near.osg" coarse="../data/procedural2/starter/conifer-coarse.osg" />
+            <asset name="shrub" near="../data/procedural2/starter/shrub-near.osg" coarse="../data/procedural2/starter/shrub-coarse.osg" />
+            <asset name="grass-tuft" near="../data/procedural2/starter/grass-tuft-near.osg" coarse="../data/procedural2/starter/grass-tuft-coarse.osg" />
+            <asset name="fern" near="../data/procedural2/starter/fern-near.osg" coarse="../data/procedural2/starter/fern-coarse.osg" />
+            <asset name="boulder" near="../data/procedural2/starter/boulder-near.osg" coarse="../data/procedural2/starter/boulder-coarse.osg" />
+            <asset name="canopy-cluster" near="../data/procedural2/starter/canopy-cluster-near.osg" coarse="../data/procedural2/starter/canopy-cluster-coarse.osg" />
+        </assets>
+        <profile>global-geodetic</profile>
+        <elevation_resolution>10m</elevation_resolution>
+        <groups>
+            <group name="trees" asset="trees" density="1600" cell_level="18" render_cell_level="16" max_range="2500" lod_pixels="48" min_pixels="0.1" min_scale="0.55" max_scale="0.6050000000000001">
+                <models>
+                    <model>broadleaf</model>
+                </models>
+            </group>
+            <group name="shrubs" asset="shrubs" density="4500" cell_level="19" render_cell_level="17" max_range="2500" lod_pixels="24" min_pixels="0.1" min_scale="3" max_scale="3.2">
+                <models>
+                    <model>shrub</model>
+                </models>
+            </group>
+            <group name="grass" asset="grass" density="10000" cell_level="20" render_cell_level="17" max_range="2500" lod_pixels="12" min_pixels="0.1" min_scale="2.5" max_scale="2.6">
+                <models>
+                    <model>fern</model>
+                </models>
+            </group>
+        </groups>
+    </Vegetation2>
+    <viewpoints home="0" time="0" map_keys="false">
+        <viewpoint name="Land-use layouts" lat="40.6501" long="-75" height="160" heading="-20" pitch="-65" range="850" />
+        <viewpoint name="Vineyard rows" lat="40.6508" long="-74.9983" height="160" heading="-20" pitch="-25" range="180" />
+        <viewpoint name="Orchard clearing" lat="40.6504" long="-75.0021" height="160" heading="-20" pitch="-35" range="220" />
+    </viewpoints>
+</map>

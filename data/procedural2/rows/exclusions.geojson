@@ -1,0 +1,93 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": 201,
+      "properties": {
+        "highway": "track"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -75.004,
+            40.6485
+          ],
+          [
+            -74.996,
+            40.6518
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 202,
+      "properties": {
+        "natural": "water"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -74.9982,
+              40.6505
+            ],
+            [
+              -74.9976,
+              40.6505
+            ],
+            [
+              -74.9976,
+              40.6511
+            ],
+            [
+              -74.9982,
+              40.6511
+            ],
+            [
+              -74.9982,
+              40.6505
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 203,
+      "properties": {
+        "building": "yes"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -75.0015,
+              40.649
+            ],
+            [
+              -75.001,
+              40.649
+            ],
+            [
+              -75.001,
+              40.6496
+            ],
+            [
+              -75.0015,
+              40.6496
+            ],
+            [
+              -75.0015,
+              40.649
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

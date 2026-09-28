@@ -156,6 +156,7 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
 #pragma import_defines(OE_GPUCULL_DEBUG)
 #pragma import_defines(OE_CHONK_SINGLE_SIDED)
 #pragma import_defines(OE_CHONK_OPAQUE)
+#pragma import_defines(OE_CHONK_DITHER_FADE)
 
 struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;
 #pragma include PBRMaterial.glsl
@@ -209,9 +210,9 @@ mat3 make_tbn(vec3 N, vec3 p, vec2 uv)
 
 void oe_chonk_default_fragment(inout vec4 color)
 {
-    // When simulating normals, we invert the texture coordinates
-    // for backfacing geometry
-    if (!gl_FrontFacing && oe_normal_technique != NT_DEFAULT)
+    // Legacy simulated normals mirror full-texture cards. Authored volume normals
+    // retain their atlas coordinates: mirroring U would sample a different view.
+    if (!gl_FrontFacing && (oe_normal_technique == NT_ZAXIS || oe_normal_technique == NT_HEMISPHERE))
     {
         oe_tex_uv.s = 1.0 - oe_tex_uv.s;
     }
@@ -262,9 +263,9 @@ void oe_chonk_default_fragment(inout vec4 color)
         vec2 miplevel = textureQueryLod(sampler2D(oe_albedo_tex), oe_tex_uv);
         color.a *= (1.0 + miplevel.x * oe_alpha_cutoff);
     }
+  #ifdef OE_USE_ALPHA_TO_COVERAGE
     color.a *= oe_fade;
-
-  #ifndef OE_USE_ALPHA_TO_COVERAGE
+  #else
 
     // When A2C is not available, we force the alpha to 0 or 1 and then
     // discard the invisible fragments.    
@@ -274,7 +275,15 @@ void oe_chonk_default_fragment(inout vec4 color)
     // flickering artifacts.
     // (TODO: consider a cheap alpha-only pass that we can sample to prevent overdraw
     // and discard in the expensive shader)
-    color.a = step(oe_alpha_discard_threshold, color.a);
+    #ifdef OE_CHONK_DITHER_FADE
+    // Screen-door coverage separates LOD/distance fade from the asset's alpha test; no blended draw ordering needed.
+    const int bayer[16] = int[16](0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5);
+    ivec2 pixel = ivec2(gl_FragCoord.xy) & 3;
+    float threshold = (float(bayer[pixel.y*4 + pixel.x]) + 0.5) / 16.0;
+    color.a = step(oe_alpha_discard_threshold, color.a) * step(threshold, oe_fade);
+    #else
+    color.a = step(oe_alpha_discard_threshold, color.a * oe_fade);
+    #endif
     #ifndef OE_CHONK_OPAQUE
     // The culler routes only opaque, unfaded instances to the OE_CHONK_OPAQUE lists. Just
     // compiling a discard makes the GPU test depth after shading once depth writes are on.

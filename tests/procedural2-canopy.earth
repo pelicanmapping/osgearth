@@ -1,0 +1,77 @@
+<!-- Separate synthetic 13-tree clusters. No replacement of individual trees or forest boundary semantics yet. -->
+<map name="Procedural2 - synthetic canopy prototype">
+    <libraries>osgEarthProcedural2</libraries>
+    <options>
+        <lighting>true</lighting>
+        <terrain>
+            <color>#555744</color>
+        </terrain>
+    </options>
+    <TMSElevation name="ReadyMap 90m Elevation">
+        <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
+        <vdatum>egm96</vdatum>
+    </TMSElevation>
+    <Vegetation2 name="Landscape populations">
+        <seed>17</seed>
+        <asset_budget_mb>64</asset_budget_mb>
+        <assets>
+            <asset name="broadleaf" near="../data/procedural2/starter/broadleaf-near.osg"
+                coarse="../data/procedural2/starter/broadleaf-coarse.osg"/>
+            <asset name="conifer" near="../data/procedural2/starter/conifer-near.osg"
+                coarse="../data/procedural2/starter/conifer-coarse.osg"/>
+            <asset name="shrub" near="../data/procedural2/starter/shrub-near.osg"
+                coarse="../data/procedural2/starter/shrub-coarse.osg"/>
+            <asset name="grass-tuft" near="../data/procedural2/starter/grass-tuft-near.osg"
+                coarse="../data/procedural2/starter/grass-tuft-coarse.osg"/>
+            <asset name="fern" near="../data/procedural2/starter/fern-near.osg"
+                coarse="../data/procedural2/starter/fern-coarse.osg"/>
+            <asset name="boulder" near="../data/procedural2/starter/boulder-near.osg"
+                coarse="../data/procedural2/starter/boulder-coarse.osg"/>
+            <asset name="canopy-cluster" near="../data/procedural2/starter/canopy-cluster-near.osg"
+                coarse="../data/procedural2/starter/canopy-cluster-coarse.osg"/>
+        </assets>
+        <profile>global-geodetic</profile>
+        <elevation_resolution>10m</elevation_resolution>
+        <groups>
+            <!-- Synthetic clusters use coarse batching for 18km residency. Density LOD never changes placement IDs or positions. -->
+            <group name="trees" asset="trees" density="35" cell_level="16" render_cell_level="13"
+                max_range="18000" lod_pixels="128" min_pixels="0.75">
+                <models><model>canopy-cluster</model></models>
+            </group>
+            <group name="shrubs" asset="shrubs" density="4500" cell_level="18" render_cell_level="16"
+                max_range="700" lod_pixels="48" density_start="150" density_end="550" far_density="0.5">
+                <models><model>shrub</model></models>
+            </group>
+            <group name="grass" asset="grass" density="1120000" cell_level="20" render_cell_level="17"
+                max_range="200" lod_pixels="18" density_start="25" density_end="160" far_density="0.2">
+                <models><model>grass-tuft</model></models>
+            </group>
+            <group name="undergrowth" asset="undergrowth" density="48000" cell_level="19" render_cell_level="17"
+                max_range="280" lod_pixels="28" density_start="50" density_end="220" far_density="0.35">
+                <models><model>fern</model></models>
+            </group>
+            <group name="rocks" asset="rocks" density="1100" cell_level="17" render_cell_level="15"
+                max_range="1000" lod_pixels="40">
+                <models><model>boulder</model></models>
+            </group>
+        </groups>
+    </Vegetation2>
+    <viewpoints home="0" time="0" map_keys="false">
+        <viewpoint name="Starter woodland" lat="40.65" long="-75" height="159.90546"
+            heading="-20" pitch="-18" range="100"/>
+        <viewpoint name="Ground cover - New Jersey" lat="40.65" long="-75" height="159.90546"
+            heading="-20" pitch="-8" range="24"/>
+        <viewpoint name="Forest overview" lat="40.65" long="-75" height="159.90546"
+            heading="-20" pitch="-35" range="1200"/>
+        <viewpoint name="Distant forest - 12km coverage" lat="40.65" long="-75" height="159.90546"
+            heading="-20" pitch="-35" range="6000"/>
+        <viewpoint name="Ground cover - New Zealand" lat="-43.5" long="172.6" height="159.90546"
+            heading="-20" pitch="-8" range="24"/>
+        <viewpoint name="Antimeridian" lat="-17" long="179.9999" height="159.90546"
+            heading="-20" pitch="-8" range="24"/>
+        <viewpoint name="High latitude" lat="70" long="25" height="159.90546"
+            heading="-20" pitch="-8" range="24"/>
+        <viewpoint name="Whole earth - populations paged out" lat="40.65" long="-75" height="159.90546"
+            heading="0" pitch="-90" range="20000000"/>
+    </viewpoints>
+</map>

@@ -81,6 +81,9 @@ namespace osgEarth
         static GLubyte NORMAL_TECHNIQUE_DEFAULT;
         static GLubyte NORMAL_TECHNIQUE_ZAXIS;
         static GLubyte NORMAL_TECHNIQUE_HEMISPHERE;
+        //! Authored volume normals: retain orientation and atlas UVs on either face of impostor cards.
+        //! Supply an osg::UByteArray in vertex attribute slot 6 (overall or per vertex).
+        static GLubyte NORMAL_TECHNIQUE_VOLUME;
 
         static unsigned MATERIAL_VERTEX_SLOT;
 
@@ -354,6 +357,9 @@ namespace osgEarth
         //! Adds a chonk instance to the drawable, along with
         //! a tile-local UV coordinate. You only need this if you
         //! intend to set a custom culling shader.
+        //! With OE_CHONK_DENSITY_LOD, local_uv.x is instead a stable rank in [0,1); the vec3 uniform
+        //! oe_chonk_density_lod supplies thinning start/end distances and the retained fraction.
+        //! OE_CHONK_DITHER_FADE optionally turns LOD/range fades into screen-door coverage without MSAA.
         void add(
             Chonk::Ptr value,
             const osg::Matrixf& xform,
@@ -686,6 +692,8 @@ namespace osgEarth
             void draw(osg::State&) override;
             int _pass;
             GLbitfield _barrier;
+            osg::Vec2f _coverage{0.0f,1.0f}; // per-path coverage also determines opaque-list eligibility
+            osg::Vec2f _sseAdjustment{0.0f,1.0f}; // keep population budgets separate in the flattened cull bin
             osg::ref_ptr<ChonkDrawable::OcclusionFrame> _frame;
         };
         struct DrawLeaf : public Util::CustomRenderLeaf {
@@ -694,6 +702,7 @@ namespace osgEarth
             void draw(osg::State&) override;
             int _list;
             bool _first, _last, _publish;
+            osg::Vec2f _coverage{0.0f,1.0f}; // immutable per-leaf snapshot, independent of flattened bin state
         };
         //! Copies the current depth buffer and reduces it into the camera's occlusion pyramid.
         struct HiZLeaf : public Util::CustomRenderLeaf {

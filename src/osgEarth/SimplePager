@@ -85,6 +85,11 @@ namespace osgEarth { namespace Util
         using CreatePagedNodeFunction = std::function<PagedNode2*(const TileKey&)>;
         void setCreatePagedNodeFunction(CreatePagedNodeFunction func) { _createPagedNodeFunction = func; }
 
+        using ConfigurePagedNodeFunction = std::function<void(const TileKey&, PagedNode2*)>;
+        //! Configures per-page refinement after defaults/bounds are installed, before publication.
+        //! Set before build(); callbacks can run concurrently on paging workers and must not retain the pager.
+        void setConfigurePagedNodeFunction(ConfigurePagedNodeFunction func) { _configurePagedNodeFunction = func; }
+
         //! Scene graph callbacks for notification of changes. Call before calling build().
         void setSceneGraphCallbacks(SceneGraphCallbacks* value) { _sceneGraphCallbacks = value; }
         SceneGraphCallbacks* getSceneGraphCallbacks() const { return _sceneGraphCallbacks.get(); }
@@ -143,6 +148,7 @@ namespace osgEarth { namespace Util
         osg::ref_ptr<SceneGraphCallbacks> _sceneGraphCallbacks;
         CreateNodeFunction _createNodeFunction;
         CreatePagedNodeFunction _createPagedNodeFunction;
+        ConfigurePagedNodeFunction _configurePagedNodeFunction;
 
         void fire_onCreateNode(const TileKey& key, osg::Node* node);
     };

@@ -228,6 +228,7 @@ Layer::getCacheID() const
         hashConf.remove("terrain");
         hashConf.remove("texture_compression");
         hashConf.remove("visible");
+        hashConf.remove("opacity");
 
         auto hash = osgEarth::hashString(hashConf.toJSON());
         std::stringstream buf;

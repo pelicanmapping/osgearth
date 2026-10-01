@@ -735,3 +735,30 @@ TEST_CASE("Procedural2 canopy GPU coverage and crown masks", "[.procedural2-cano
     }
     CHECK(glGetError() == GL_NO_ERROR);
 }
+
+
+//! Stand art remains at its authored dimensions; the two template caches must never substitute one for the other.
+TEST_CASE("Procedural2 reusable stand templates keep authored geometry and metadata", "[procedural2][coverage-stands]")
+{
+    Config conf("asset"); conf.setReferrer(osgDB::getRealPath("procedural2.earth"));
+    conf.set("name","broadleaf");
+    conf.set("near","../data/procedural2/pbr/broadleaf-near.osg");
+    conf.set("coarse","../data/procedural2/pbr/broadleaf-coarse.osg");
+    conf.set("canopy","../data/procedural2/pbr/broadleaf-canopy.osg");
+    conf.set("canopy_trees",5u);
+    ScatterAsset asset(conf);
+    CHECK(ScatterAsset(asset.getConfig()).canopyTrees == 5u);
+    AssetCatalog catalog({asset},64u*1024u*1024u);
+    ScatterGroup group; group.models = {"broadleaf"};
+    auto tree = catalog.acquireImpostor(group,"broadleaf");
+    auto stand = catalog.acquireStand(group,"broadleaf");
+    REQUIRE(tree); REQUIRE(stand);
+    CHECK(tree != stand);
+    CHECK(stand->_ebo_store.size() == 18u);
+    CHECK(stand->_box.xMax()-stand->_box.xMin() > tree->_box.xMax()-tree->_box.xMin());
+    auto trees = catalog.acquireTreeCards(group,"broadleaf",8);
+    auto stands = catalog.acquireTreeCards(group,"broadleaf",8,nullptr,true);
+    REQUIRE(trees); REQUIRE(stands); CHECK(trees != stands);
+    CHECK(stands->_ebo_store.size() == 8u*stand->_ebo_store.size());
+    CHECK(catalog.acquireTreeCards(group,"broadleaf",8,nullptr,true) == stands);
+}

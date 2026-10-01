@@ -5,6 +5,7 @@
 #include <osgEarth/catch.hpp>
 #include <osgEarthProcedural2/FeaturePlacement>
 #include <osgEarthProcedural2/Canopy>
+#include <osgEarthProcedural2/AggregateCoverage>
 #include <osgEarthProcedural2/CanopyTransition.h>
 #include <osgEarth/SimplePager>
 #include <osgEarthProcedural2/VegetationLayer2>
@@ -1368,4 +1369,148 @@ TEST_CASE("Procedural2 canopy fullness is separate from density and LOD", "[proc
         group.canopyCoverScale = invalid;
         CHECK(group.validate().isError());
     }
+}
+
+
+//! Coarse coverage is independent of fine cell enumeration, deterministic, and smaller by the authored stand population.
+TEST_CASE("Procedural2 coverage representatives retain density without enumerating fine cells", "[procedural2][coverage-stands]")
+{
+    auto provider = std::make_shared<FixtureProvider>();
+    provider->features = {tagged(rectangle(499000,4499000,501000,4501000),"natural","wood")};
+    FeatureScatterSource source(provider,{rule("natural","wood")});
+    auto group = population();
+    group.canopy = true; group.renderCellLevel = 3; group.density = 40000;
+    group.minScale = group.maxScale = 1.0f;
+    TileKey key(1,0,0,featureProfile());
+    std::shared_ptr<const PlacementField> field;
+    REQUIRE(source.queryFieldBuffered(key,group,7,30,field).isOK());
+    SampledAggregateCoverage strategy;
+    CHECK(standCoverageWeight(64,320,13) == Approx(5));
+    CHECK(standCoverageWeight(64,10000,13) == Approx(13));
+    CHECK(standCoverageWeight(64,32,13) == Approx(1));
+    CHECK(standCoverageWeight(0,320,13) == Approx(1));
+    CHECK(standCoverageWeight(64,std::numeric_limits<double>::infinity(),13) == Approx(1));
+    AggregateArt art; art.radius = 18; art.trees = 13;
+    AggregateCoverageResult mid,far,again;
+    REQUIRE(strategy.generate(key,group,7,*field,{art},false,mid).isOK());
+    REQUIRE(strategy.generate(key,group,7,*field,{art},true,far).isOK());
+    CHECK(mid.trees.size() == 1600u);
+    CHECK(mid.stands.empty()); CHECK(far.trees.empty());
+    REQUIRE(far.stands.size() > 120u); CHECK(far.stands.size() < 125u);
+    CHECK(std::abs(double(far.stands.size()*13u)-double(mid.trees.size())) <= 13.0);
+    // Changing the source-cell level must not enumerate or reposition the approximate forest.
+    group.cellLevel = 9;
+    REQUIRE(strategy.generate(key,group,7,*field,{art},true,again).isOK());
+    samePopulation(far.stands,again.stands);
+    group.qualityOffset = 400.0f;
+    group.canopyFarClusterSize = 8;
+    REQUIRE(strategy.generate(key,group,7,*field,{art},true,again).isOK());
+    samePopulation(far.stands,again.stands);
+    osg::ref_ptr<ProgressCallback> canceled = new ProgressCallback(); canceled->cancel();
+    CHECK(strategy.generate(key,group,7,*field,{art},true,again,canceled).isError());
+    CHECK(again.trees.empty()); CHECK(again.stands.empty());
+    group.maxPerBatch = 10;
+    CHECK(strategy.generate(key,group,7,*field,{art},true,again).isError());
+    CHECK(again.trees.empty()); CHECK(again.stands.empty());
+}
+
+//! A halo retains narrow roads outside the page; uncertain stands become allowed roots rather than spanning exclusions.
+TEST_CASE("Procedural2 coverage stands respect buffered exclusions beyond page boundaries", "[procedural2][coverage-stands]")
+{
+    auto provider = std::make_shared<FixtureProvider>();
+    auto road = new LineString();
+    road->push_back({500203,4499900,0}); road->push_back({500203,4500500,0});
+    auto lake = rectangle(500060,4500240,500090,4500360);
+    auto points = new PointSet();
+    points->push_back({500100,4500300,0});
+    points->push_back({500200,4500300,0}); // belongs to the adjacent page, even when retained by our halo
+    points->push_back({500203,4500300,0}); // excluded
+    provider->features = {tagged(rectangle(499000,4499000,501000,4501000),"natural","wood"),
+        tagged(road,"highway","track",2),tagged(lake,"natural","water",3),tagged(points,"natural","tree",4)};
+    FeatureScatterSource source(provider,{rule("natural","wood"),rule("highway","*","exclude",1.0),
+        rule("natural","water","exclude"),rule("natural","tree","points")});
+    auto group = population(); group.renderCellLevel = 3;
+    group.canopy = true; group.minScale = group.maxScale = 1;
+    TileKey key(1,0,0,featureProfile());
+    std::shared_ptr<const PlacementField> field;
+    REQUIRE(source.queryFieldBuffered(key,group,7,30,field).isOK());
+    CHECK(field->sample({500203,4500300,0}).excluded);
+    CoverageSample uniform;
+    CHECK_FALSE(field->uniform(GeoExtent(key.getExtent().getSRS(),500195,4500290,500210,4500310),uniform));
+    AggregateArt art; art.radius = 18; art.trees = 13;
+    AggregateCoverageResult result;
+    REQUIRE(SampledAggregateCoverage().generate(key,group,7,*field,{art},true,result).isOK());
+    REQUIRE(!result.stands.empty()); REQUIRE(!result.trees.empty());
+    for (const auto& p : result.stands)
+    {
+        CHECK(std::abs(p.point.x()-500203) > art.radius+1.0);
+        GeoExtent bounds(key.getExtent().getSRS(),p.point.x()-art.radius,p.point.y()-art.radius,
+            p.point.x()+art.radius,p.point.y()+art.radius);
+        CHECK_FALSE(bounds.intersects(GeoExtent(key.getExtent().getSRS(),lake->getBounds())));
+    }
+    unsigned explicitInside = 0, explicitOutside = 0;
+    for (const auto& p : result.trees)
+    {
+        CHECK(std::abs(p.point.x()-500203) > 1.0);
+        CHECK_FALSE(lake->contains2D(p.point.x(),p.point.y()));
+        explicitInside += p.point == osg::Vec3d(500100,4500300,0) ? 1u : 0u;
+        explicitOutside += p.point == osg::Vec3d(500200,4500300,0) ? 1u : 0u;
+    }
+    CHECK(explicitInside == 1u); CHECK(explicitOutside == 0u);
+}
+
+//! Actual pager dispatch proves the experimental mode bypasses detail generation and remains reversible on Apply.
+TEST_CASE("Procedural2 coverage mode switches pages and leaves detailed placement intact", "[procedural2][coverage-stands]")
+{
+    //! Counts requests to the detailed algorithm; all coverage calls still use the production feature compiler.
+    struct CountingSource : FeatureScatterSource
+    {
+        unsigned mutable detailed = 0;
+        //! Retains immutable provider and rules for the duration of the synchronous pager test.
+        CountingSource(std::shared_ptr<FixtureProvider> provider) :
+            FeatureScatterSource(provider,{rule("natural","wood")}) { }
+        //! Records exact-mode requests before forwarding to the unchanged detailed placement pipeline.
+        Status generateBatch(const TileKey& key, const ScatterGroup& group, unsigned seed,
+            std::vector<ScatterPlacement>& output, ProgressCallback* progress) const override
+        { ++detailed; return FeatureScatterSource::generateBatch(key,group,seed,output,progress); }
+    };
+    auto provider = std::make_shared<FixtureProvider>();
+    provider->features = {tagged(rectangle(499000,4499000,501000,4501000),"natural","wood")};
+    auto source = std::make_shared<CountingSource>(provider);
+    auto profile = featureProfile();
+    VegetationLayer2::Options options; options.profile() = profile->toProfileOptions();
+    auto group = population(); group.canopy = true; group.renderCellLevel = 3; group.density = 40000;
+    CHECK(group.canopyStrategy == "exact");
+    group.canopyStrategy = "coverage";
+    CHECK(ScatterGroup(group.getConfig()).canopyStrategy == "coverage");
+    options.groups() = {group};
+    osg::ref_ptr<VegetationLayer2> layer = new VegetationLayer2(options);
+    REQUIRE(layer->setSource(source)); REQUIRE(layer->open().isOK());
+    osg::ref_ptr<Map> map = new Map(); map->addLayer(layer);
+    //! Holds the active pager across synchronous requests and policy changes.
+    auto pager = [&]()
+    {
+        osg::ref_ptr<Util::SimplePager> result;
+        forEachNodeOfType<Util::SimplePager>(layer->getNode(),[&](Util::SimplePager* node) { result = node; });
+        return result;
+    };
+    auto coverage = pager(); REQUIRE(coverage);
+    REQUIRE(coverage->createNode(TileKey(1,0,0,profile),nullptr));
+    REQUIRE(coverage->createNode(TileKey(2,0,0,profile),nullptr));
+    // Re-request after the temporary page owners were released: cached art descriptions remain usable.
+    REQUIRE(coverage->createNode(TileKey(1,0,0,profile),nullptr));
+    REQUIRE(coverage->createNode(TileKey(2,0,0,profile),nullptr));
+    CHECK(source->detailed == 0u);
+    REQUIRE(coverage->createNode(TileKey(3,0,0,profile),nullptr));
+    CHECK(source->detailed == 1u);
+    group.qualityOffset = 200;
+    REQUIRE(layer->setGroup(group).isOK()); CHECK(pager() == coverage);
+    group.canopyStrategy = "exact";
+    REQUIRE(layer->setGroup(group).isOK()); CHECK(pager() != coverage);
+    REQUIRE(pager()->createNode(TileKey(1,0,0,profile),nullptr));
+    CHECK(source->detailed == 2u);
+    CHECK(pager()->getMaxRange() == group.maxRange);
+    group.canopyStrategy = "unknown";
+    CHECK(layer->setGroup(group).isError());
+    map->removeLayer(layer); layer->close();
 }

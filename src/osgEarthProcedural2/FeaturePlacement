@@ -236,6 +236,9 @@ namespace osgEarth { namespace Procedural2
         //! Compiles the same rules used by detailed placement, including holes and buffered roads.
         Status queryField(const TileKey&, const ScatterGroup&, unsigned, std::shared_ptr<const PlacementField>&,
             ProgressCallback* = nullptr) const override;
+        //! Adds a footprint halo to the rule buffers, retaining exclusions beyond the page's ownership boundary.
+        Status queryFieldBuffered(const TileKey&, const ScatterGroup&, unsigned, double,
+            std::shared_ptr<const PlacementField>&, ProgressCallback* = nullptr) const override;
         //! Queries one source cell; errors never publish partial placement.
         Status generate(const TileKey&, const ScatterGroup&, unsigned, std::vector<ScatterPlacement>&,
             ProgressCallback* = nullptr) const override;

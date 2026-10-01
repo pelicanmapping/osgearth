@@ -144,16 +144,16 @@
       <rule key="highway" value="*" except="no" action="exclude" buffer="4"/>
     </coverage>
     <seed>17</seed>
-    <asset_budget_mb>64</asset_budget_mb>
+    <asset_budget_mb>128</asset_budget_mb>
     <assets>
-      <!-- VRV trees with offline-generated individual impostors; distant tiers group these same tree cards. -->
-      <asset name="red-maple" near="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Maple/RedMaple/osgearth/red-maple-near.osg"
+      <!-- VRV individual and 13-tree stand impostors. Exact clusters remain the default; choose coverage in ImGui. -->
+      <asset canopy_trees="13" name="red-maple" near="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Maple/RedMaple/osgearth/red-maple-near.osg"
                 coarse="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Maple/RedMaple/osgearth/red-maple-coarse.osg"
                 canopy="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Maple/RedMaple/osgearth/red-maple-canopy.osg"/>
-      <asset name="white-oak" near="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Oak/WhiteOak/osgearth/white-oak-near.osg"
+      <asset canopy_trees="13" name="white-oak" near="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Oak/WhiteOak/osgearth/white-oak-near.osg"
                 coarse="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Oak/WhiteOak/osgearth/white-oak-coarse.osg"
                 canopy="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Oak/WhiteOak/osgearth/white-oak-canopy.osg"/>
-      <asset name="white-pine" near="D:/data/assets/vrv-vegetation/Trees/EvergreenNeedleLeaf/Pine/EasternWhitePine/osgearth/white-pine-near.osg"
+      <asset canopy_trees="13" name="white-pine" near="D:/data/assets/vrv-vegetation/Trees/EvergreenNeedleLeaf/Pine/EasternWhitePine/osgearth/white-pine-near.osg"
                 coarse="D:/data/assets/vrv-vegetation/Trees/EvergreenNeedleLeaf/Pine/EasternWhitePine/osgearth/white-pine-coarse.osg"
                 canopy="D:/data/assets/vrv-vegetation/Trees/EvergreenNeedleLeaf/Pine/EasternWhitePine/osgearth/white-pine-canopy.osg"/>
       <asset name="shrub" near="../data/procedural2/pbr/shrub-near.osg"

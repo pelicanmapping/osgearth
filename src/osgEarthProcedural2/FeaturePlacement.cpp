@@ -126,7 +126,10 @@ namespace
 
     public:
         //! Allocates a bounded acceleration grid for this request's SRS and extent.
-        explicit VectorField(const TileKey& key) : _extent(key.getExtent()), _bins(SIDE*SIDE) { }
+        explicit VectorField(const TileKey& key, double halo = 0.0) : _extent(key.getExtent()), _bins(SIDE*SIDE)
+        {
+            if (halo > 0.0) _extent.expand(Distance(2.0*halo,Units::METERS),Distance(2.0*halo,Units::METERS));
+        }
 
         //! Builds immutable predicates; copies source geometry before transforming it. Failure discards the field.
         Status compile(const std::vector<PlacementFeature>& features, const std::vector<CoverageRule>& rules,
@@ -846,9 +849,16 @@ Status FeatureScatterSource::generateImpl(const TileKey& key, const ScatterGroup
 Status FeatureScatterSource::queryField(const TileKey& key, const ScatterGroup& group, unsigned seed,
     std::shared_ptr<const PlacementField>& output, ProgressCallback* progress) const
 {
+    return queryFieldBuffered(key,group,seed,0.0,output,progress);
+}
+
+Status FeatureScatterSource::queryFieldBuffered(const TileKey& key, const ScatterGroup& group, unsigned seed,
+    double footprintBuffer, std::shared_ptr<const PlacementField>& output, ProgressCallback* progress) const
+{
     output.reset();
     OE_RETURN_STATUS_ON_ERROR(group.validate());
-    if (!_provider || !key.valid()) return Status(Status::ConfigurationError, "Invalid coverage request");
+    if (!_provider || !key.valid() || !std::isfinite(footprintBuffer) || footprintBuffer < 0.0 || footprintBuffer > 1000.0)
+        return Status(Status::ConfigurationError, "Invalid buffered coverage request");
     double buffer = 0.0;
     std::set<std::string> names;
     for (const auto& rule : _rules)
@@ -865,8 +875,8 @@ Status FeatureScatterSource::queryField(const TileKey& key, const ScatterGroup& 
             if (rule.matches(input, group, feature)) return true;
         return false;
     };
-    OE_RETURN_STATUS_ON_ERROR(_provider->queryFiltered(key, buffer, filter, features, progress));
-    auto field = std::make_shared<VectorField>(key);
+    OE_RETURN_STATUS_ON_ERROR(_provider->queryFiltered(key, buffer+footprintBuffer, filter, features, progress));
+    auto field = std::make_shared<VectorField>(key,footprintBuffer);
     OE_RETURN_STATUS_ON_ERROR(field->compile(features, _rules, group, seed, progress));
     output = std::move(field);
     return Status::NoError;

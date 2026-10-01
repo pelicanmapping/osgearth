@@ -104,10 +104,10 @@
         <seed>17</seed>
         <asset_budget_mb>64</asset_budget_mb>
         <assets>
-            <asset name="broadleaf" near="../data/procedural2/pbr/broadleaf-near.osg"
+            <asset canopy_trees="5" name="broadleaf" near="../data/procedural2/pbr/broadleaf-near.osg"
                 coarse="../data/procedural2/pbr/broadleaf-coarse.osg"
                 canopy="../data/procedural2/pbr/broadleaf-canopy.osg"/>
-            <asset name="conifer" near="../data/procedural2/pbr/conifer-near.osg"
+            <asset canopy_trees="5" name="conifer" near="../data/procedural2/pbr/conifer-near.osg"
                 coarse="../data/procedural2/pbr/conifer-coarse.osg"
                 canopy="../data/procedural2/pbr/conifer-canopy.osg"/>
             <asset name="shrub" near="../data/procedural2/pbr/shrub-near.osg"

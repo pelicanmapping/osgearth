@@ -26,6 +26,7 @@
 #include <set>
 #include <cmath>
 #include <algorithm>
+#include <array>
 
 using namespace osgEarth;
 using namespace osgEarth::Procedural2;
@@ -91,6 +92,15 @@ namespace
         unsigned seed = 1;
         Distance resolution;
         std::shared_ptr<AssetCatalog> assets;
+        std::vector<ScatterAsset> catalog;
+        std::shared_ptr<const AggregateCoverageStrategy> aggregateStrategy;
+        //! Shared across per-page source snapshots; dimensions do not pin asset meshes or textures.
+        struct ArtDescriptions
+        {
+            std::mutex mutex;
+            std::array<std::vector<AggregateArt>,2> tiers;
+        };
+        std::shared_ptr<ArtDescriptions> artDescriptions = std::make_shared<ArtDescriptions>();
 
         //! Builds one spatial batch from unchanged source cells; failures never publish partial geometry.
         osg::ref_ptr<osg::Node> createBatch(const TileKey& key, const ScatterGroup& group, int bin,
@@ -111,7 +121,8 @@ namespace
 
         //! Renders accepted placements, shared by detailed pages and isolated source points in aggregate pages.
         osg::ref_ptr<osg::Node> createPlacements(const TileKey& key, const ScatterGroup& group, int bin,
-            const std::vector<ScatterPlacement>& placements, ProgressCallback* progress, bool aggregate = false)
+            const std::vector<ScatterPlacement>& placements, ProgressCallback* progress,
+            bool aggregate = false, bool stands = false)
         {
             osg::ref_ptr<const Map> lockedMap;
             if (!map.lock(lockedMap)) return {};
@@ -161,7 +172,8 @@ namespace
             {
                 for (const auto& name : group.models)
                 {
-                    auto model = aggregate ? assets->acquireImpostor(group, name, progress) :
+                    auto model = stands ? assets->acquireStand(group,name,progress) :
+                        aggregate ? assets->acquireImpostor(group, name, progress) :
                         assets->acquire(group, name, progress);
                     if (aggregate && !model) return {};
                     if (!model && (!progress || !progress->isCanceled())) model = assets->acquire(group, "", progress);
@@ -169,7 +181,8 @@ namespace
                     models.push_back(model);
                 }
             }
-            if (models.empty()) models.push_back(aggregate ? assets->acquireImpostor(group, "", progress) :
+            if (models.empty()) models.push_back(stands ? assets->acquireStand(group,"",progress) :
+                aggregate ? assets->acquireImpostor(group, "", progress) :
                 assets->acquire(group, "", progress));
             if (!models.front()) return {};
             GeoPoint anchor = key.getExtent().getCentroid().transform(lockedMap->getSRS());
@@ -238,7 +251,7 @@ namespace
                 {
                     auto& model = templates[cluster.model];
                     if (!model) model = assets->acquireTreeCards(group,
-                        group.models.empty() ? "" : group.models[cluster.model],slots,progress);
+                        group.models.empty() ? "" : group.models[cluster.model],slots,progress,stands);
                     if (!model) return {};
                     drawable->add(model,cluster.transform,treeCardInstanceUV(cluster,far));
                 }
@@ -256,10 +269,87 @@ namespace
             return lod;
         }
 
+        //! Builds a bounded coverage representation without visiting fine placement cells. Art stays at authored scale.
+        osg::ref_ptr<osg::Node> createCoverage(const TileKey& key, const ScatterGroup& group, int bin,
+            ProgressCallback* progress)
+        {
+            const bool far = key.getLOD()+2u == group.renderCellLevel;
+            std::vector<AggregateArt> descriptions;
+            std::vector<Chonk::Ptr> retained; // Keep loaded art alive through placement and template creation.
+            {
+                // This Runtime belongs to one immutable population policy. Cache dimensions after the first
+                // successful load, so far-only pages need not repeatedly reload individual art to measure it.
+                std::lock_guard<std::mutex> lock(artDescriptions->mutex);
+                auto& cached = artDescriptions->tiers[far ? 1u : 0u];
+                if (cached.empty())
+                {
+                    const auto names = group.models.empty() ? std::vector<std::string>{""} : group.models;
+                    for (const auto& name : names)
+                    {
+                        auto model = far ? assets->acquireStand(group,name,progress) :
+                            assets->acquireImpostor(group,name,progress);
+                        if (!model) return {};
+                        AggregateArt art;
+                        const auto& box = model->_box;
+                        const double x = std::max(std::abs(box.xMin()),std::abs(box.xMax()));
+                        const double y = std::max(std::abs(box.yMin()),std::abs(box.yMax()));
+                        art.radius = std::max(0.1,std::sqrt(x*x+y*y));
+                        const auto entry = std::find_if(catalog.begin(),catalog.end(),[&name](const ScatterAsset& asset)
+                            { return asset.name == name; });
+                        if (far && entry != catalog.end() && !entry->canopyModel.empty())
+                        {
+                            // A tightly packed bake covers less ground than the same number of scattered trees.
+                            // Weight density by physical footprint instead of the number of trees packed into the bake.
+                            auto tree = assets->acquireImpostor(group,name,progress);
+                            if (!tree) return {};
+                            const auto& single = tree->_box;
+                            art.trees = standCoverageWeight((single.xMax()-single.xMin())*(single.yMax()-single.yMin()),
+                                (box.xMax()-box.xMin())*(box.yMax()-box.yMin()),entry->canopyTrees);
+                            retained.push_back(tree);
+                        }
+                        descriptions.push_back(art); retained.push_back(model);
+                    }
+                    cached = descriptions;
+                }
+                else descriptions = cached;
+            }
+            double halo = 0.0;
+            if (far) for (const auto& art : descriptions) halo = std::max(halo,art.radius*group.maxScale);
+            std::shared_ptr<const PlacementField> field;
+            auto status = source->queryFieldBuffered(key,group,seed,halo,field,progress);
+            if (status.isOK() && field && !field->regions().empty())
+            {
+                // Preserve specialized land-use layouts until a strategy explicitly approximates their coverage.
+                auto exact = group; exact.canopyStrategy = "exact";
+                return createCanopy(key,exact,bin,progress);
+            }
+            AggregateCoverageResult proxies;
+            if (status.isOK() && field)
+                status = aggregateStrategy->generate(key,group,seed,*field,descriptions,far,proxies,progress);
+            if (status.isError() || !field)
+            {
+                if (!progress || !progress->isCanceled())
+                    OE_WARN << "[Vegetation2 coverage] " << status.toString() << std::endl;
+                return {};
+            }
+            osg::ref_ptr<osg::Group> result = new osg::Group();
+            for (bool stands : {false,true})
+            {
+                const auto& placements = stands ? proxies.stands : proxies.trees;
+                if (placements.empty()) continue;
+                auto node = createPlacements(key,group,bin,placements,progress,true,stands);
+                if (!node) return {};
+                result->addChild(node);
+            }
+            result->setUserValue("oe_p2_canopy_error",canopyReferenceError(key));
+            return result;
+        }
+
         //! Groups the same accepted/clamped trees as detailed pages; shared slot meshes replace stretched canopy art.
         osg::ref_ptr<osg::Node> createCanopy(const TileKey& key, const ScatterGroup& group, int bin,
             ProgressCallback* progress)
         {
+            if (group.canopyStrategy == "coverage") return createCoverage(key,group,bin,progress);
             std::vector<ScatterPlacement> placements;
             const auto status = source->generateBatch(key,group,seed,placements,progress);
             if (status.isError())
@@ -362,6 +452,7 @@ void VegetationLayer2::init()
     _root->setStateSet(getOrCreateStateSet());
     getOrCreateStateSet()->addUniform(new osg::Uniform("oe_p2_cluster_debug",osg::Vec3f(0,1,1)));
     _strategies = defaultPlacementStrategies();
+    _aggregateStrategy = std::make_shared<SampledAggregateCoverage>();
     _source = std::make_shared<UniformScatterSource>();
 }
 
@@ -384,6 +475,13 @@ bool VegetationLayer2::registerPlacementStrategy(const std::string& name,
 {
     if (isOpen() || name.empty() || name == "scatter" || !strategy) return false;
     _strategies[name] = std::move(strategy);
+    return true;
+}
+
+bool VegetationLayer2::setAggregateCoverageStrategy(std::shared_ptr<const AggregateCoverageStrategy> strategy)
+{
+    if (isOpen() || !strategy) return false;
+    _aggregateStrategy = std::move(strategy);
     return true;
 }
 
@@ -473,6 +571,8 @@ Status VegetationLayer2::openImplementation()
     std::set<std::string> assetNames;
     for (const auto& asset : options().assets())
     {
+        if (asset.canopyTrees < 1u || asset.canopyTrees > 256u)
+            return Status(Status::ConfigurationError,"Canopy assets must represent 1..256 trees");
         if (asset.name.empty() || asset.nearModel.empty() || asset.coarseModel.empty() ||
             !assetNames.insert(asset.name).second)
             return Status(Status::ConfigurationError, "Catalog assets require unique names, near and coarse URIs");
@@ -481,6 +581,8 @@ Status VegetationLayer2::openImplementation()
     for (const auto& group : options().groups())
     {
         OE_RETURN_STATUS_ON_ERROR(validateGroup(group, options().assets()));
+        if (group.canopy && group.canopyStrategy == "coverage" && options().sources().empty() && !_source->supportsCoverage())
+            return Status(Status::ConfigurationError,"Coverage aggregation requires a geographic coverage source");
 
         if (!names.insert(group.name).second)
             return Status(Status::ConfigurationError, "Duplicate group name: " + group.name);
@@ -512,6 +614,8 @@ Status VegetationLayer2::setGroup(const ScatterGroup& group)
 {
     OE_RETURN_STATUS_ON_ERROR(validateGroup(group, options().assets()));
 
+    if (group.canopy && group.canopyStrategy == "coverage" && options().sources().empty() && !_source->supportsCoverage())
+        return Status(Status::ConfigurationError,"Coverage aggregation requires a geographic coverage source");
     auto& groups = options().groups();
     auto found = std::find_if(groups.begin(), groups.end(), [&group](const ScatterGroup& value)
         { return value.name == group.name; });
@@ -574,6 +678,10 @@ Status VegetationLayer2::editOverlay(const std::function<Status(FeatureOverlay&)
                 if (rule.matches(_overlay->source(),options().groups()[i],*feature))
                 { matches = true; buffer = std::max(buffer,rule.buffer); }
             if (!matches) continue;
+            // Coverage proxies can straddle page edges. Invalidate the maximum admitted art halo as well,
+            // including in-flight pages whose actual model bounds have not been loaded yet.
+            const auto& group = options().groups()[i];
+            if (group.canopy && group.canopyStrategy == "coverage") buffer += 1000.0;
             auto extent = feature->getExtent();
             // A small halo also makes zero-width/height line extents queryable at exact tile boundaries.
             extent.expand(Distance(2.0*buffer+0.1,Units::METERS),Distance(2.0*buffer+0.1,Units::METERS));
@@ -595,6 +703,8 @@ osg::ref_ptr<SimplePager> VegetationLayer2::createPager(const ScatterGroup& grou
     runtime->seed = options().seed().get();
     runtime->resolution = options().elevationResolution().get();
     runtime->assets = _assets;
+    runtime->catalog = options().assets();
+    runtime->aggregateStrategy = _aggregateStrategy;
     osg::ref_ptr<SimplePager> pager = new OverlayPager(map, _profile);
     pager->setName(group.name);
     auto state = pager->getOrCreateStateSet();

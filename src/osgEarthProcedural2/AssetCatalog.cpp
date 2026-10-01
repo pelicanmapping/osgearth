@@ -28,6 +28,7 @@ using namespace osgEarth::Procedural2;
 ScatterAsset::ScatterAsset(const Config& conf)
 {
     conf.get("name", name);
+    conf.get("canopy_trees", canopyTrees);
     optional<URI> nearURI, coarseURI, canopyURI;
     if (conf.get("near", nearURI)) nearModel = nearURI.get();
     if (conf.get("coarse", coarseURI)) coarseModel = coarseURI.get();
@@ -38,6 +39,7 @@ Config ScatterAsset::getConfig() const
 {
     Config conf("asset");
     conf.set("name", name);
+    conf.set("canopy_trees", canopyTrees);
     conf.set("near", nearModel.getConfig());
     conf.set("coarse", coarseModel.getConfig());
     if (!canopyModel.empty()) conf.set("canopy", canopyModel.getConfig());
@@ -207,14 +209,23 @@ Chonk::Ptr AssetCatalog::acquireImpostor(const ScatterGroup& group, const std::s
     return acquireModel(proxy,name,false,progress,true);
 }
 
+Chonk::Ptr AssetCatalog::acquireStand(const ScatterGroup& group, const std::string& name, ProgressCallback* progress)
+{
+    ScatterGroup proxy = group;
+    proxy.lodPixels = proxy.minPixels = 0.0f;
+    proxy.proceduralGrass = false;
+    return acquireModel(proxy,name,true,progress);
+}
+
 Chonk::Ptr AssetCatalog::acquireTreeCards(const ScatterGroup& group, const std::string& name, unsigned slots,
-    ProgressCallback* progress)
+    ProgressCallback* progress, bool stands)
 {
     if (slots < 8u || slots > 256u || (progress && progress->isCanceled())) return {};
-    auto source = acquireImpostor(group,name,progress);
+    auto source = stands ? acquireStand(group,name,progress) : acquireImpostor(group,name,progress);
     if (!source) return {};
     auto& impl = *_impl;
-    const auto identity = "tree-cards:"+group.asset+":"+std::to_string(name.size())+":"+name+":"+std::to_string(slots);
+    const auto identity = std::string(stands ? "stand-cards:" : "tree-cards:")+group.asset+":"+
+        std::to_string(name.size())+":"+name+":"+std::to_string(slots);
     std::lock_guard<std::mutex> lock(impl.mutex);
     auto& entry = impl.cache[identity];
     if (auto resident = entry.model.lock()) return resident;
@@ -270,7 +281,7 @@ Chonk::Ptr AssetCatalog::acquireModel(const ScatterGroup& group, const std::stri
         {
             osg::ref_ptr<osg::Node> node;
             if (name.empty()) node = group.proceduralGrass ? createGrassPatch(group, lod) :
-                createPlaceholderAsset(group.asset, coarseOnly ? 1u : lod);
+                createPlaceholderAsset(group.asset, coarseOnly || canopySource ? 1u : lod);
             else if (found != impl.catalog.end())
             {
                 const URI& uri = canopySource ? (found->second.canopyModel.empty() ?

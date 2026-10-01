@@ -121,7 +121,7 @@ namespace osgEarth { namespace Procedural2
                     }));
             }
             ImGui::TextWrapped("Medium: %zu clusters / %zu tree cards", editor.counts.midClumps, editor.counts.midPieces);
-            ImGui::TextWrapped("Far: %zu clusters / %zu tree cards", editor.counts.farClumps, editor.counts.farPieces);
+            ImGui::TextWrapped("Far: %zu clusters / %zu proxies", editor.counts.farClumps, editor.counts.farPieces);
             ImGui::TextWrapped("Applied counts include cached parents and children, not only visible clusters.");
         }
 
@@ -260,6 +260,12 @@ namespace osgEarth { namespace Procedural2
                 changed |= ImGui::Checkbox("Aggregate distant forest", &g.canopy);
                 help("Uncheck to use individual vegetation only. Check to enable medium aggregates.");
                 ImGui::BeginDisabled(!g.canopy);
+                int strategy = g.canopyStrategy == "coverage" ? 1 : 0;
+                if (ImGui::Combo("Representation", &strategy, "Exact tree clusters\0Coverage stands (experimental)\0"))
+                { g.canopyStrategy = strategy == 1 ? "coverage" : "exact"; changed = true; }
+                help("Apply to rebuild this population's pages. Exact retains every original placement. "
+                    "Coverage samples representative trees directly, then uses reusable multi-tree stand art far away. "
+                    "Specialized row regions currently retain exact placement in both modes.");
                 changed |= ImGui::Checkbox("Use far aggregates", &g.canopyFar);
                 help("Uncheck for medium aggregates only, extending to the same maximum range.");
                 if (ImGuiLTable::Begin("Tree card clusters"))
@@ -271,13 +277,16 @@ namespace osgEarth { namespace Procedural2
                     { g.canopyMidClusterSize = unsigned(midSize); changed = true; }
                     ImGui::BeginDisabled(!g.canopyFar);
                     changed |= ImGuiLTable::Checkbox("Far GPU culling", &g.canopyFarGPUCulling);
-                    if (ImGuiLTable::SliderInt("Far trees/cluster", &farSize, 8, 256))
+                    if (ImGuiLTable::SliderInt("Far proxies/cluster", &farSize, 8, 256))
                     { g.canopyFarClusterSize = unsigned(farSize); changed = true; }
                     ImGui::EndDisabled();
                     ImGuiLTable::End();
                 }
-                ImGui::TextWrapped("Clusters retain tree sizes, species, density, and terrain roots. "
-                    "Larger groups reduce culling records without stretching trees or changing handover thresholds. "
+                ImGui::TextWrapped(g.canopyStrategy == "coverage" ?
+                    "Experimental mode approximates forest coverage with representative roots and reusable stands. "
+                    "Near exclusions it uses smaller tree cards. A far proxy may represent several trees. " :
+                    "Clusters retain tree sizes, species, density, and terrain roots.");
+                ImGui::TextWrapped("Larger groups reduce culling records without stretching trees or changing handover thresholds. "
                     "Quality selects the tier; maximum range limits visibility, with either GPU culling mode.");
                 changed |= ImGui::SliderFloat("Canopy LOD overlap", &g.canopyTransition, 0.0f, 0.5f);
                 changed |= ImGui::SliderFloat("Page arrival fade (s)", &g.canopyFadeSeconds, 0.0f, 2.0f);

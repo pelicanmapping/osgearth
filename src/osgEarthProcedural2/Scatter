@@ -40,6 +40,7 @@ namespace osgEarth { namespace Procedural2
         float densityEnd = 0.0f;
         float farDensity = 1.0f; // retained fraction of the original population beyond densityEnd
         bool canopy = false; // master switch: aggregate forest before detailed pages
+        std::string canopyStrategy = "exact"; // exact tree clusters or experimental coverage representatives
         bool canopyFar = true; // include the far tier; false retains only the medium tier
         bool canopyMidGPUCulling = true; // false draws all medium instances in each CPU-visible page
         bool canopyFarGPUCulling = true; // independent far-tier switch; instancing and page fades remain enabled
@@ -106,6 +107,15 @@ namespace osgEarth { namespace Procedural2
         {
             output.reset();
             return Status(Status::ConfigurationError, "Source does not supply aggregate coverage");
+        }
+        //! Queries coverage with a meter halo for proxy footprints crossing page edges. Sources must explicitly support
+        //! nonzero halos; the default rejects them instead of silently accepting incomplete exclusion data.
+        virtual Status queryFieldBuffered(const TileKey& key, const ScatterGroup& group, unsigned seed, double buffer,
+            std::shared_ptr<const PlacementField>& output, ProgressCallback* progress = nullptr) const
+        {
+            if (buffer == 0.0) return queryField(key,group,seed,output,progress);
+            output.reset();
+            return Status(Status::ConfigurationError, "Source does not supply buffered aggregate coverage");
         }
         //! Aggregates original source cells inside one render-cell key without changing placement identity.
         //! Worker-safe under the same contract as generate; errors/cancellation leave output empty.

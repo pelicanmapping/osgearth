@@ -8,6 +8,7 @@
 #include <osgEarthProcedural2/AssetCatalog>
 #include <osgEarthProcedural2/FeaturePlacement>
 #include <osgEarthProcedural2/FeatureOverlay>
+#include <osgEarthProcedural2/AggregateCoverage>
 #include <osgEarth/VisibleLayer>
 #include <osgEarth/Profile>
 #include <osgEarth/SimplePager>
@@ -24,7 +25,7 @@ namespace osgEarth { namespace Procedural2
     struct AggregateResidency
     {
         std::size_t midClumps = 0, farClumps = 0;
-        std::size_t midPieces = 0, farPieces = 0; // represented tree cards; includes retained parent/child pages
+        std::size_t midPieces = 0, farPieces = 0; // tree or stand proxies; includes retained parent/child pages
     };
 
     //! Independently paged populations with shared Chonk models, independent of terrain tiles.
@@ -62,6 +63,9 @@ namespace osgEarth { namespace Procedural2
         //! Registers/replaces a region algorithm before open. Names are selected by coverage rules, not source adapters.
         //! The layer retains a worker-safe shared instance; null, empty, and reserved 'scatter' names are rejected.
         bool registerPlacementStrategy(const std::string& name, std::shared_ptr<const RegionPlacementStrategy>);
+        //! Replaces the experimental coverage algorithm before open. The layer shares it with paging workers;
+        //! implementations must be immutable or synchronized. Exact mode never invokes this strategy.
+        bool setAggregateCoverageStrategy(std::shared_ptr<const AggregateCoverageStrategy>);
         //! Updates a named population on the update thread. Quality-only edits retain its pages/assets; other edits
         //! rebuild only its pager when attached.
         //! Invalid policies leave options and scene unchanged. Disabled/zero-density groups release their pager.
@@ -117,6 +121,7 @@ namespace osgEarth { namespace Procedural2
         std::shared_ptr<const ScatterSource> _source;
         bool _customSource = false;
         PlacementStrategies _strategies;
+        std::shared_ptr<const AggregateCoverageStrategy> _aggregateStrategy;
         std::shared_ptr<AssetCatalog> _assets;
         std::shared_ptr<FeatureOverlay> _overlay;
         std::shared_ptr<const PlacementFeatureProvider> _baseFeatures;

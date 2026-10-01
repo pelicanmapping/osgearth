@@ -51,6 +51,7 @@ ScatterGroup::ScatterGroup(const Config& conf)
     conf.get("density_end", densityEnd);
     conf.get("far_density", farDensity);
     conf.get("canopy", canopy);
+    conf.get("canopy_strategy", canopyStrategy);
     conf.get("canopy_far", canopyFar);
     conf.get("canopy_mid_gpu_culling", canopyMidGPUCulling);
     conf.get("canopy_far_gpu_culling", canopyFarGPUCulling);
@@ -101,6 +102,7 @@ Config ScatterGroup::getConfig() const
     conf.set("density_end", densityEnd);
     conf.set("far_density", farDensity);
     conf.set("canopy", canopy);
+    conf.set("canopy_strategy", canopyStrategy);
     conf.set("canopy_far", canopyFar);
     conf.set("canopy_mid_gpu_culling", canopyMidGPUCulling);
     conf.set("canopy_far_gpu_culling", canopyFarGPUCulling);
@@ -159,6 +161,8 @@ Status ScatterGroup::validate() const
         (farDensity < 1.0f && (densityEnd <= densityStart || densityEnd > maxRange)))
         return Status(Status::ConfigurationError,
             "Thinning needs 0 <= start < end <= maximum range when far density is below 100 percent");
+    if (canopyStrategy != "exact" && canopyStrategy != "coverage")
+        return Status(Status::ConfigurationError, "Canopy strategy must be exact or coverage");
     if (canopy && (asset != "trees" || renderCellLevel < 3u || farDensity != 1.0f))
         return Status(Status::ConfigurationError,
             "Canopy requires trees, render level >= 3, and disabled distance thinning");

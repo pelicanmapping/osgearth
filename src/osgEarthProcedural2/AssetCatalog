@@ -16,6 +16,7 @@ namespace osgEarth { namespace Procedural2
         std::string name;
         URI nearModel, coarseModel;
         URI canopyModel; // optional reusable source clump; absent uses coarseModel, never the detailed model
+        unsigned canopyTrees = 1u; // authored trees represented by canopyModel; used only by coverage aggregation
         //! Constructs an empty catalog entry without reading any model data.
         ScatterAsset() = default;
         //! Resolves model URIs relative to the configuration's referrer.
@@ -46,9 +47,11 @@ namespace osgEarth { namespace Procedural2
         Chonk::Ptr acquire(const ScatterGroup&, const std::string& name, ProgressCallback* = nullptr);
         //! Loads only the individual coarse asset, sharing it across pages without reading near or canopy art.
         Chonk::Ptr acquireImpostor(const ScatterGroup&, const std::string& name, ProgressCallback* = nullptr);
-        //! Shares one instanced card-slot mesh per species/count, retaining its source textures and budget lease.
+        //! Loads authored stand art at physical scale, falling back to the coarse tree if no stand is configured.
+        Chonk::Ptr acquireStand(const ScatterGroup&, const std::string& name, ProgressCallback* = nullptr);
+        //! Shares one card-slot mesh per species/count/source kind, retaining its source textures and budget lease.
         Chonk::Ptr acquireTreeCards(const ScatterGroup&, const std::string& name, unsigned slots,
-            ProgressCallback* = nullptr);
+            ProgressCallback* = nullptr, bool stands = false);
         //! Assembles a shared nine-piece template from this population's source proxies. Empty models use placeholders.
         //! Holds source content leases; templates share textures and page out with their final owner. CPU/worker-safe.
         Chonk::Ptr acquireCanopy(const ScatterGroup&, unsigned coverage, unsigned layout, ProgressCallback* = nullptr);

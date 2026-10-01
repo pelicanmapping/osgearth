@@ -47,6 +47,7 @@ set(STOCK_PANELS
 
     # osgEarthProcedural2
     VegetationLayer2GUI
+    FeatureOverlayGUI
     
     # osgEarthCesium
     CesiumIonGUI

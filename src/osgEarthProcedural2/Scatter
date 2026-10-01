@@ -34,7 +34,7 @@ namespace osgEarth { namespace Procedural2
         float minScale = 0.75f;
         float maxScale = 1.25f;
         float lodPixels = 32.0f; // threshold at an effective 25px budget; zero disables the coarse representation
-        float minPixels = 0.75f; // size-culling threshold at an effective 25px budget
+        float minPixels = 0.75f; // non-tree pixel floor; tree populations retain their final LOD to maxRange
         float lodTransition = 0.15f; // relative screen-size overlap for representation changes
         float densityStart = 0.0f; // meters; thinning is disabled when farDensity is 1
         float densityEnd = 0.0f;
@@ -43,8 +43,11 @@ namespace osgEarth { namespace Procedural2
         bool canopyFar = true; // include the far tier; false retains only the medium tier
         bool canopyMidGPUCulling = true; // false draws all medium instances in each CPU-visible page
         bool canopyFarGPUCulling = true; // independent far-tier switch; instancing and page fades remain enabled
+        unsigned canopyMidClusterSize = 32u; // maximum individual tree cards per medium culling group
+        unsigned canopyFarClusterSize = 64u; // larger far groups reduce culling work without resizing trees
         float canopyMidPatchScale = 1.0f; // footprint multiplier: 0.5, 1, 2, or 4; independent of page sizes
         float canopyFarPatchScale = 1.0f; // separate far-tier footprint multiplier, with the same choices
+        float canopyCoverScale = 1.0f; // visual crown-area multiplier; does not change individual density or LOD quality
         float qualityOffset = 0.0f; // pixels added to global SSE; zero inherits global, effective error is at least 1px
         float canopyHeight = 14.0f; // prototype mean crown height, meters
         float canopyTransition = 0.25f; // fractional screen-error overlap; zero disables the distance blend

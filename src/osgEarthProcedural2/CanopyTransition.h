@@ -16,7 +16,7 @@ namespace osgEarth { namespace Procedural2
     {
         std::mutex mutex;
         std::array<osg::ref_ptr<osg::StateSet>,65*65> states;
-        //! Returns a cached screen-door interval; caller supplies integer endpoints 0 <= low <= high <= 64.
+        //! Returns cached alpha-weight endpoints; caller supplies integers 0 <= low <= high <= 64.
         osg::StateSet* get(unsigned low, unsigned high);
     };
 
@@ -25,10 +25,11 @@ namespace osgEarth { namespace Procedural2
     OSGEARTHPROCEDURAL2_EXPORT float canopyBlend(double pixels, double threshold, float overlap,
         double age, float seconds);
 
-    //! Splits an inherited integer interval into complementary parent/child coverage, supporting nested fades.
-    OSGEARTHPROCEDURAL2_EXPORT unsigned canopySplit(unsigned low, unsigned high, float childWeight);
+    //! Returns parent/child alpha ramps with one always fully covered. A2C masks overlap rather than add;
+    //! recursive multiplication therefore preserves forest coverage, including an inherited outer-page fade.
+    OSGEARTHPROCEDURAL2_EXPORT osg::Vec2f canopyAlphaWeights(float childWeight);
 
-    //! Installs crown selection, stretch-independent volume lighting, and complementary color/depth/shadow dithering.
+    //! Installs crown selection, stretch-independent volume lighting, and alpha-ramped representation transitions.
     OSGEARTHPROCEDURAL2_EXPORT void installCanopyShader(osg::StateSet*);
 
     //! Reads global SSE from this cull traversal, adds the shared population adjustment once, and clamps to 1px.
@@ -42,7 +43,7 @@ namespace osgEarth { namespace Procedural2
     //! An unavailable projection (-1) conservatively retains the page. No density or placement mutation.
     OSGEARTHPROCEDURAL2_EXPORT float populationVisibility(double pixels, float error);
 
-    //! Installs complementary coverage discard for population paging in color, depth and shadow passes.
+    //! Enables Chonk alpha ramps for population paging; single-sample depth/shadow passes retain hard cutouts.
     OSGEARTHPROCEDURAL2_EXPORT void installPopulationFadeShader(osg::StateSet*);
 
     //! Fades a whole page/subtree using its conservative bound. Attach only at the first enabled representation tier.
@@ -50,7 +51,7 @@ namespace osgEarth { namespace Procedural2
     OSGEARTHPROCEDURAL2_EXPORT void installPopulationPageFade(osg::Node*, osg::Uniform* adjustment,
         std::shared_ptr<CanopyTransitionStates>);
 
-    //! Configures screen-error refinement and complementary blending before publication, retaining shared policy.
+    //! Configures screen-error refinement and coverage-preserving A2C blending before publication, retaining shared policy.
     //! worldError is the representation's error in meters; distance priorities remain owned by SimplePager.
     OSGEARTHPROCEDURAL2_EXPORT void configureCanopyTransition(Util::PagedNode2*, double worldError,
         const ScatterGroup&, std::shared_ptr<CanopyTransitionStates>, osg::Uniform* adjustment = nullptr);

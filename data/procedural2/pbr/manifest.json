@@ -1,0 +1,109 @@
+{
+  "material_layout": "albedo RGBA; normal OpenGL RGB; DRAM = displacement, roughness, AO, metallic",
+  "normal_source": "approximate micro-height reconstruction; coarse normals retain runtime crown volume",
+  "assets": {
+    "broadleaf": {
+      "near_triangles": 944,
+      "coarse_triangles": 6,
+      "bounds_m": [
+        [
+          -6.478501011766562,
+          -6.273556739996678,
+          -0.0968996947320388
+        ],
+        [
+          5.61276307251775,
+          6.380793953645595,
+          13.924316548541059
+        ]
+      ],
+      "canopy_triangles": 6
+    },
+    "conifer": {
+      "near_triangles": 940,
+      "coarse_triangles": 6,
+      "bounds_m": [
+        [
+          -3.97068323554939,
+          -3.765270643428066,
+          -0.09
+        ],
+        [
+          3.805683651372345,
+          4.188662238089293,
+          14.04
+        ]
+      ],
+      "canopy_triangles": 6
+    },
+    "shrub": {
+      "near_triangles": 480,
+      "coarse_triangles": 6,
+      "bounds_m": [
+        [
+          -0.729545870993527,
+          -0.794134970647807,
+          -0.09083552247858995
+        ],
+        [
+          0.7421229199069546,
+          0.7700785979078718,
+          1.6919100036080454
+        ]
+      ]
+    },
+    "grass-tuft": {
+      "near_triangles": 10,
+      "coarse_triangles": 6,
+      "bounds_m": [
+        [
+          -0.5747359285366219,
+          -0.35592955810129606,
+          -0.12608008827586553
+        ],
+        [
+          0.43525595784981586,
+          0.4858168853742804,
+          0.8460114993589753
+        ]
+      ]
+    },
+    "fern": {
+      "near_triangles": 48,
+      "coarse_triangles": 6,
+      "bounds_m": [
+        [
+          -1.0989416403686976,
+          -1.1117553698584144,
+          -0.04
+        ],
+        [
+          0.9036627274040085,
+          1.068387151650967,
+          0.7186581753312248
+        ]
+      ]
+    },
+    "boulder": {
+      "near_triangles": 156,
+      "coarse_triangles": 6,
+      "bounds_m": [
+        [
+          -1.509427761149172,
+          -0.9591165599578383,
+          -0.19
+        ],
+        [
+          1.547802140415146,
+          1.058536782728674,
+          1.6856435969588373
+        ]
+      ]
+    },
+    "canopy-cluster": {
+      "near_triangles": 78,
+      "coarse_triangles": 6
+    }
+  },
+  "runtime_dds_bytes": 36358432
+}

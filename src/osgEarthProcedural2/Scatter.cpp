@@ -54,8 +54,11 @@ ScatterGroup::ScatterGroup(const Config& conf)
     conf.get("canopy_far", canopyFar);
     conf.get("canopy_mid_gpu_culling", canopyMidGPUCulling);
     conf.get("canopy_far_gpu_culling", canopyFarGPUCulling);
+    conf.get("canopy_mid_cluster_size", canopyMidClusterSize);
+    conf.get("canopy_far_cluster_size", canopyFarClusterSize);
     conf.get("canopy_mid_patch_scale", canopyMidPatchScale);
     conf.get("canopy_far_patch_scale", canopyFarPatchScale);
+    conf.get("canopy_cover_scale", canopyCoverScale);
     // Legacy scenes specified an absolute canopy budget; preserve it at the default global SSE of 25px.
     float legacyPixels = 48.0f;
     if (conf.get("canopy_pixels", legacyPixels)) qualityOffset = legacyPixels - 25.0f;
@@ -101,8 +104,11 @@ Config ScatterGroup::getConfig() const
     conf.set("canopy_far", canopyFar);
     conf.set("canopy_mid_gpu_culling", canopyMidGPUCulling);
     conf.set("canopy_far_gpu_culling", canopyFarGPUCulling);
+    conf.set("canopy_mid_cluster_size", canopyMidClusterSize);
+    conf.set("canopy_far_cluster_size", canopyFarClusterSize);
     conf.set("canopy_mid_patch_scale", canopyMidPatchScale);
     conf.set("canopy_far_patch_scale", canopyFarPatchScale);
+    conf.set("canopy_cover_scale", canopyCoverScale);
     conf.set("quality_offset", qualityOffset);
     conf.set("canopy_height", canopyHeight);
     conf.set("canopy_transition", canopyTransition);
@@ -156,9 +162,14 @@ Status ScatterGroup::validate() const
     if (canopy && (asset != "trees" || renderCellLevel < 3u || farDensity != 1.0f))
         return Status(Status::ConfigurationError,
             "Canopy requires trees, render level >= 3, and disabled distance thinning");
+    if (canopyMidClusterSize < 8u || canopyMidClusterSize > 256u ||
+        canopyFarClusterSize < 8u || canopyFarClusterSize > 256u)
+        return Status(Status::ConfigurationError, "Tree card clusters need 8..256 trees per group");
     for (float size : {canopyMidPatchScale,canopyFarPatchScale})
         if (size != 0.5f && size != 1.0f && size != 2.0f && size != 4.0f)
             return Status(Status::ConfigurationError, "Canopy footprint scales must be 0.5, 1, 2, or 4");
+    if (!std::isfinite(canopyCoverScale) || canopyCoverScale < 0.25f || canopyCoverScale > 4.0f)
+        return Status(Status::ConfigurationError, "Canopy cover scale must be between 0.25 and 4");
     if (!std::isfinite(canopyTransition) || canopyTransition < 0.0f || canopyTransition > 0.5f ||
         !std::isfinite(canopyFadeSeconds) || canopyFadeSeconds < 0.0f || canopyFadeSeconds > 5.0f)
         return Status(Status::ConfigurationError, "Canopy overlap needs 0..0.5 and arrival fade needs 0..5 seconds");
@@ -202,13 +213,14 @@ Status ScatterSource::generateBatch(const TileKey& key, const ScatterGroup& grou
 {
     output.clear();
     OE_RETURN_STATUS_ON_ERROR(group.validate());
-    if (!key.valid() || key.getLOD() != group.renderCellLevel)
+    const unsigned firstLevel = group.canopy ? group.renderCellLevel-(group.canopyFar ? 2u : 1u) : group.renderCellLevel;
+    if (!key.valid() || key.getLOD() < firstLevel || key.getLOD() > group.renderCellLevel)
         return Status(Status::ConfigurationError, "Invalid render cell for " + group.name);
     if (progress && progress->isCanceled())
         return Status(Status::ResourceUnavailable, "Scatter canceled");
     if (!group.enabled || group.density == 0.0) return Status::NoError;
 
-    // Source keys are unchanged when render batch size changes. At most 4096 cells per bounded request.
+    // Source keys are unchanged at every representation. Aggregate requests cover at most 65536 source cells.
     const unsigned side = 1u << (group.cellLevel - key.getLOD());
     std::vector<ScatterPlacement> result, cell;
     for (unsigned y = 0; y < side; ++y)

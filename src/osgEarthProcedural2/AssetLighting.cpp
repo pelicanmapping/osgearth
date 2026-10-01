@@ -7,6 +7,7 @@
 
 void osgEarth::Procedural2::installAssetLighting(osg::StateSet* state)
 {
+    state->setDefine("OE_CHONK_BAKED_CROWN");
     VirtualProgram::getOrCreate(state)->setFunction("oe_p2_leaf_normal", R"glsl(
         in vec3 vp_Normal;
         flat in uint oe_normal_technique;

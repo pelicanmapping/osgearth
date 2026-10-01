@@ -765,6 +765,61 @@ TEST_CASE("Procedural2 canopy preserves exclusions with bounded shared patches",
     CHECK(restored.validate().isError());
 }
 
+//! Larger shared art must preserve forest coverage near exclusions at the same bounded geographic resolution.
+TEST_CASE("Procedural2 large canopy footprints retain forest near exclusions", "[procedural2][canopy]")
+{
+    auto provider = std::make_shared<FixtureProvider>();
+    auto forest = rectangle(500020,4500020,500380,4500380);
+    forest->getHoles().push_back(rectangle(500150,4500150,500180,4500250));
+    provider->features.push_back(tagged(forest,"natural","wood"));
+    osg::ref_ptr<LineString> road = new LineString();
+    road->push_back({500101,4500000,0}); road->push_back({500101,4500400,0});
+    provider->features.push_back(tagged(road,"highway","service",2));
+    FeatureScatterSource source(provider,{rule("natural","wood"),rule("highway","*","exclude",1.0)});
+    ScatterGroup group; group.canopy = true; group.cellLevel = group.renderCellLevel = 3;
+    group.density = 100000000;
+    const TileKey key(0,0,0,featureProfile());
+    std::shared_ptr<const PlacementField> field;
+    REQUIRE(source.queryField(key,group,1,field).isOK());
+    //! Isolates coverage refinement from terrain fitting.
+    CanopyElevation flat = [](std::vector<osg::Vec3d>& points)
+    {
+        for (auto& p : points) p.z() = 0.0;
+        return Status::NoError;
+    };
+    unsigned reference = 0;
+    for (float scale : {1.0f,2.0f,4.0f})
+    {
+        INFO("footprint scale=" << scale);
+        group.canopyMidPatchScale = scale;
+        std::vector<CanopyPatch> patches;
+        REQUIRE(buildCanopy(key,group,*field,key.getProfile()->getSRS(),flat,patches).isOK());
+        CHECK(patches.size() <= 4096u);
+        std::array<bool,128u*128u> covered{};
+        for (const auto& patch : patches)
+            for (unsigned crown=0; crown<9; ++crown)
+            {
+                if (!(patch.mask & (1u<<crown))) continue;
+                const auto box = canopyPatchCrownFootprint(patch,crown);
+                CoverageSample value;
+                REQUIRE(field->uniform(box,value));
+                REQUIRE_FALSE(value.excluded);
+                REQUIRE(value.density == 1.0f);
+                // Rasterize the union of certified crown bounds; overlapping pieces count only once.
+                const int x0 = int(std::ceil((box.xMin()-500000)*128/400-0.5));
+                const int y0 = int(std::ceil((box.yMin()-4500000)*128/400-0.5));
+                const int x1 = int(std::floor((box.xMax()-500000)*128/400-0.5));
+                const int y1 = int(std::floor((box.yMax()-4500000)*128/400-0.5));
+                for (int y=std::max(0,y0); y<=std::min(127,y1); ++y)
+                    for (int x=std::max(0,x0); x<=std::min(127,x1); ++x) covered[y*128+x] = true;
+            }
+        const unsigned count = unsigned(std::count(covered.begin(),covered.end(),true));
+        if (scale == 1.0f) reference = count;
+        CHECK(count > covered.size()*0.55);
+        CHECK(count >= reference*0.8);
+    }
+}
+
 //! Unequal patch sizes must not create artificial empty strips or overlapping coverage inside uniform forest.
 TEST_CASE("Procedural2 irregular canopy partitions cover a page exactly", "[procedural2][canopy]")
 {
@@ -878,14 +933,14 @@ TEST_CASE("Procedural2 canopy refinement preserves source art scale and coverage
                 area[found-original.begin()][crown] += box.width()*box.height();
             }
         // Decode the GPU window and rotate it back to map axes; CPU certification must cover that exact region.
-        const unsigned code = piece.clip-1u, side = (code >> 4u)+1u;
-        unsigned x = code & 3u, y = (code >> 2u) & 3u;
+        const unsigned code = piece.clip-1u, side = (code >> 8u)+1u;
+        unsigned x = code & 15u, y = (code >> 4u) & 15u;
         for (unsigned i=0; i<piece.turn; ++i)
         {
-            const unsigned previous = x; x = 4u-y-side; y = previous;
+            const unsigned previous = x; x = 16u-y-side; y = previous;
         }
-        CHECK(std::abs(piece.footprint.xMin()-(piece.artFootprint.xMin()+x*piece.artFootprint.width()/4.0)) < 1e-8);
-        CHECK(std::abs(piece.footprint.yMin()-(piece.artFootprint.yMin()+y*piece.artFootprint.height()/4.0)) < 1e-8);
+        CHECK(std::abs(piece.footprint.xMin()-(piece.artFootprint.xMin()+x*piece.artFootprint.width()/16.0)) < 1e-8);
+        CHECK(std::abs(piece.footprint.yMin()-(piece.artFootprint.yMin()+y*piece.artFootprint.height()/16.0)) < 1e-8);
     }
     CHECK(turns.size() == 4u);
     for (std::size_t i=0; i<original.size(); ++i)
@@ -949,8 +1004,8 @@ TEST_CASE("Procedural2 can configure hierarchical refinement without replacing S
     CHECK(culled == 1);
 }
 
-//! Distance reversal and late page arrival must blend continuously; nested intervals retain exactly one representation.
-TEST_CASE("Procedural2 canopy transitions preserve complementary coverage", "[procedural2][canopy]")
+//! Distance reversal, arrival, and nested A2C handovers must retain one fully covered forest path.
+TEST_CASE("Procedural2 canopy transitions preserve A2C coverage", "[procedural2][canopy]")
 {
     CHECK(canopyBlend(74,100,0.25f,10,0.4f) == 0.0f);
     CHECK(canopyBlend(126,100,0.25f,10,0.4f) == 1.0f);
@@ -967,18 +1022,18 @@ TEST_CASE("Procedural2 canopy transitions preserve complementary coverage", "[pr
         CHECK(weight-previous < 0.016f);
         CHECK(std::abs(weight+canopyBlend(125-i*0.5,100,0.25f,10,0.4f)-1.0f) < 1e-6f);
         previous = weight;
-        const unsigned split = canopySplit(0,64,weight);
+        const auto alpha = canopyAlphaWeights(weight);
+        CHECK(std::max(alpha.x(),alpha.y()) == 1.0f);
+        CHECK(alpha.x() >= 0.0f); CHECK(alpha.y() >= 0.0f);
+        const auto reversed = canopyAlphaWeights(1.0f-weight);
+        CHECK(std::abs(alpha.x()-reversed.y()) < 1e-6f);
         for (unsigned j=0; j<=64; ++j)
         {
-            const unsigned nested = canopySplit(split,64,j/64.0f);
-            CHECK(nested >= split);
-            CHECK(nested <= 64u);
-            for (unsigned pixel=0; pixel<64; ++pixel)
-            {
-                const unsigned owners = unsigned(pixel < split)+unsigned(pixel >= split && pixel < nested)+
-                    unsigned(pixel >= nested);
-                REQUIRE(owners == 1u);
-            }
+            const auto nested = canopyAlphaWeights(j/64.0f);
+            // The outer visibility may itself be fractional, but a handover must not further reduce it.
+            const float outer = 0.625f;
+            const float maximum = std::max(alpha.x(),alpha.y()*std::max(nested.x(),nested.y()));
+            CHECK(maximum*outer == outer);
         }
     }
     ScatterGroup invalid;
@@ -1027,6 +1082,10 @@ TEST_CASE("Procedural2 independent canopy footprints preserve coverage and place
             {
                 const auto& e = patch.footprint;
                 CHECK(patch.artFootprint == e);
+                CHECK(patch.error == Approx(canopyReferenceError(key)).epsilon(1e-8));
+                // A fixed pixel budget must make the same handover choice at every footprint scale.
+                CHECK(canopyBlend(patch.error*40.0,100.0,0.25f,1.0,0.0f) ==
+                    canopyBlend(canopyReferenceError(key)*40.0,100.0,0.25f,1.0,0.0f));
                 CHECK(e.width() >= 0.81*key.getExtent().width()/side-1e-8);
                 CHECK(e.width() <= 1.21*key.getExtent().width()/side+1e-8);
                 area += e.width()*e.height();
@@ -1088,8 +1147,13 @@ TEST_CASE("Procedural2 canopy modes rebuild the hierarchy and report resident cl
     REQUIRE(far.valid()); REQUIRE(mid.valid());
     both->addChild(far); both->addChild(mid);
     const auto counts = layer->getAggregateResidency(group.name);
-    CHECK(counts.farClumps == 16u); CHECK(counts.farPieces == 16u);
-    CHECK(counts.midClumps == 64u); CHECK(counts.midPieces == 64u);
+    std::vector<ScatterPlacement> accepted;
+    REQUIRE(source->generateBatch(TileKey(1,0,0,profile),group,1,accepted).isOK());
+    CHECK(counts.farPieces == accepted.size());
+    REQUIRE(source->generateBatch(TileKey(2,0,0,profile),group,1,accepted).isOK());
+    CHECK(counts.midPieces == accepted.size());
+    CHECK(counts.farClumps > 0u); CHECK(counts.farClumps <= counts.farPieces);
+    CHECK(counts.midClumps > 0u); CHECK(counts.midClumps <= counts.midPieces);
     CHECK(layer->getAggregateResidency("unknown").midClumps == 0u);
 
     // Both flags default on; all four combinations must affect only their matching aggregate drawables.
@@ -1121,7 +1185,7 @@ TEST_CASE("Procedural2 canopy modes rebuild the hierarchy and report resident cl
                 {
                     ++aggregates;
                     CHECK(drawable->getUseGPUCulling() == (farTier ? farCull : midCull));
-                    CHECK(drawable->getNumInstances() == (farTier ? counts.farPieces : counts.midPieces));
+                    CHECK(drawable->getNumInstances() == (farTier ? counts.farClumps : counts.midClumps));
                 }
                 else
                 {
@@ -1130,7 +1194,7 @@ TEST_CASE("Procedural2 canopy modes rebuild the hierarchy and report resident cl
                 }
             });
             CHECK(aggregates == (level < 3u ? 1u : 0u));
-            CHECK(individuals > 0u);
+            CHECK(individuals == (level == 3u ? 1u : 0u));
         }
     }
 
@@ -1160,7 +1224,7 @@ TEST_CASE("Procedural2 canopy modes rebuild the hierarchy and report resident cl
     auto children = mediumOnly->createPagedChildrenOf(TileKey(1,0,0,profile),nullptr);
     REQUIRE(children.valid());
     mediumOnly->addChild(children);
-    CHECK(layer->getAggregateResidency(group.name).midClumps == 4u*64u);
+    CHECK(layer->getAggregateResidency(group.name).midClumps > 0u);
     CHECK(layer->getAggregateResidency(group.name).farClumps == 0u);
 
     group.canopy = false;
@@ -1258,4 +1322,50 @@ TEST_CASE("Procedural2 page error follows primary camera and orthographic projec
     state->removeUniform("oe_primaryViewport");
     CHECK(populationPixelSize(bound,visitor) == -1.0); // missing reference conservatively keeps the page
     visitor.popModelViewMatrix(); visitor.popProjectionMatrix(); visitor.popViewport();
+}
+
+//! Fullness changes shared-art occupancy without changing placements, patch counts, masks, or nominal LOD error.
+TEST_CASE("Procedural2 canopy fullness is separate from density and LOD", "[procedural2][canopy]")
+{
+    auto provider = std::make_shared<FixtureProvider>();
+    provider->features.push_back(tagged(rectangle(499900,4499900,500500,4500500), "natural", "wood"));
+    FeatureScatterSource source(provider,{rule("natural","wood")});
+    ScatterGroup group; group.canopy = true; group.cellLevel = group.renderCellLevel = 3;
+    group.density = 5000; group.canopyHeight = 21;
+    const auto profile = featureProfile();
+    const TileKey key(1,0,0,profile), fine(3,0,0,profile);
+    std::shared_ptr<const PlacementField> field;
+    REQUIRE(source.queryField(key,group,1,field).isOK());
+    std::vector<ScatterPlacement> before,after;
+    REQUIRE(source.generateBatch(fine,group,1,before).isOK());
+    //! Flat terrain isolates visual occupancy from terrain-driven subdivision.
+    CanopyElevation flat = [](std::vector<osg::Vec3d>& points)
+    {
+        for (auto& p : points) p.z() = 0.0;
+        return Status::NoError;
+    };
+    unsigned previous = 0;
+    for (float fullness : {0.25f,1.0f,4.0f})
+    {
+        group.canopyCoverScale = fullness;
+        std::vector<CanopyPatch> patches;
+        REQUIRE(buildCanopy(key,group,*field,profile->getSRS(),flat,patches).isOK());
+        REQUIRE(patches.size() == 256u);
+        const unsigned occupancy = patches.front().coverage;
+        CHECK(occupancy > previous); previous = occupancy;
+        for (const auto& patch : patches)
+        {
+            CHECK(patch.coverage == occupancy);
+            CHECK(patch.mask == 511u);
+            CHECK(patch.error == Approx(canopyReferenceError(key)).epsilon(1e-8));
+        }
+        CHECK(ScatterGroup(group.getConfig()).canopyCoverScale == fullness);
+        REQUIRE(source.generateBatch(fine,group,1,after).isOK());
+        samePopulation(before,after);
+    }
+    for (float invalid : {0.0f,0.24f,4.01f,std::numeric_limits<float>::quiet_NaN()})
+    {
+        group.canopyCoverScale = invalid;
+        CHECK(group.validate().isError());
+    }
 }

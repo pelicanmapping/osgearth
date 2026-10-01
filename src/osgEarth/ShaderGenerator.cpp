@@ -962,7 +962,7 @@ vec3 oe_sg_pbr_normal(vec3 sample_normal, vec2 uv)
                     const std::string layoutAndFactors = Stringify() << "oe_sg_pbr_layoutAndFactors_" << unit;
                     buf._fragHead << "uniform vec4 " << layoutAndFactors << ";\n";
                     newStateSet->getOrCreateUniform(layoutAndFactors, osg::Uniform::FLOAT_VEC4)->set(descriptor->layoutAndFactors);
-                    buf._fragBody << "texel = vec4(1);\n";
+                    buf._fragBody << "texel = oe_pbr_default(" << layoutAndFactors << ".x);\n";
                     if (units[2] >= 0)
                         buf._fragBody << "texel = texture(oe_sg_pbr_" << unit << "_2, " TEX_COORD << unit << ".xy);\n";
                     buf._fragBody << "texel = oe_pbr_decode(texel, " << layoutAndFactors << ", ";

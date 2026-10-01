@@ -1,5 +1,9 @@
 # Procedural2 coverage and exclusions -- Step 4A design
 
+September 28 addition: [editable feature overlays](procedural2-feature-overlays.md) adds a catalog-driven local provider
+through these same coverage rules, with modular storage, ImGui polygon/path authoring and regional canopy invalidation.
+The broader runtime density/parameter modifier design remains Later.
+
 The initial source is the existing osgEarth FeatureSource configuration in tests/osm.earth. Its tiled OSM data
 supplies mapped polygons, lines, points, and attributes. Land cover and land use remain distinct attributes. Other
 feature sources can participate through the same adapter; raster inference is deferred.

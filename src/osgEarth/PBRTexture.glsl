@@ -72,7 +72,7 @@ void oe_pbr_texture_fragment(inout vec4 color)
 
     if ((oe_pbr_texture_flags & 6) != 0 || oe_pbr_texture_layoutAndFactors.x != OE_PBR_LAYOUT_DRAM)
     {
-        vec4 texel = vec4(1.0);
+        vec4 texel = oe_pbr_default(oe_pbr_texture_layoutAndFactors.x);
         if ((oe_pbr_texture_flags & 2) != 0)
             texel = texture(oe_pbr_texture_pbr, oe_pbr_texture_uv);
         float separateAO = (oe_pbr_texture_flags & 4) != 0 ?

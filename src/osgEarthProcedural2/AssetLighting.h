@@ -8,6 +8,7 @@
 
 namespace osgEarth { namespace Procedural2
 {
-    //! Installs two-sided leaf lighting before scene publication; authored volume normals retain their orientation.
+    //! Installs two-sided leaf lighting and view-corrected baked crown normals before scene publication.
+    //! Existing authored volume normals retain their orientation; only baked impostors fade their edge-on cards.
     OSGEARTHPROCEDURAL2_EXPORT void installAssetLighting(osg::StateSet* state);
 } }

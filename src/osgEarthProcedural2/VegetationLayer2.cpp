@@ -3,11 +3,14 @@
  * MIT License
  */
 #include <osgEarthProcedural2/VegetationLayer2>
+#include <osg/Multisample>
+#include "OverlayPager.h"
 #include "PlaceholderAssets.h"
 #include "Grass.h"
 #include "AssetLighting.h"
 #include <osgEarthProcedural2/Canopy>
 #include "CanopyTransition.h"
+#include "TreeCards.h"
 #include <osgEarth/Chonk>
 #include <osgEarth/Capabilities>
 #include <osgEarth/CameraUtils>
@@ -45,19 +48,6 @@ namespace
                 { return value.name == name; });
             if (found == assets.end()) return Status(Status::ConfigurationError, "Unknown catalog asset: " + name);
         }
-        return Status::NoError;
-    }
-
-    //! Rejects lossy aggregation of structured patterns and sources without a direct coverage pathway.
-    Status validateCanopy(const ScatterGroup& group, const ScatterSource* source,
-        bool configuredFeatures, const std::vector<CoverageRule>& rules)
-    {
-        if (!group.canopy) return Status::NoError;
-        if (!configuredFeatures && (!source || !source->supportsCoverage()))
-            return Status(Status::ConfigurationError, "Canopy requires a source with geographic coverage");
-        for (const auto& rule : rules)
-            if ((rule.group == "*" || rule.group == group.name) && rule.strategy != "scatter")
-                return Status(Status::ConfigurationError, "Canopy does not yet represent structured region patterns");
         return Status::NoError;
     }
 
@@ -121,7 +111,7 @@ namespace
 
         //! Renders accepted placements, shared by detailed pages and isolated source points in aggregate pages.
         osg::ref_ptr<osg::Node> createPlacements(const TileKey& key, const ScatterGroup& group, int bin,
-            const std::vector<ScatterPlacement>& placements, ProgressCallback* progress)
+            const std::vector<ScatterPlacement>& placements, ProgressCallback* progress, bool aggregate = false)
         {
             osg::ref_ptr<const Map> lockedMap;
             if (!map.lock(lockedMap)) return {};
@@ -171,20 +161,28 @@ namespace
             {
                 for (const auto& name : group.models)
                 {
-                    auto model = assets->acquire(group, name, progress);
+                    auto model = aggregate ? assets->acquireImpostor(group, name, progress) :
+                        assets->acquire(group, name, progress);
+                    if (aggregate && !model) return {};
                     if (!model && (!progress || !progress->isCanceled())) model = assets->acquire(group, "", progress);
                     if (!model) return {};
                     models.push_back(model);
                 }
             }
-            if (models.empty()) models.push_back(assets->acquire(group, "", progress));
+            if (models.empty()) models.push_back(aggregate ? assets->acquireImpostor(group, "", progress) :
+                assets->acquire(group, "", progress));
             if (!models.front()) return {};
             GeoPoint anchor = key.getExtent().getCentroid().transform(lockedMap->getSRS());
             osg::Matrixd localToWorld, worldToLocal;
             if (!anchor.createLocalToWorld(localToWorld) || !worldToLocal.invert(localToWorld)) return {};
             osg::ref_ptr<ChonkDrawable> drawable = new ChonkDrawable(bin);
-            drawable->setName(group.name);
+            const bool far = aggregate && key.getLOD()+2u == group.renderCellLevel;
+            drawable->setName(group.name + (aggregate ? (far ? "/canopy-far" : "/canopy-mid") : ""));
+            if (aggregate) drawable->setUseGPUCulling(far ? group.canopyFarGPUCulling : group.canopyMidGPUCulling);
+            std::vector<TreeCardPlacement> trees;
             drawable->setFadeNearFar(group.maxRange * 0.8f, group.maxRange);
+            // Match VegetationLayer's foliage mip compensation; otherwise thin leaves vanish before their impostors.
+            drawable->setAlphaCutoff(group.asset == "trees" ? 0.75f : group.asset == "shrubs" ? 0.35f : 0.25f);
 
             for (std::size_t i = 0; i < placements.size(); ++i)
             {
@@ -223,8 +221,31 @@ namespace
                 const auto& p = placements[i];
                 const osg::Matrixd placement = osg::Matrixd::scale(p.scale, p.scale, p.scale) *
                     osg::Matrixd::rotate(p.rotation, osg::Vec3d(0,0,1)) * slope * pointToWorld * worldToLocal;
-                drawable->add(models[p.modelIndex(static_cast<unsigned>(models.size()))], osg::Matrixf(placement),
+                const unsigned model = p.modelIndex(static_cast<unsigned>(models.size()));
+                if (aggregate) trees.push_back({placement,model});
+                else drawable->add(models[model], osg::Matrixf(placement),
                     osg::Vec2f(p.densityRank(), group.proceduralGrass ? float(p.variationSeed()) : 0.0f));
+            }
+            if (aggregate)
+            {
+                const unsigned slots = far ? group.canopyFarClusterSize : group.canopyMidClusterSize;
+                std::vector<TreeCardCluster> clusters;
+                std::vector<osg::Vec4f> records;
+                const auto status = buildTreeCardClusters(trees,models,slots,clusters,records,progress);
+                if (status.isError()) return {};
+                std::vector<Chonk::Ptr> templates(models.size());
+                for (const auto& cluster : clusters)
+                {
+                    auto& model = templates[cluster.model];
+                    if (!model) model = assets->acquireTreeCards(group,
+                        group.models.empty() ? "" : group.models[cluster.model],slots,progress);
+                    if (!model) return {};
+                    drawable->add(model,cluster.transform,treeCardInstanceUV(cluster,far));
+                }
+                drawable->setAuxiliaryData(records);
+                drawable->setMemberLOD(4u,3u,group.minPixels,group.lodPixels > 0.0f ? 1u : 0u);
+                drawable->setUserValue("oe_p2_clumps",unsigned(clusters.size()));
+                drawable->setUserValue("oe_p2_trees",unsigned(trees.size()));
             }
             if (drawable->empty()) return new osg::Group();
             auto transform = new osg::MatrixTransform(localToWorld);
@@ -235,109 +256,20 @@ namespace
             return lod;
         }
 
-        //! Builds one bounded aggregate page from coverage and elevations, without generating the fine forest.
+        //! Groups the same accepted/clamped trees as detailed pages; shared slot meshes replace stretched canopy art.
         osg::ref_ptr<osg::Node> createCanopy(const TileKey& key, const ScatterGroup& group, int bin,
             ProgressCallback* progress)
         {
-            osg::ref_ptr<const Map> lockedMap;
-            if (!map.lock(lockedMap)) return {};
-            std::shared_ptr<const PlacementField> field;
-            auto status = source->queryField(key, group, seed, field, progress);
+            std::vector<ScatterPlacement> placements;
+            const auto status = source->generateBatch(key,group,seed,placements,progress);
             if (status.isError())
             {
                 if (!progress || !progress->isCanceled()) OE_WARN << "[Vegetation2] " << status.toString() << std::endl;
                 return {};
             }
-            ElevationLayerVector layers;
-            lockedMap->getOpenLayers(layers);
-            ElevationPool::WorkingSet workingSet;
-            CanopyElevation sample = [&](std::vector<osg::Vec3d>& points) -> Status
-            {
-                if (layers.empty()) return Status::NoError;
-                std::vector<osg::Vec3d> mapped;
-                for (const auto& p : points)
-                {
-                    GeoPoint value;
-                    if (!GeoPoint(key.getExtent().getSRS(), p).transform(lockedMap->getSRS(), value))
-                        return Status(Status::ResourceUnavailable, "Cannot transform canopy elevation probe");
-                    mapped.push_back(value.vec3d());
-                }
-                lockedMap->getElevationPool()->sampleMapCoords(mapped.begin(), mapped.end(), resolution,
-                    &workingSet, progress, NO_DATA_VALUE);
-                for (std::size_t i=0; i<mapped.size(); ++i)
-                {
-                    GeoPoint value;
-                    if (mapped[i].z() == NO_DATA_VALUE ||
-                        !GeoPoint(lockedMap->getSRS(), mapped[i]).transform(key.getExtent().getSRS(), value))
-                        return Status(Status::ResourceUnavailable, "Canopy elevation unavailable");
-                    points[i] = value.vec3d();
-                }
-                return Status::NoError;
-            };
-            std::vector<CanopyPatch> patches;
-            status = buildCanopy(key, group, *field, lockedMap->getSRS(), sample, patches, progress);
-            if (status.isError())
-            {
-                if (!progress || !progress->isCanceled()) OE_WARN << "[Vegetation2] " << status.toString() << std::endl;
-                return {};
-            }
-            osg::ref_ptr<osg::Group> result = new osg::Group();
-            double error = 1.0;
-            if (!patches.empty())
-            {
-                osg::Matrixd frame, inverse;
-                if (!key.getExtent().getCentroid().transform(lockedMap->getSRS()).createLocalToWorld(frame) ||
-                    !inverse.invert(frame)) return {};
-                osg::ref_ptr<ChonkDrawable> drawable = new ChonkDrawable(bin);
-                const bool far = key.getLOD()+2 == group.renderCellLevel;
-                drawable->setName(group.name + (far ? "/canopy-far" : "/canopy-mid"));
-                // The unculled Chonk path retains instancing and fragment coverage, without compute dispatches.
-                drawable->setUseGPUCulling(far ? group.canopyFarGPUCulling : group.canopyMidGPUCulling);
-                drawable->setFadeNearFar(group.maxRange*0.8f, group.maxRange);
-                // Source clumps average below the alpha-test threshold in small mips; retain distant crown coverage.
-                // This uses Chonk's existing mip compensation; authored coverage-preserving mips remain follow-up work.
-                drawable->setAlphaCutoff(0.15f);
-                std::map<unsigned, Chonk::Ptr> models;
-                std::set<std::pair<double,double>> clumps;
-                for (const auto& patch : patches)
-                {
-                    clumps.emplace(patch.artFootprint.xMin(),patch.artFootprint.yMin());
-                    auto& model = models[patch.coverage*4u + patch.layout];
-                    if (!model)
-                    {
-                        model = assets->acquireCanopy(group,patch.coverage,patch.layout,progress);
-                        if (!model) return {};
-                    }
-                    drawable->add(model, osg::Matrixf(patch.localToWorld*inverse),
-                        osg::Vec2f(-float(patch.mask),float(patch.clip)));
-                    error = std::max(error, patch.error);
-                }
-                drawable->setUserValue("oe_p2_clumps",unsigned(clumps.size()));
-                auto transform = new osg::MatrixTransform(frame);
-                transform->addChild(drawable);
-                auto lod = new osg::LOD();
-                lod->addChild(transform, 0.0f, group.maxRange+transform->getBound().radius());
-                result->addChild(lod);
-            }
-            // Mapped lone trees keep their real assets/identities; an aggregate never substitutes a grove for a point.
-            std::vector<ScatterPlacement> points;
-            for (const auto& point : field->points())
-                if (!field->sample(point.point).excluded) points.push_back(point);
-            if (points.size() > group.maxPerBatch) return {};
-            if (!points.empty())
-            {
-                ScatterGroup explicitGroup = group;
-                explicitGroup.name += "/mapped-points";
-                auto explicitTrees = createPlacements(key, explicitGroup, bin, points, progress);
-                if (!explicitTrees) return {};
-                result->addChild(explicitTrees);
-            }
-            // Empty pages still need refinement: small forests may have been removed by conservative boundary tests.
-            const auto& e = key.getExtent();
-            const double span = e.getSRS()->isProjected() ?
-                Units::convert(e.getSRS()->getUnits(), Units::METERS, e.height()) : e.height(Units::METERS);
-            const unsigned levels = canopySubdivisionLevels(group,key.getLOD()+2u == group.renderCellLevel);
-            result->setUserValue("oe_p2_canopy_error", std::max(error, span/(3.0*(1u<<levels))));
+            auto result = createPlacements(key,group,bin,placements,progress,true);
+            // Group size changes only culling granularity. Keep the nominal handover independent of that control.
+            if (result) result->setUserValue("oe_p2_canopy_error",canopyReferenceError(key));
             return result;
         }
     };
@@ -354,6 +286,9 @@ void VegetationLayer2::Options::fromConfig(const Config& conf)
     for (const auto& c : conf.child("sources").children("source")) sources().emplace_back(c);
     coverage().clear();
     for (const auto& c : conf.child("coverage").children("rule")) coverage().emplace_back(c);
+    overlayTypes().clear();
+    conf.child("overlay").get("source", overlaySource());
+    for (const auto& c : conf.child("overlay").children("type")) overlayTypes().emplace_back(c);
     assets().clear();
     for (const auto& c : conf.child("assets").children("asset")) assets().emplace_back(c);
     if (conf.hasChild("groups"))
@@ -400,6 +335,13 @@ Config VegetationLayer2::Options::getConfig() const
     Config rules("coverage");
     for (const auto& rule : coverage()) rules.add(rule.getConfig());
     conf.add(rules);
+    conf.remove("overlay");
+    if (!overlayTypes().empty())
+    {
+        Config overlay("overlay"); overlay.set("source", overlaySource());
+        for (const auto& type : overlayTypes()) overlay.add(type.getConfig());
+        conf.add(overlay);
+    }
     conf.remove("assets");
     Config catalog("assets");
     for (const auto& asset : assets()) catalog.add(asset.getConfig());
@@ -418,6 +360,7 @@ void VegetationLayer2::init()
     _root = new osg::Group();
     _root->setName("Vegetation2");
     _root->setStateSet(getOrCreateStateSet());
+    getOrCreateStateSet()->addUniform(new osg::Uniform("oe_p2_cluster_debug",osg::Vec3f(0,1,1)));
     _strategies = defaultPlacementStrategies();
     _source = std::make_shared<UniformScatterSource>();
 }
@@ -454,15 +397,16 @@ AggregateResidency VegetationLayer2::getAggregateResidency(const std::string& po
         forEachNodeOfType<ChonkDrawable>(pager.get(),[&](ChonkDrawable* drawable)
         {
             if (!visited.insert(drawable).second) return;
-            unsigned clumps = 0u;
+            unsigned clumps = 0u, trees = 0u;
             if (!drawable->getUserValue("oe_p2_clumps",clumps)) return;
+            drawable->getUserValue("oe_p2_trees",trees);
             if (drawable->getName() == population+"/canopy-far")
             {
-                result.farClumps += clumps; result.farPieces += drawable->getNumInstances();
+                result.farClumps += clumps; result.farPieces += trees;
             }
             else if (drawable->getName() == population+"/canopy-mid")
             {
-                result.midClumps += clumps; result.midPieces += drawable->getNumInstances();
+                result.midClumps += clumps; result.midPieces += trees;
             }
         });
     }
@@ -499,6 +443,15 @@ Status VegetationLayer2::openImplementation()
         OE_RETURN_STATUS_ON_ERROR(input.features.open(getReadOptions()));
     }
     std::set<std::string> ruleNames;
+    if (!options().overlayTypes().empty())
+    {
+        if (_customSource || options().sources().empty())
+            return Status(Status::ConfigurationError, "Editable overlays require configured feature inputs");
+        if (!inputNames.insert(options().overlaySource().get()).second)
+            return Status(Status::ConfigurationError, "Overlay source name conflicts with a base input");
+        _overlay = std::make_shared<FeatureOverlay>(options().overlayTypes(), options().overlaySource().get());
+        OE_RETURN_STATUS_ON_ERROR(_overlay->validateCatalog(options().coverage(), options().groups()));
+    }
     for (const auto& rule : options().coverage())
     {
         OE_RETURN_STATUS_ON_ERROR(rule.validate());
@@ -528,17 +481,37 @@ Status VegetationLayer2::openImplementation()
     for (const auto& group : options().groups())
     {
         OE_RETURN_STATUS_ON_ERROR(validateGroup(group, options().assets()));
-        OE_RETURN_STATUS_ON_ERROR(validateCanopy(group, _source.get(), !options().sources().empty(), options().coverage()));
+
         if (!names.insert(group.name).second)
             return Status(Status::ConfigurationError, "Duplicate group name: " + group.name);
     }
     return Status::NoError;
 }
 
+void VegetationLayer2::setClusterDebug(ClusterDebugMode mode, unsigned tiers)
+{
+    unsigned value = static_cast<unsigned>(mode);
+    if (value > 2u) value = 0u;
+    tiers &= 3u;
+    getOrCreateStateSet()->getUniform("oe_p2_cluster_debug")->set(
+        osg::Vec3f(float(value),(tiers & 1u) ? 1.0f : 0.0f,(tiers & 2u) ? 1.0f : 0.0f));
+    _clusterDebug.store(value | (tiers << 2u));
+}
+
+ClusterDebugMode VegetationLayer2::getClusterDebugMode() const
+{
+    return static_cast<ClusterDebugMode>(_clusterDebug.load() & 3u);
+}
+
+unsigned VegetationLayer2::getClusterDebugTiers() const
+{
+    return _clusterDebug.load() >> 2u;
+}
+
 Status VegetationLayer2::setGroup(const ScatterGroup& group)
 {
     OE_RETURN_STATUS_ON_ERROR(validateGroup(group, options().assets()));
-    OE_RETURN_STATUS_ON_ERROR(validateCanopy(group, _source.get(), !options().sources().empty(), options().coverage()));
+
     auto& groups = options().groups();
     auto found = std::find_if(groups.begin(), groups.end(), [&group](const ScatterGroup& value)
         { return value.name == group.name; });
@@ -575,6 +548,42 @@ Status VegetationLayer2::setGroup(const ScatterGroup& group)
     return Status::NoError;
 }
 
+Status VegetationLayer2::editOverlay(const std::function<Status(FeatureOverlay&)>& edit)
+{
+    if (!_overlay || !edit || !isOpen())
+        return Status(Status::ConfigurationError, "No open, configured editable feature overlay");
+    const auto before = _overlay->snapshot();
+    const auto status = edit(*_overlay);
+    const auto after = _overlay->snapshot();
+    if (before == after) return status;
+    // Pointer equality identifies unchanged immutable features, including undo/redo snapshots.
+    std::vector<osg::ref_ptr<const Feature>> changed;
+    for (const auto& feature : before->features)
+        if (std::find(after->features.begin(),after->features.end(),feature) == after->features.end()) changed.push_back(feature);
+    for (const auto& feature : after->features)
+        if (std::find(before->features.begin(),before->features.end(),feature) == before->features.end()) changed.push_back(feature);
+    for (unsigned i = 0; i < _pagers.size(); ++i)
+    {
+        auto* pager = dynamic_cast<OverlayPager*>(_pagers[i].get());
+        if (!pager) continue;
+        std::vector<GeoExtent> regions;
+        for (const auto& feature : changed)
+        {
+            bool matches = false; double buffer = 0.0;
+            for (const auto& rule : options().coverage())
+                if (rule.matches(_overlay->source(),options().groups()[i],*feature))
+                { matches = true; buffer = std::max(buffer,rule.buffer); }
+            if (!matches) continue;
+            auto extent = feature->getExtent();
+            // A small halo also makes zero-width/height line extents queryable at exact tile boundaries.
+            extent.expand(Distance(2.0*buffer+0.1,Units::METERS),Distance(2.0*buffer+0.1,Units::METERS));
+            regions.push_back(extent);
+        }
+        if (!regions.empty()) pager->invalidate(regions);
+    }
+    return status;
+}
+
 osg::ref_ptr<SimplePager> VegetationLayer2::createPager(const ScatterGroup& group, unsigned index)
 {
     if (!group.enabled || group.density == 0.0) return {};
@@ -586,11 +595,13 @@ osg::ref_ptr<SimplePager> VegetationLayer2::createPager(const ScatterGroup& grou
     runtime->seed = options().seed().get();
     runtime->resolution = options().elevationResolution().get();
     runtime->assets = _assets;
-    osg::ref_ptr<SimplePager> pager = new SimplePager(map, _profile);
+    osg::ref_ptr<SimplePager> pager = new OverlayPager(map, _profile);
     pager->setName(group.name);
     auto state = pager->getOrCreateStateSet();
     state->setAttribute(_assets->textures());
     state->setDefine("OE_CHONK_SSE_ADJUST");
+    if (group.asset == "trees") state->setDefine("OE_CHONK_SSE_LOD_ONLY");
+    else state->setDefine("OE_CHONK_SSE_PIXEL_CUTOFF");
     osg::ref_ptr<osg::Uniform> quality = new osg::Uniform("oe_chonk_sse_adjust",
         osg::Vec2f(group.qualityOffset,1.0f/25.0f));
     state->addUniform(quality);
@@ -616,27 +627,38 @@ osg::ref_ptr<SimplePager> VegetationLayer2::createPager(const ScatterGroup& grou
         Units::convert(extent.getSRS()->getUnits(), Units::METERS, extent.height()) : extent.height(Units::METERS);
     pager->setRangeFactor(float(std::max(8.0, group.maxRange / std::max(1.0, cellHeight * 0.25))));
     pager->setTimeoutSeconds(2.0);
-    pager->setCreateNodeFunction([runtime, group, index, quality, transitions](const TileKey& key, ProgressCallback* progress)
+    auto overlay = _overlay;
+    auto base = _baseFeatures;
+    auto rules = options().coverage();
+    auto strategy = std::make_shared<MixedPlacementStrategy>(_strategies);
+    pager->setCreateNodeFunction([runtime, group, index, quality, transitions, overlay, base, rules, strategy]
+        (const TileKey& key, ProgressCallback* progress)
         {
+            // One page uses one document revision, even when individual placement queries many source cells.
+            Runtime page = *runtime;
+            if (overlay) page.source = std::make_shared<FeatureScatterSource>(
+                std::make_shared<OverlayFeatureProvider>(base,overlay->snapshot(),overlay->source()),rules,strategy);
             auto node = group.canopy && key.getLOD() < group.renderCellLevel ?
-                runtime->createCanopy(key, group, static_cast<int>(index), progress) :
-                runtime->createBatch(key, group, static_cast<int>(index), progress);
+                page.createCanopy(key, group, static_cast<int>(index), progress) :
+                page.createBatch(key, group, static_cast<int>(index), progress);
             if (!node && group.canopy && progress) progress->cancel();
-            if (node && !group.canopy) installPopulationPageFade(node,quality,transitions);
+            if (node && !group.canopy && group.asset != "trees") installPopulationPageFade(node,quality,transitions);
             return node;
         });
-    if (group.canopy) installCanopyShader(state);
+    if (group.canopy) installTreeCardShader(state);
     pager->setConfigurePagedNodeFunction([group, transitions, firstLevel, quality](const TileKey& key, PagedNode2* node)
     {
-        // Conservative ancestor bounds can reject negligible subtrees before requesting their content.
+        // Tree quality selects representations; only the independent maximum range removes distant forest.
+        // Other populations can still reject negligible subtrees before requesting their content.
         // The callback is owned by this node and retains no owning node reference.
-        node->setRefinementFunction([node,quality](osg::NodeVisitor& nv, bool suggested)
+        node->setRefinementFunction([node,quality,group](osg::NodeVisitor& nv, bool suggested)
         {
             return referenceRefinement(node,nv,suggested) &&
-                populationVisibility(populationPixelSize(node->getBound(),nv),populationError(nv,quality)) > 0.0f;
+                (group.asset == "trees" ||
+                    populationVisibility(populationPixelSize(node->getBound(),nv),populationError(nv,quality)) > 0.0f);
         });
         if (!group.canopy || key.getLOD() < firstLevel) return;
-        if (key.getLOD() == firstLevel) installPopulationPageFade(node,quality,transitions);
+        if (key.getLOD() == firstLevel && group.asset != "trees") installPopulationPageFade(node,quality,transitions);
         double error = 1.0;
         if (node->getNumChildren() > 0) node->getChild(0)->getUserValue("oe_p2_canopy_error", error);
         // Keep load priorities in the same distance units as the coverage-only ancestors. Positive pixel
@@ -667,8 +689,9 @@ void VegetationLayer2::addedToMap(const Map* map)
                 return;
             }
         }
+        _baseFeatures = std::make_shared<MapFeatureProvider>(options().sources());
         _source = std::make_shared<FeatureScatterSource>(
-            std::make_shared<MapFeatureProvider>(options().sources()), options().coverage(),
+            _baseFeatures, options().coverage(),
             std::make_shared<MixedPlacementStrategy>(_strategies));
     }
     _assets = std::make_shared<AssetCatalog>(options().assets(),
@@ -684,7 +707,16 @@ void VegetationLayer2::addedToMap(const Map* map)
     auto state = _content->getOrCreateStateSet();
     state->setRenderBinDetails(options().renderBinNumber().get(), "RenderBin");
     state->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
-    state->setDefine("OE_CHONK_DITHER_FADE");
+    // Chonk checks the active framebuffer's sample count and retains hard cutouts in single-sample passes.
+    // This also supports applications that enable MSAA after opening their map.
+    // The Chonk-specific flag keeps VisibleLayer's ordinary opacity modulation active.
+    state->setDefine("OE_CHONK_ALPHA_TO_COVERAGE");
+    // Inherit application multisampling. A local ON enrolls this mode in OSG's state stack, whose fallback is
+    // OFF; leaving vegetation would then disable MSAA for sibling layers and subsequent frames.
+    state->setMode(GL_SAMPLE_ALPHA_TO_COVERAGE_ARB, osg::StateAttribute::ON);
+    // VisibleLayer installs ON|OVERRIDE blending on the parent during rendering preparation or opacity edits.
+    // Unlike VegetationLayer's layer-level StateSet, this is a child: PROTECTED is required to keep A2C unblended.
+    state->setMode(GL_BLEND, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
     // Inherit the map-wide SSE. Each population adds its own offset once in CPU paging and GPU LOD selection.
     const auto& groups = options().groups();
     _pagers.resize(groups.size());

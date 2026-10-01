@@ -5,6 +5,7 @@
 #pragma once
 
 #include <osgEarthImGui/ImGuiPanel>
+#include <osgEarthImGui/FeatureOverlayGUI>
 #include <osgEarthProcedural2/VegetationLayer2>
 #include <osgEarthProcedural2/Canopy>
 #include <osgEarth/Utils>
@@ -48,11 +49,17 @@ namespace osgEarth { namespace Procedural2
         osg::observer_ptr<VegetationLayer2> _layer;
         osg::ref_ptr<const Profile> _profile;
         std::vector<Editor> _editors;
+        FeatureOverlayGUI _overlayEditor;
+        int _clusterDebug = 0;
+        bool _debugMedium = true, _debugFar = true;
 
         //! Switches the selected layer, discarding only this panel's unapplied drafts.
         void select(VegetationLayer2* layer)
         {
             _layer = layer;
+            _clusterDebug = int(layer->getClusterDebugMode());
+            _debugMedium = (layer->getClusterDebugTiers() & 1u) != 0u;
+            _debugFar = (layer->getClusterDebugTiers() & 2u) != 0u;
             _editors.clear();
             _profile = Profile::create(layer->options().profile().get());
             const auto& original = layer->options_original().groups();
@@ -90,22 +97,6 @@ namespace osgEarth { namespace Procedural2
             ImGuiLTable::Text(label, "%.1f m N-S", meters / divisions);
         }
 
-        //! Selects a bounded footprint multiplier; changing it leaves page and placement-cell levels alone.
-        static bool patchScale(const char* label, float& value)
-        {
-            const float scales[] = {0.5f, 1.0f, 2.0f, 4.0f};
-            const char* labels[] = {"0.5x", "1x (default)", "2x", "4x"};
-            const int selected = value == 0.5f ? 0 : value == 1.0f ? 1 : value == 2.0f ? 2 : 3;
-            bool changed = false;
-            if (ImGuiLTable::BeginCombo(label, labels[selected]))
-            {
-                for (int i = 0; i < 4; ++i)
-                    if (ImGui::Selectable(labels[i], selected == i)) { value = scales[i]; changed = true; }
-                ImGuiLTable::EndCombo();
-            }
-            return changed;
-        }
-
         //! Samples resident pages once per second on update, without draw-thread traversal or GPU readback.
         void aggregateCounts(Editor& editor, VegetationLayer2* layer, osg::RenderInfo& ri)
         {
@@ -129,10 +120,9 @@ namespace osgEarth { namespace Procedural2
                         result->ready.store(true, std::memory_order_release);
                     }));
             }
-            ImGui::TextWrapped("Medium: %zu resident clumps / %zu pieces", editor.counts.midClumps, editor.counts.midPieces);
-            ImGui::TextWrapped("Far: %zu resident clumps / %zu pieces", editor.counts.farClumps, editor.counts.farPieces);
-            ImGui::TextWrapped("Applied counts include cached parents and children, not only visible clumps. "
-                "Pieces fit terrain and exclusions.");
+            ImGui::TextWrapped("Medium: %zu clusters / %zu tree cards", editor.counts.midClumps, editor.counts.midPieces);
+            ImGui::TextWrapped("Far: %zu clusters / %zu tree cards", editor.counts.farClumps, editor.counts.farPieces);
+            ImGui::TextWrapped("Applied counts include cached parents and children, not only visible clusters.");
         }
 
         //! Applies an immutable policy on update; result lifetime is independent of panel/layer selection.
@@ -155,6 +145,29 @@ namespace osgEarth { namespace Procedural2
                     result->status = retained->setGroup(result->submitted);
                     result->ready.store(true, std::memory_order_release);
                 }));
+        }
+
+        //! Queues session-only debug changes without applying any population drafts or rebuilding page content.
+        void clusterDebug(VegetationLayer2* layer, osg::RenderInfo& ri)
+        {
+            if (!ImGui::CollapsingHeader("Cluster visualization", ImGuiTreeNodeFlags_DefaultOpen)) return;
+            bool changed = ImGui::Combo("Color mode", &_clusterDebug, "Off\0Tier colors\0Cluster colors\0");
+            ImGui::BeginDisabled(_clusterDebug == 0);
+            changed |= ImGui::Checkbox("Medium clusters", &_debugMedium);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Far clusters", &_debugFar);
+            ImGui::EndDisabled();
+            ImGui::TextWrapped("Live, no Apply. Medium uses cool colors; far uses warm colors. "
+                "Cluster colors identify each culling group. Individual trees keep their normal materials. "
+                "Colors follow actual visibility and fades; hidden clusters are not drawn.");
+            if (!changed) return;
+            auto target = view(ri);
+            if (!target || !target->getViewerBase()) return;
+            osg::ref_ptr<VegetationLayer2> retained = layer;
+            const auto mode = static_cast<ClusterDebugMode>(_clusterDebug);
+            const unsigned tiers = (_debugMedium ? 1u : 0u) | (_debugFar ? 2u : 0u);
+            target->getViewerBase()->addUpdateOperation(new OneTimer([retained,mode,tiers]()
+                { retained->setClusterDebug(mode,tiers); }));
         }
 
         //! Draws one population's draft, validation feedback, and explicit apply/revert actions.
@@ -190,8 +203,12 @@ namespace osgEarth { namespace Procedural2
                         apply(editor, layer, ri, true);
                     }
                 }
-                help("Applied live. Adds a nonnegative offset to Rendering > SSE; zero inherits global quality. "
-                    "Higher error permits coarser assets, earlier aggregation, and fading smaller distant pages.");
+                help(g.asset == "trees" ?
+                    "Applied live. Adds to Rendering > SSE; zero inherits global quality. Higher error brings "
+                    "impostors and enabled canopy tiers closer; lower error keeps detailed trees farther out. "
+                    "Quality does not remove distant trees. Maximum range controls forest visibility." :
+                    "Applied live. Adds to Rendering > SSE; zero inherits global quality. The combined error "
+                    "selects coarser representations and sets a literal pixel visibility cutoff.");
                 auto mapNode = findNode<MapNode>(ri);
                 const float globalError = mapNode ? mapNode->getScreenSpaceError() : 25.0f;
                 ImGuiLTable::Text("Global SSE (px)", "%.1f", globalError);
@@ -245,37 +262,28 @@ namespace osgEarth { namespace Procedural2
                 ImGui::BeginDisabled(!g.canopy);
                 changed |= ImGui::Checkbox("Use far aggregates", &g.canopyFar);
                 help("Uncheck for medium aggregates only, extending to the same maximum range.");
-                if (ImGuiLTable::Begin("Canopy footprints"))
+                if (ImGuiLTable::Begin("Tree card clusters"))
                 {
                     changed |= ImGuiLTable::Checkbox("Medium GPU culling", &g.canopyMidGPUCulling);
-                    help("Apply population to compare. Off draws every aggregate instance in CPU-visible medium pages; "
-                        "tile culling and canopy/page crossfades remain active. Individual trees keep GPU culling.");
-                    changed |= patchScale("Medium footprint", g.canopyMidPatchScale);
-                    help("Larger footprints produce fewer clumps per page; existing source art stretches to fit.");
-                    const unsigned midDivisions = 1u << canopySubdivisionLevels(g, false);
-                    ImGuiLTable::Text("Medium base clumps/page", "%u", midDivisions * midDivisions);
-                    if (g.renderCellLevel >= 3u) cellSize("Medium nominal span", g.renderCellLevel - 1u, midDivisions);
+                    help("Cull whole card clusters on the GPU. Off retains CPU page culling, handovers, and maximum-range fades.");
+                    int midSize = int(g.canopyMidClusterSize), farSize = int(g.canopyFarClusterSize);
+                    if (ImGuiLTable::SliderInt("Medium trees/cluster", &midSize, 8, 256))
+                    { g.canopyMidClusterSize = unsigned(midSize); changed = true; }
                     ImGui::BeginDisabled(!g.canopyFar);
                     changed |= ImGuiLTable::Checkbox("Far GPU culling", &g.canopyFarGPUCulling);
-                    help("Independent far-tier switch. Off keeps instancing but skips aggregate compute culling. "
-                        "Individual distance/birth fades are also bypassed; tile range and page fades remain active.");
-                    changed |= patchScale("Far footprint", g.canopyFarPatchScale);
-                    help("Independent of medium footprints. Density continues to control forest coverage.");
-                    const unsigned farDivisions = 1u << canopySubdivisionLevels(g, true);
-                    ImGuiLTable::Text("Far base clumps/page", "%u", farDivisions * farDivisions);
-                    if (g.renderCellLevel >= 3u) cellSize("Far nominal span", g.renderCellLevel - 2u, farDivisions);
+                    if (ImGuiLTable::SliderInt("Far trees/cluster", &farSize, 8, 256))
+                    { g.canopyFarClusterSize = unsigned(farSize); changed = true; }
                     ImGui::EndDisabled();
                     ImGuiLTable::End();
                 }
-                ImGui::TextWrapped("Footprints stretch shared art; larger clumps do not contain additional source trees.");
-                ImGui::TextWrapped("Handovers and distant-page fading use the effective quality budget above. "
-                    "Larger footprints also increase projected error and shift handover distances.");
-                changed |= ImGui::SliderFloat("Canopy height (m)", &g.canopyHeight, 1.0f, 80.0f);
+                ImGui::TextWrapped("Clusters retain tree sizes, species, density, and terrain roots. "
+                    "Larger groups reduce culling records without stretching trees or changing handover thresholds. "
+                    "Quality selects the tier; maximum range limits visibility, with either GPU culling mode.");
                 changed |= ImGui::SliderFloat("Canopy LOD overlap", &g.canopyTransition, 0.0f, 0.5f);
                 changed |= ImGui::SliderFloat("Page arrival fade (s)", &g.canopyFadeSeconds, 0.0f, 2.0f);
                 ImGui::EndDisabled();
                 aggregateCounts(editor, layer, ri);
-                ImGui::TextWrapped("Requires geographic coverage, natural scatter, and far density at 100 percent.");
+                ImGui::TextWrapped("Uses the same placement and exclusion rules as nearby trees. Keep far density at 100 percent.");
             }
 
             if (!g.proceduralGrass && !layer->options().assets().empty() && ImGui::CollapsingHeader("Model choices"))
@@ -325,8 +333,11 @@ namespace osgEarth { namespace Procedural2
                     changed |= ImGuiLTable::InputFloat("Coarse LOD below (px)", &g.lodPixels);
                     help("Authored cutoff at an effective 25px budget, scaled by the unified quality control. "
                         "Zero disables coarse geometry.");
+                    ImGui::BeginDisabled(g.asset == "trees");
                     changed |= ImGuiLTable::InputFloat("Cull below (px)", &g.minPixels);
-                    help("Authored size cutoff at an effective 25px budget. The unified quality control scales it.");
+                    ImGui::EndDisabled();
+                    help(g.asset == "trees" ? "Tree visibility is limited by Maximum range, not a pixel cutoff." :
+                        "Absolute minimum pixel size. Visibility cutoff is the larger of this and the combined error.");
                     changed |= ImGuiLTable::SliderFloat("LOD transition", &g.lodTransition, 0.0f, 0.5f);
                     float percent = g.farDensity * 100.0f;
                     if (ImGuiLTable::SliderFloat("Far density (%)", &percent, 0.0f, 100.0f, "%.1f%%", 0))
@@ -400,10 +411,11 @@ namespace osgEarth { namespace Procedural2
         //! Finds current map layers each frame so switching maps never leaves an editor bound to a removed layer.
         void draw(osg::RenderInfo& ri) override
         {
-            if (!isVisible()) return;
+            if (!isVisible()) { _overlayEditor.suspend(); return; }
             ImGui::SetNextWindowSize(ImVec2(560, 700), ImGuiCond_FirstUseEver);
             if (!ImGui::Begin(name(), visible()))
             {
+                _overlayEditor.suspend();
                 ImGui::End();
                 return;
             }
@@ -412,6 +424,7 @@ namespace osgEarth { namespace Procedural2
             if (mapNode) mapNode->getMap()->getLayers(layers);
             if (layers.empty())
             {
+                _overlayEditor.suspend();
                 _layer = nullptr;
                 _editors.clear();
                 ImGui::TextWrapped("No Vegetation2 layer in this map.");
@@ -441,6 +454,8 @@ namespace osgEarth { namespace Procedural2
             }
             ImGui::TextWrapped("Quality updates live. Apply other edits. "
                 "Changes affect this session; the earth file is unchanged.");
+            clusterDebug(layer,ri);
+            _overlayEditor.draw(layer,mapNode,view(ri));
             if (ImGui::CollapsingHeader("Asset residency"))
             {
                 const auto stats = layer->getAssetResidency();

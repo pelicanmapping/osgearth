@@ -3,6 +3,7 @@
  * MIT License
  */
 #include <osgEarthProcedural2/VegetationLayer2>
+#include "AssetImport.h"
 #include <osgEarth/MapNode>
 #include <osgEarth/EarthManipulator>
 #include <osgEarth/Registry>
@@ -208,9 +209,11 @@ namespace
 int main(int argc, char** argv)
 {
     osg::ArgumentParser args(&argc, argv);
+    if (args.find("--asset-source") >= 0) return importVegetationAsset(args);
     std::string capture, view = "ground", disabled, sequence;
     unsigned frames = 300u;
     float terrainSSE = 0.0f;
+    double utcHours = 12.0;
     double rangeOverride = 0.0, pitchOverride = -35.0;
     double longitude = -75.0, latitude = 40.65;
     args.read("--capture", capture);
@@ -227,12 +230,17 @@ int main(int argc, char** argv)
     const bool lodTour = args.read("--lod-tour");
     const bool canopyTour = args.read("--canopy-tour");
     const bool lodDebug = args.read("--lod-debug");
+    std::string clusterDebug = "off";
+    args.read("--cluster-debug",clusterDebug);
+    if (clusterDebug != "off" && clusterDebug != "tiers" && clusterDebug != "clusters") return 1;
     const bool fullDetail = args.read("--full-detail");
     const bool fullDensity = args.read("--full-density");
     const bool assetGrass = args.read("--asset-grass");
     args.read("--sequence", sequence);
     const bool frameStats = args.read("--frame-stats");
     const bool overrideSSE = args.read("--terrain-sse", terrainSSE);
+    const bool overrideTime = args.read("--utc-hours", utcHours);
+    if (overrideTime && (!std::isfinite(utcHours) || utcHours < 0.0 || utcHours >= 24.0)) return 1;
     if (overrideSSE && (!std::isfinite(terrainSSE) || terrainSSE <= 0.0f)) return 1;
     if (!std::isfinite(longitude) || !std::isfinite(latitude) || std::abs(longitude) > 180.0 ||
         std::abs(latitude) > 90.0 || (pagingTour && (capture.empty() || view != "ground" || lodTour)) ||
@@ -245,8 +253,10 @@ int main(int argc, char** argv)
             << "  [--frames 300] [--disable-group grass] [--terrain-sse pixels]\n"
             << "  [--range meters] [--pitch degrees] [--samples 4] [--no-chonk-occlusion]\n"
             << "  [--location longitude latitude] [--paging-tour (ground capture only)]\n"
+            << "  [--utc-hours 12]  Fix the sky time for reproducible daytime art captures.\n"
             << "  [--canopy-tour]  Capture a 16km-to-2.2km forest approach and return.\n"
             << "  [--lod-tour] [--lod-debug] [--full-detail] [--full-density] [--sequence output-directory]\n"
+            << "  [--cluster-debug off|tiers|clusters]  Color medium/far culling groups without changing visibility.\n"
             << "  [--asset-grass]  Replace experimental grass patches with asset clumps at the same centers.\n"
             << "  [--sky2 --shadows] [--frame-stats]   Frame stats use OSG's viewer diagnostics.\n"
             << "  Keys 1-5 toggle populations; L toggles LOD colors; T toggles the camera tour.\n";
@@ -268,6 +278,8 @@ int main(int argc, char** argv)
         std::cerr << "Vegetation2 did not open: " << (layer ? layer->getStatus().toString() : "missing layer") << '\n';
         return 1;
     }
+    layer->setClusterDebug(clusterDebug == "clusters" ? ClusterDebugMode::CLUSTERS :
+        clusterDebug == "tiers" ? ClusterDebugMode::TIERS : ClusterDebugMode::OFF);
     bool grassExperiment = false;
     for (auto group : layer->options().groups())
     {
@@ -370,6 +382,11 @@ int main(int argc, char** argv)
     viewer.getCamera()->addCullCallback(clip);
     if (args.find("--sky2") >= 0 || args.find("--shadows") >= 0)
         osgEarth::Util::MapNodeHelper().parse(mapNode, args, &viewer, root);
+    if (overrideTime)
+    {
+        const auto date = Registry::instance()->getDateTime();
+        Registry::instance()->setDateTime(DateTime(date.year(), date.month(), date.day(), utcHours));
+    }
     if (frameStats)
     {
         viewer.getViewerStats()->collectStats("update", true);

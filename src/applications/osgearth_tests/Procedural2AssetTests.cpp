@@ -17,6 +17,7 @@
 #include <future>
 #include <chrono>
 #include <set>
+#include <osg/Multisample>
 
 using namespace osgEarth;
 using namespace osgEarth::Procedural2;
@@ -234,6 +235,101 @@ TEST_CASE("Procedural2 starter art has two valid representations", "[procedural2
     REQUIRE(usable);
 }
 
+//! New art must fit the existing budget, retain cutouts/PBR bindings, and load only precompressed mip chains.
+TEST_CASE("Procedural2 textured art stays low poly and carries complete PBR materials", "[procedural2][pbr-art]")
+{
+    const char* names[] = {"broadleaf", "conifer", "shrub", "grass-tuft", "fern", "boulder", "canopy-cluster"};
+    const unsigned limits[] = {1000, 1000, 512, 16, 64, 156, 78};
+    std::vector<ScatterAsset> definitions;
+    for (unsigned i = 0; i < 7; ++i)
+    {
+        Config conf("asset");
+        conf.setReferrer(osgDB::getRealPath("procedural2-art.earth"));
+        const std::string base = "../data/procedural2/pbr/" + std::string(names[i]);
+        conf.set("name", names[i]); conf.set("near", base+"-near.osg"); conf.set("coarse", base+"-coarse.osg");
+        if (i < 2) conf.set("canopy", base+"-canopy.osg");
+        definitions.emplace_back(conf);
+    }
+    AssetCatalog catalog(definitions, 64u*1024u*1024u);
+    ScatterGroup group;
+    std::vector<Chonk::Ptr> retained;
+    for (unsigned i = 0; i < 7; ++i)
+    {
+        INFO(names[i]);
+        auto model = catalog.acquire(group,names[i]);
+        REQUIRE(model);
+        retained.push_back(model);
+        REQUIRE(model->_lods.size() == 2);
+        CHECK(model->_lods[0].length/3 <= limits[i]);
+        CHECK(model->_lods[1].length == 18);
+        CHECK(model->_lods[0].alphaTested == (i != 5));
+        CHECK(model->_lods[1].alphaTested);
+        for (const auto& material : model->_materials)
+        {
+            for (unsigned slot = 0; slot < 3; ++slot)
+            {
+                REQUIRE(material->textures[slot] >= 0);
+                auto texture = catalog.textures()->find(material->textures[slot]);
+                REQUIRE(texture);
+                auto image = texture->osgTexture()->getImage(0);
+                REQUIRE(image);
+                REQUIRE(image->isCompressed());
+                unsigned levels = 1;
+                for (int dim = std::max(image->s(),image->t()); dim > 1; dim /= 2) ++levels;
+                CHECK(image->getNumMipmapLevels() == levels);
+            }
+        }
+        for (const auto& vertex : model->_vbo_store)
+        {
+            CHECK(std::isfinite(vertex.position.length2()));
+            CHECK(std::abs(vertex.normal.length()-1.0f) < 0.002f);
+        }
+    }
+    group.canopy = true; group.models = {"broadleaf", "conifer"};
+    for (unsigned layout = 0; layout < 4; ++layout)
+    {
+        auto canopy = catalog.acquireCanopy(group,8,layout);
+        REQUIRE(canopy);
+        CHECK(canopy->_lods.front().length == 9u*6u*3u);
+        retained.push_back(canopy);
+    }
+    CHECK(catalog.residency().failedLoads == 0);
+    CHECK(catalog.residency().budgetDenials == 0);
+    CHECK(catalog.residency().bytes <= catalog.residency().budget);
+}
+
+//! Canopy assembly must rotate baked card frames without replacing them with upward crown-volume normals.
+TEST_CASE("Procedural2 canopy retains baked normal atlas semantics", "[procedural2][pbr-art]")
+{
+    auto geometry = ChonkTest::mesh();
+    auto* vertices = dynamic_cast<osg::Vec3Array*>(geometry->getVertexArray());
+    for (auto& v : *vertices) v.set(v.x(),0,v.y()+2.0f);
+    (*dynamic_cast<osg::Vec3Array*>(geometry->getNormalArray()))[0].set(0,-1,0);
+    auto technique = new osg::UByteArray();
+    technique->push_back(Chonk::NORMAL_TECHNIQUE_BAKED);
+    geometry->setVertexAttribArray(6,technique,osg::Array::BIND_OVERALL);
+    ChonkTest::AssetFile file;
+    REQUIRE(file.write(geometry));
+    Config config("asset");
+    config.set("name","baked"); config.set("near",file.path); config.set("coarse",file.path);
+    config.set("canopy",file.path);
+    AssetCatalog catalog({ScatterAsset(config)},1024u*1024u);
+    ScatterGroup group;
+    group.models = {"baked"};
+    for (unsigned layout=0; layout<4; ++layout)
+    {
+        auto canopy = catalog.acquireCanopy(group,8,layout);
+        REQUIRE(canopy);
+        CHECK(canopy->_ebo_store.size() == 9u*6u);
+        for (const auto& v : canopy->_vbo_store)
+        {
+            CHECK(v.normal_technique == Chonk::NORMAL_TECHNIQUE_BAKED);
+            CHECK(std::abs(v.normal.z()) < 1e-6f);
+            CHECK(std::abs(v.normal.length()-1.0f) < 1e-6f);
+        }
+    }
+}
+
 //! Unsupported dynamic semantics and broken texture references fail instead of producing incorrect white geometry.
 TEST_CASE("Procedural2 rejects unsupported and incomplete model graphs", "[procedural2]")
 {
@@ -323,7 +419,7 @@ TEST_CASE("Procedural2 canopy GPU contract", "[procedural2][canopy][gpu]")
     REQUIRE(std::system(command.c_str()) == 0);
 }
 
-//! Reads actual color/shadow shader output: same-bin fades must remain complementary and masked crowns must vanish.
+//! Reads actual A2C ramps and shadow cutouts: same-bin weights must remain independent and masked crowns must vanish.
 TEST_CASE("Procedural2 canopy GPU coverage and crown masks", "[.procedural2-canopy-gpu-worker]")
 {
     if (!Capabilities::get().supportsNVGL()) { WARN("Canopy validation requires NVGL"); return; }
@@ -332,22 +428,39 @@ TEST_CASE("Procedural2 canopy GPU coverage and crown masks", "[.procedural2-cano
     REQUIRE(renderer.initialize());
     auto* rootState = renderer.root->getOrCreateStateSet();
     installCanopyShader(rootState);
+    GLint samples = 0;
+    glGetIntegerv(GL_SAMPLES_ARB, &samples);
+    REQUIRE(samples == 4);
     rootState->setMode(GL_CULL_FACE,osg::StateAttribute::OFF);
+    rootState->setDefine("OE_CHONK_ALPHA_TO_COVERAGE");
+    rootState->setMode(GL_MULTISAMPLE_ARB,osg::StateAttribute::ON);
+    rootState->setMode(GL_SAMPLE_ALPHA_TO_COVERAGE_ARB,osg::StateAttribute::ON);
+    rootState->setMode(GL_BLEND,osg::StateAttribute::OFF);
     auto* camera = renderer.viewer.getCamera();
     camera->setProjectionMatrixAsOrtho(-2,2,-2,2,1,20);
     camera->setViewMatrixAsLookAt(osg::Vec3d(0,0,8),osg::Vec3d(),osg::Vec3d(0,1,0));
     osg::ref_ptr<osg::Group> scene = new osg::Group();
     osg::ref_ptr<osg::Uniform> intervals[2];
     osg::ref_ptr<ChonkDrawable> tierDrawables[2];
+    // Minification deliberately boosts material alpha above one; it must not cancel the subsequent fade.
+    osg::ref_ptr<osg::Image> opaqueImage = new osg::Image();
+    opaqueImage->allocateImage(512,512,1,GL_RGBA,GL_UNSIGNED_BYTE);
+    std::fill(opaqueImage->data(),opaqueImage->data()+opaqueImage->getTotalSizeInBytes(),255);
+    osg::ref_ptr<osg::Texture2D> opaqueTexture = new osg::Texture2D(opaqueImage);
+    opaqueTexture->setFilter(osg::Texture::MIN_FILTER,osg::Texture::LINEAR_MIPMAP_LINEAR);
     for (unsigned i=0; i<2; ++i)
     {
         auto geometry = ChonkTest::mesh();
         auto* colors = dynamic_cast<osg::Vec4Array*>(geometry->getColorArray());
         (*colors)[0] = i == 0 ? osg::Vec4(1,0,0,1) : osg::Vec4(0,1,0,1);
+        geometry->getOrCreateStateSet()->setTextureAttribute(0,opaqueTexture);
         auto model = Chonk::create();
         REQUIRE(model->add(geometry,0,FLT_MAX,*renderer.factory));
         auto* drawable = new ChonkDrawable();
-        drawable->add(model);
+        // Separate screen halves expose each branch's weight without overlapping A2C sample masks.
+        drawable->add(model,osg::Matrixf::scale(0.5f,1,1)*osg::Matrixf::translate(i == 0 ? -1.0f : 1.0f,0,0));
+        drawable->setBirthday(-10);
+        drawable->setAlphaCutoff(1.0f);
         auto* branch = new osg::Group();
         intervals[i] = new osg::Uniform("oe_chonk_coverage",osg::Vec2f(0,1));
         branch->getOrCreateStateSet()->addUniform(intervals[i]);
@@ -373,19 +486,21 @@ TEST_CASE("Procedural2 canopy GPU coverage and crown masks", "[.procedural2-cano
                     intervals[0]->set(osg::Vec2f(0,split)); intervals[1]->set(osg::Vec2f(split,1));
                     renderer.frame(); renderer.frame();
                     auto pixels = renderer.pixels();
-                    unsigned red = 0, green = 0, other = 0;
-                    for (unsigned y=8; y<248; ++y)
-                        for (unsigned x=8; x<248; ++x)
-                        {
-                            const auto* p = pixels->data(x,y);
-                            if (p[0] > 128 && p[1] < 32) ++red;
-                            else if (p[1] > 128 && p[0] < 32) ++green;
-                            else ++other;
-                        }
-                    // Catches flattened per-page uniforms, missing coverage, and zero-alpha opaque draws.
-                    CHECK(other == 0u);
-                    CHECK(std::abs(double(red)/57600.0-split) < 0.025);
-                    CHECK(red+green == 57600u);
+                    for (unsigned tier=0; tier<2; ++tier)
+                        for (unsigned y=32; y<224; y+=16)
+                            for (unsigned x=16; x<112; x+=16)
+                            {
+                                const float weight = tier == 0 ? split : 1.0f-split;
+                                const float alpha = mode == 0 ? weight : float(weight >= 0.5f);
+                                const int linear = int(std::round(255.0f*alpha));
+                                const int srgb = int(std::round(255.0f*(alpha <= 0.0031308f ? 12.92f*alpha :
+                                    1.055f*std::pow(alpha,1.0f/2.4f)-0.055f)));
+                                const auto* p = pixels->data(x+128*tier,y);
+                                // WGL can resolve linear or sRGB. Both must ramp every pixel, without binary noise.
+                                CHECK(std::min(std::abs(int(p[tier])-linear),std::abs(int(p[tier])-srgb)) <= 2);
+                                CHECK(p[1-tier] == 0);
+                                CHECK(p[2] == 0);
+                            }
                 }
             }
         }
@@ -438,7 +553,7 @@ TEST_CASE("Procedural2 canopy GPU coverage and crown masks", "[.procedural2-cano
         auto* drawable = new ChonkDrawable();
         const auto& e = key.getExtent();
         drawable->add(levels[key.getLOD()],osg::Matrixf::scale(e.width()/4,e.height()/4,1)*
-            osg::Matrixf::translate(e.getCentroid().vec3d()));
+            osg::Matrixf::translate(e.getCentroid().vec3d()+osg::Vec3d(0,0,0.01*key.getLOD())));
         return drawable;
     });
     osg::observer_ptr<Util::PagedNode2> rootPage;
@@ -458,20 +573,19 @@ TEST_CASE("Procedural2 canopy GPU coverage and crown masks", "[.procedural2-cano
     //! Moves along the view axis; a small center region stays inside the common parent/child quad at every distance.
     auto distance = [&](double meters)
     { camera->setViewMatrixAsLookAt(osg::Vec3d(0,0,meters),osg::Vec3d(),osg::Vec3d(0,1,0)); };
-    //! Reads complementary colors in the common interior, excluding silhouette/MSAA pixels.
+    //! Reads resolved child opacity in the common interior, excluding silhouette/MSAA edge pixels.
     auto centerCoverage = [&]()
     {
         const auto pixels = renderer.pixels();
-        unsigned red = 0, green = 0;
+        unsigned green = 0;
         for (unsigned y=116; y<140; ++y)
             for (unsigned x=116; x<140; ++x)
             {
                 const auto* p = pixels->data(x,y);
-                if (p[0] > 128 && p[1] < 32) ++red;
-                if (p[1] > 128 && p[0] < 32) ++green;
+                CHECK(unsigned(p[0])+p[1] > 30u);
+                green += p[1];
             }
-        CHECK(red+green == 576u);
-        return green;
+        return green/576u;
     };
     distance(20); renderer.frame();
     CHECK(centerCoverage() == 0u);
@@ -487,19 +601,22 @@ TEST_CASE("Procedural2 canopy GPU coverage and crown masks", "[.procedural2-cano
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             renderer.frame();
             const unsigned green = centerCoverage();
-            intermediate = intermediate || (green > 0u && green < 576u);
-            complete = green == 576u;
+            intermediate = intermediate || (green > 0u && green < 255u);
+            complete = green == 255u;
         }
         CHECK(intermediate);
         CHECK(complete);
     }
-    // Reversing through the middle of the distance band uses already resident children without a pop or gap.
+    // Reverse through the resident handover: incoming coverage ramps up before outgoing coverage ramps down.
+    distance(2.0+2.0*(1.0/std::tan(osg::DegreesToRadians(22.5)))*256.0/87.5);
+    renderer.frame();
+    const unsigned entering = centerCoverage();
+    CHECK(entering > 0u); CHECK(entering < 255u);
     distance(2.0+2.0*(1.0/std::tan(osg::DegreesToRadians(22.5)))*256.0/100.0);
     renderer.frame();
-    const unsigned middle = centerCoverage();
-    CHECK(middle > 200u); CHECK(middle < 376u);
+    CHECK(centerCoverage() == 255u); // The nearer child is fully covered at the midpoint, not half transparent.
     distance(20); renderer.frame(); CHECK(centerCoverage() == 0u);
-    // Two asynchronous levels may fade at once; a shared pixel must still have exactly one owner.
+    // Two asynchronous levels may ramp at once; verify intermediate resolved colors and eventual full detail.
     auto blueGeometry = ChonkTest::mesh();
     (*dynamic_cast<osg::Vec4Array*>(blueGeometry->getColorArray()))[0] = osg::Vec4(0,0,1,1);
     auto blueModel = Chonk::create();
@@ -512,7 +629,8 @@ TEST_CASE("Procedural2 canopy GPU coverage and crown masks", "[.procedural2-cano
         auto* drawable = new ChonkDrawable();
         const auto& e = key.getExtent();
         drawable->add(key.getLOD() < 2 ? levels[key.getLOD()] : blueModel,
-            osg::Matrixf::scale(e.width()/4,e.height()/4,1)*osg::Matrixf::translate(e.getCentroid().vec3d()));
+            osg::Matrixf::scale(e.width()/4,e.height()/4,1)*
+            osg::Matrixf::translate(e.getCentroid().vec3d()+osg::Vec3d(0,0,0.01*key.getLOD())));
         return drawable;
     });
     nested->setConfigurePagedNodeFunction([policy,transitions](const TileKey&,Util::PagedNode2* page)
@@ -534,12 +652,11 @@ TEST_CASE("Procedural2 canopy GPU coverage and crown masks", "[.procedural2-cano
             for (unsigned x=116; x<140; ++x)
             {
                 const auto* p = pixels->data(x,y);
-                for (unsigned c=0; c<3; ++c)
-                    if (p[c] > 128 && p[(c+1)%3] < 32 && p[(c+2)%3] < 32) ++colors[c];
+                CHECK(unsigned(p[0])+p[1]+p[2] > 30u);
+                for (unsigned c=0; c<3; ++c) colors[c] += p[c];
             }
-        CHECK(colors[0]+colors[1]+colors[2] == 576u);
         mixed = mixed || (colors[2] > 0u && colors[0]+colors[1] > 0u);
-        blueComplete = colors[2] == 576u;
+        blueComplete = colors[2] == 576u*255u;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     CHECK(mixed); CHECK(blueComplete);
@@ -605,12 +722,13 @@ TEST_CASE("Procedural2 canopy GPU coverage and crown masks", "[.procedural2-cano
                 unsigned count = 0;
                 for (unsigned y=0; y<256; ++y)
                     for (unsigned x=0; x<256; ++x)
-                        if (pixels->data(x,y)[1] > 128) ++count;
+                        count += pixels->data(x,y)[1];
                 counts.push_back(count);
             }
             INFO("page fade pass=" << pass);
             CHECK(counts[0] > 100u);
-            CHECK(counts[1] > 0u); CHECK(counts[1] < counts[0]);
+            if (pass == 0) { CHECK(counts[1] > 0u); CHECK(counts[1] < counts[0]); }
+            else CHECK((counts[1] == 0u || counts[1] == counts[0]));
             CHECK(counts[2] == counts[1]);
             CHECK(counts[3] == 0u); CHECK(counts[4] == counts[0]);
         }

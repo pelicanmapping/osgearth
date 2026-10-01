@@ -820,7 +820,8 @@ Status FeatureScatterSource::generateImpl(const TileKey& key, const ScatterGroup
 {
     output.clear();
     OE_RETURN_STATUS_ON_ERROR(group.validate());
-    if (!_provider || !key.valid() || (batch && key.getLOD() != group.renderCellLevel))
+    const unsigned firstLevel = group.canopy ? group.renderCellLevel-(group.canopyFar ? 2u : 1u) : group.renderCellLevel;
+    if (!_provider || !key.valid() || (batch && (key.getLOD() < firstLevel || key.getLOD() > group.renderCellLevel)))
         return Status(Status::ConfigurationError, "Invalid feature scatter request");
     if (!group.enabled || group.density == 0.0) return Status::NoError;
     std::shared_ptr<const PlacementField> field;

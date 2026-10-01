@@ -1,0 +1,360 @@
+<!-- Prestige prototype layer. -->
+<map name="Prestige prototype">
+  <libraries>osgEarthProcedural2</libraries>
+  <XYZImage name="Google Imagery" open="true">
+    <url>
+      <![CDATA[ https://www.google.com/maps/vt?lyrs=s@189&gl=cn&x={x}&y={y}&z={z} ]]>
+    </url>
+  </XYZImage>
+  <TMSElevation name="ReadyMap 90m Elevation">
+    <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
+    <vdatum>egm96</vdatum>
+  </TMSElevation>
+  <Prestige name="Prestige" enabled="true">
+    <url>D:/data/prestige/Prestige_ktx/models/prestige/</url>
+    <profile>spherical-mercator</profile>
+    <additive>false</additive>
+    <lod0_extension>gltf</lod0_extension>
+    <lod_method>screen_space</lod_method>
+    <min_level>14</min_level>
+    <max_level>14</max_level>
+    <!--<range_factor>10</range_factor>-->
+    <!-- Distances are in meters. Tune these for the scale of your models. -->
+    <lod1_range>5000</lod1_range>
+    <lod0_range>250</lod0_range>
+    <skip_lod1>false</skip_lod1>
+    <split>true</split>
+    <!-- Set this to false to prevent going to the lod1 and lod 0 tiles -->
+    <subdivide>true</subdivide>
+    <!-- Set this to true if Prestige numbers tiles from the bottom up. -->
+    <invert_y>false</invert_y>
+  </Prestige>
+  <Grime name="Building weathering">
+    <visible>true</visible>
+    <opacity>0.5</opacity>
+    <model>Prestige</model>
+    <anchor>-71.06,42.36,0</anchor>
+    <seed>17</seed>
+    <volume_size>128</volume_size>
+    <amount>1.0</amount>
+    <tint>0.135,0.130,0.124</tint>
+    <macro_period>7.5</macro_period>
+    <streak_period>1.2,1.2,6.8</streak_period>
+    <!-- Start with smoother stains so the change shows on the matte building skins.
+             Tune these live in LayersGUI; roughen_only=true is useful for dry deposits. -->
+    <roughness>0.25</roughness>
+    <roughness_amount>0.8</roughness_amount>
+    <roughen_only>false</roughen_only>
+    <!-- Smooth materials keep their roughness and receive only 15% of the stain. -->
+    <smooth_threshold>0.2</smooth_threshold>
+    <smooth_feather>0.15</smooth_feather>
+    <smooth_amount>0.15</smooth_amount>
+  </Grime>
+  <XYZFeatures name="data:osm">
+    <url>https://readymap.org/readymap/mbtiles/osm/{z}/{x}/{-y}.pbf</url>
+    <min_level>14</min_level>
+    <max_level>14</max_level>
+    <profile>spherical-mercator</profile>
+    <format>pbf</format>
+    <fid_attribute>@id</fid_attribute>
+    <attribution>OpenStreetMap contributors</attribution>
+  </XYZFeatures>
+  <Vegetation2 name="OSM land-use populations">
+    <sources>
+      <source name="osm">
+        <features>data:osm</features>
+      </source>
+    </sources>
+    <!-- Authoring types use the shared coverage rules below. -->
+    <overlay source="edits">
+      <type name="clearing" label="Clear vegetation" geometry="polygon">
+        <attribute key="vegetation:exclude" value="yes"/>
+      </type>
+      <type name="building" label="Building footprint" geometry="polygon">
+        <attribute key="building" value="yes"/>
+      </type>
+      <type name="water" label="Water area" geometry="polygon">
+        <attribute key="natural" value="water"/>
+      </type>
+      <type name="path" label="Path (4m buffer each side)" geometry="line">
+        <attribute key="highway" value="path"/>
+      </type>
+    </overlay>
+    <coverage>
+      <rule source="edits" key="vegetation:exclude" value="yes" action="exclude"/>
+      <!-- Natural populations use OSM. Agricultural groups are included only by their row rules. -->
+      <rule source="osm" group="trees" key="natural" value="wood" action="include"/>
+      <rule source="osm" group="trees" key="landuse" value="forest" action="include"/>
+      <rule source="osm" group="shrubs" key="natural" value="wood" action="include"/>
+      <rule source="osm" group="shrubs" key="landuse" value="forest" action="include"/>
+      <rule source="osm" group="grass" key="natural" value="wood" action="include"/>
+      <rule source="osm" group="grass" key="landuse" value="forest" action="include"/>
+      <rule source="osm" group="undergrowth" key="natural" value="wood" action="include"/>
+      <rule source="osm" group="undergrowth" key="landuse" value="forest" action="include"/>
+      <rule source="osm" group="trees" key="natural" value="tree" action="points"/>
+      <!-- Agriculture replaces background random scatter where OSM land-use polygons overlap woodland. -->
+      <rule source="osm" group="trees" key="landuse" value="orchard"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="trees" key="landuse" value="vineyard"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="trees" key="landuse" value="farmland"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="shrubs" key="landuse" value="orchard"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="shrubs" key="landuse" value="vineyard"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="shrubs" key="landuse" value="farmland"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="grass" key="landuse" value="orchard"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="grass" key="landuse" value="vineyard"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="grass" key="landuse" value="farmland"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="undergrowth" key="landuse" value="orchard"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="undergrowth" key="landuse" value="vineyard"
+                action="include" density="0" priority="100"/>
+      <rule source="osm" group="undergrowth" key="landuse" value="farmland"
+                action="include" density="0" priority="100"/>
+      <!-- Specific perennial land use overrides any broader farmland polygon in the crop population. -->
+      <rule source="osm" group="crop_rows" key="landuse" value="orchard"
+                action="include" density="0" priority="200"/>
+      <rule source="osm" group="crop_rows" key="landuse" value="vineyard"
+                action="include" density="0" priority="200"/>
+      <!-- World mode needs no origin metadata. Spacing and grid-north headings below are visual defaults. -->
+      <rule name="osm-orchards" source="osm" group="orchards" key="landuse"
+                value="orchard" action="include" strategy="rows" priority="100">
+        <placement origin_mode="world" heading="15" row_spacing="10" plant_spacing="7"/>
+      </rule>
+      <rule name="osm-vineyards" source="osm" group="vineyards" key="landuse"
+                value="vineyard" action="include" strategy="rows" priority="100">
+        <placement origin_mode="world" heading="0" heading_attribute="vine_row_orientation"
+                    row_spacing="5" plant_spacing="2"/>
+      </rule>
+      <rule name="osm-crops" source="osm" group="crop_rows" key="landuse"
+                value="farmland" action="include" strategy="rows" priority="100">
+        <placement origin_mode="world" heading="75" row_spacing="3" plant_spacing="1.5"/>
+      </rule>
+      <!-- All populations share OSM exclusions. Explicit mapped trees remain authoritative unless excluded. -->
+      <rule key="building" value="*" except="no" action="exclude"/>
+      <rule key="natural" value="water" action="exclude"/>
+      <rule key="waterway" value="riverbank" action="exclude"/>
+      <!-- Buffer is half-width, in meters; road-class/width attributes can be refined later. -->
+      <rule key="highway" value="*" except="no" action="exclude" buffer="4"/>
+    </coverage>
+    <seed>17</seed>
+    <asset_budget_mb>64</asset_budget_mb>
+    <assets>
+      <!-- VRV trees with offline-generated individual impostors; distant tiers group these same tree cards. -->
+      <asset name="red-maple" near="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Maple/RedMaple/osgearth/red-maple-near.osg"
+                coarse="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Maple/RedMaple/osgearth/red-maple-coarse.osg"
+                canopy="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Maple/RedMaple/osgearth/red-maple-canopy.osg"/>
+      <asset name="white-oak" near="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Oak/WhiteOak/osgearth/white-oak-near.osg"
+                coarse="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Oak/WhiteOak/osgearth/white-oak-coarse.osg"
+                canopy="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Oak/WhiteOak/osgearth/white-oak-canopy.osg"/>
+      <asset name="white-pine" near="D:/data/assets/vrv-vegetation/Trees/EvergreenNeedleLeaf/Pine/EasternWhitePine/osgearth/white-pine-near.osg"
+                coarse="D:/data/assets/vrv-vegetation/Trees/EvergreenNeedleLeaf/Pine/EasternWhitePine/osgearth/white-pine-coarse.osg"
+                canopy="D:/data/assets/vrv-vegetation/Trees/EvergreenNeedleLeaf/Pine/EasternWhitePine/osgearth/white-pine-canopy.osg"/>
+      <asset name="shrub" near="../data/procedural2/pbr/shrub-near.osg"
+                coarse="../data/procedural2/pbr/shrub-coarse.osg"/>
+      <asset name="grass-tuft" near="../data/procedural2/pbr/grass-tuft-near.osg"
+                coarse="../data/procedural2/pbr/grass-tuft-coarse.osg"/>
+      <asset name="fern" near="../data/procedural2/pbr/fern-near.osg"
+                coarse="../data/procedural2/pbr/fern-coarse.osg"/>
+      <asset name="boulder" near="../data/procedural2/pbr/boulder-near.osg"
+                coarse="../data/procedural2/pbr/boulder-coarse.osg"/>
+      <asset name="canopy-cluster" near="../data/procedural2/pbr/canopy-cluster-near.osg"
+                coarse="../data/procedural2/pbr/canopy-cluster-coarse.osg"/>
+    </assets>
+    <profile>global-geodetic</profile>
+    <elevation_resolution>10m</elevation_resolution>
+    <groups>
+      <!-- Coarse render batches support long tree ranges; placement identity remains tied to source cells. -->
+      <group name="trees" asset="trees" density="10000" cell_level="16" render_cell_level="14"
+                canopy="true" canopy_far="true" quality_offset="23"
+                canopy_mid_cluster_size="32" canopy_far_cluster_size="64"
+                canopy_mid_gpu_culling="true" canopy_far_gpu_culling="true"
+                canopy_transition="0.25" canopy_fade_seconds="0.4"
+                max_range="30000" lod_pixels="96" min_pixels="0.75">
+        <models>
+          <model>red-maple</model>
+          <model>white-oak</model>
+          <model>white-pine</model>
+        </models>
+      </group>
+      <group enabled="false" name="shrubs" asset="shrubs" density="4500" cell_level="18" render_cell_level="16"
+                max_range="700" lod_pixels="48" density_start="150" density_end="550" far_density="0.5">
+        <models>
+          <model>shrub</model>
+        </models>
+      </group>
+      <group enabled="false" name="grass" asset="grass" density="1120000" cell_level="20" render_cell_level="17"
+                max_range="200" lod_pixels="18" density_start="25" density_end="160" far_density="0.2">
+        <models>
+          <model>grass-tuft</model>
+        </models>
+      </group>
+      <group enabled="false" name="undergrowth" asset="undergrowth" density="48000" cell_level="19" render_cell_level="17"
+                max_range="280" lod_pixels="28" density_start="50" density_end="220" far_density="0.35">
+        <models>
+          <model>fern</model>
+        </models>
+      </group>
+      <group name="rocks" enabled="false" asset="rocks" density="1100" cell_level="17" render_cell_level="15"
+                max_range="1000" lod_pixels="40">
+        <models>
+          <model>boulder</model>
+        </models>
+      </group>
+      <!-- Starter proxies make the planting patterns readable; crop/vine art is provisional.
+                 These populations keep independent controls; coarser render batches suit continuous agricultural coverage. -->
+      <group enabled="false" name="orchards" asset="trees" density="1" cell_level="18" render_cell_level="15"
+                max_range="2500" lod_pixels="48" min_pixels="0.1" min_scale="0.55" max_scale="0.605">
+        <models>
+          <model>red-maple</model>
+        </models>
+      </group>
+      <group enabled="false" name="vineyards" asset="shrubs" density="1" cell_level="18" render_cell_level="15"
+                max_range="1200" lod_pixels="24" min_pixels="0.1" min_scale="1.5" max_scale="1.6">
+        <models>
+          <model>shrub</model>
+        </models>
+      </group>
+      <group enabled="false" name="crop_rows" asset="grass" density="1" cell_level="18" render_cell_level="15"
+                max_range="1000" lod_pixels="12" min_pixels="0.1" min_scale="1.5" max_scale="1.6">
+        <models>
+          <model>fern</model>
+        </models>
+      </group>
+    </groups>
+  </Vegetation2>
+  <viewpoints home="0">
+    <viewpoint>
+      <heading>-103.549</heading>
+      <pitch>-2.64635</pitch>
+      <range>1355.49m</range>
+      <long>-79.99705874461937</long>
+      <lat>40.4399649662581</lat>
+      <height>220.3948163352907</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <viewpoint name="Close up slow lighting">
+      <heading>-101.832</heading>
+      <pitch>-27.7212</pitch>
+      <range>420.233m</range>
+      <long>-79.99701475181477</long>
+      <lat>40.4415901229514</lat>
+      <height>229.9541753996164</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <viewpoint>
+      <heading>85.4103</heading>
+      <pitch>-17.1384</pitch>
+      <range>458.446m</range>
+      <long>-80.001921917063</long>
+      <lat>40.43896668125812</lat>
+      <height>212.7220127834007</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <viewpoint name="NY Alley 16fps">
+      <heading>-146.496</heading>
+      <pitch>-3.25876</pitch>
+      <range>508.104m</range>
+      <long>-74.00522746701468</long>
+      <lat>40.72079543570025</lat>
+      <height>-24.25937988422811</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <viewpoint>
+      <heading>-145.759</heading>
+      <pitch>-9.86659</pitch>
+      <range>497.096m</range>
+      <long>-74.0015842568351</long>
+      <lat>40.7218394332723</lat>
+      <height>-17.72465609386563</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <viewpoint name="NY Overview" long="-73.9160" lat="40.7306" heading="0" pitch="-45" range="15000" />
+    <viewpoint name="Lights">
+      <heading>-146.607</heading>
+      <pitch>-11.0749</pitch>
+      <range>234.365m</range>
+      <long>-73.90155606822194</long>
+      <lat>40.74111354732007</lat>
+      <height>-0.01096763461828232</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <viewpoint name="NY Street">
+      <heading>-160.428</heading>
+      <pitch>-1.02694</pitch>
+      <range>136.257m</range>
+      <long>-73.99329167621946</long>
+      <lat>40.70063517982269</lat>
+      <height>-11.27031195629388</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <viewpoint name="Statue of Liberty">
+      <heading>-22.9542</heading>
+      <pitch>-14.7417</pitch>
+      <range>2446.82m</range>
+      <long>-74.04695638860964</long>
+      <lat>40.69152983101623</lat>
+      <height>0.7996887546032667</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <!-- Prestige tile 14/4736/6193 (Churchtown, Lancaster County PA):
+             20 building=barn footprints; this cluster has six of them. -->
+    <viewpoint name="Lancaster County barns">
+      <heading>35</heading>
+      <pitch>-20</pitch>
+      <range>700m</range>
+      <long>-75.9300</long>
+      <lat>40.1607</lat>
+      <height>0</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <!-- Prestige tile 14/2795/6535 (Burbank / North Hollywood, Los
+             Angeles). Range frames the whole ~2 km tile; zoom in from there. -->
+    <viewpoint name="Burbank - tile 14/2795/6535">
+      <heading>0</heading>
+      <pitch>-35</pitch>
+      <range>3000m</range>
+      <long>-118.575439453125</long>
+      <lat>34.170907874055615</lat>
+      <height>0</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <viewpoint name="Brooklyn Bridge">
+      <heading>0.0000</heading>
+      <pitch>-22</pitch>
+      <range>504m</range>
+      <long>-73.996864</long>
+      <lat>40.706086</lat>
+      <height>0</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <viewpoint name="California Warehouses">
+      <heading>114.119</heading>
+      <pitch>-22.5458</pitch>
+      <range>1960.12m</range>
+      <long>-118.0652888974363</long>
+      <lat>33.89608877929378</lat>
+      <height>-8.262530222535133</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+    <!-- BEGIN BUILDINGKIT DEMO -->
+    <viewpoint name="BuildingKit - Pittsburgh - Three rivers and downtown" long="-80.012" lat="40.4415" height="220" heading="35" pitch="-40" range="5200" />
+    <viewpoint name="BuildingKit - Pittsburgh - Three Sisters bridges" long="-80.0018" lat="40.446" height="225" heading="65" pitch="-35" range="1800" />
+    <viewpoint name="BuildingKit - Pittsburgh - Monongahela bridges" long="-79.9995" lat="40.432" height="225" heading="20" pitch="-35" range="2400" />
+    <viewpoint name="BuildingKit - Pittsburgh small - Downtown and rivers" long="-80.002" lat="40.446" height="225" heading="35" pitch="-40" range="3200" />
+    <!-- END BUILDINGKIT DEMO -->
+    <!-- Imported VRV art review: same real OSM coverage at three viewing distances. -->
+    <viewpoint name="VRV trees - close forest" long="24.49" lat="60.33" height="103.52"
+               heading="-20" pitch="-15" range="120" />
+    <viewpoint name="VRV trees - individual and canopy LODs" long="24.49" lat="60.33" height="103.52"
+               heading="-20" pitch="-25" range="2200" />
+    <viewpoint name="VRV trees - far canopy" long="24.49" lat="60.33" height="103.52"
+               heading="-20" pitch="-35" range="12000" />
+  </viewpoints>
+</map>

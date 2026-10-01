@@ -6,6 +6,7 @@
 #include "PlaceholderAssets.h"
 #include "Grass.h"
 #include "CanopyAssets.h"
+#include "TreeCards.h"
 #include <osgEarth/Registry>
 #include <osgEarth/VirtualProgram>
 #include <osg/Geode>
@@ -198,14 +199,54 @@ Chonk::Ptr AssetCatalog::acquire(const ScatterGroup& group, const std::string& n
     return acquireModel(group,name,false,progress);
 }
 
-Chonk::Ptr AssetCatalog::acquireModel(const ScatterGroup& group, const std::string& name, bool canopySource,
+Chonk::Ptr AssetCatalog::acquireImpostor(const ScatterGroup& group, const std::string& name, ProgressCallback* progress)
+{
+    ScatterGroup proxy = group;
+    proxy.lodPixels = proxy.minPixels = 0.0f;
+    proxy.proceduralGrass = false;
+    return acquireModel(proxy,name,false,progress,true);
+}
+
+Chonk::Ptr AssetCatalog::acquireTreeCards(const ScatterGroup& group, const std::string& name, unsigned slots,
     ProgressCallback* progress)
+{
+    if (slots < 8u || slots > 256u || (progress && progress->isCanceled())) return {};
+    auto source = acquireImpostor(group,name,progress);
+    if (!source) return {};
+    auto& impl = *_impl;
+    const auto identity = "tree-cards:"+group.asset+":"+std::to_string(name.size())+":"+name+":"+std::to_string(slots);
+    std::lock_guard<std::mutex> lock(impl.mutex);
+    auto& entry = impl.cache[identity];
+    if (auto resident = entry.model.lock()) return resident;
+    Chonk::Ptr model;
+    const auto status = createTreeCardTemplate(*source,slots,model);
+    if (progress && progress->isCanceled()) return {};
+    const std::size_t bytes = model ? model->_vbo_store.size()*sizeof(Chonk::VertexGPU)+
+        model->_ebo_store.size()*sizeof(Chonk::element_t) : 0u;
+    const bool denied = status.isOK() && bytes > impl.budget-impl.counts->bytes.load();
+    if (status.isError() || denied)
+    {
+        impl.error(denied ? "Tree card template exceeds content budget" : status.message(),denied);
+        return {};
+    }
+    model->name() = identity;
+    auto resident = std::make_shared<Resident>();
+    resident->model = model; resident->arena = impl.arena; resident->counts = impl.counts; resident->bytes = bytes;
+    resident->sources.push_back(source);
+    impl.counts->bytes.fetch_add(bytes); ++impl.counts->assets;
+    Chonk::Ptr alias(resident,model.get());
+    entry.model = alias;
+    return alias;
+}
+
+Chonk::Ptr AssetCatalog::acquireModel(const ScatterGroup& group, const std::string& name, bool canopySource,
+    ProgressCallback* progress, bool coarseOnly)
 {
     auto& impl = *_impl;
     // Only representation-affecting fields participate: density/range/placement edits reuse the same geometry.
     std::ostringstream key;
     key.imbue(std::locale::classic());
-    key << "model:" << canopySource << ':' << std::setprecision(9) << name.size() << ':' << name << ':' <<
+    key << "model:" << canopySource << ':' << coarseOnly << ':' << std::setprecision(9) << name.size() << ':' << name << ':' <<
         group.asset << ':' << group.lodPixels << ':' << group.minPixels << ':' << group.proceduralGrass;
     if (group.proceduralGrass)
         key << ':' << group.grassBlades << ':' << group.grassRadius << ':' << group.grassHeight << ':' <<
@@ -225,16 +266,16 @@ Chonk::Ptr AssetCatalog::acquireModel(const ScatterGroup& group, const std::stri
     try
     {
         auto found = impl.catalog.find(name);
-        for (unsigned lod = 0; lod < (!canopySource && group.lodPixels > 0.0f ? 2u : 1u); ++lod)
+        for (unsigned lod = 0; lod < (!canopySource && !coarseOnly && group.lodPixels > 0.0f ? 2u : 1u); ++lod)
         {
             osg::ref_ptr<osg::Node> node;
             if (name.empty()) node = group.proceduralGrass ? createGrassPatch(group, lod) :
-                createPlaceholderAsset(group.asset, lod);
+                createPlaceholderAsset(group.asset, coarseOnly ? 1u : lod);
             else if (found != impl.catalog.end())
             {
                 const URI& uri = canopySource ? (found->second.canopyModel.empty() ?
                     found->second.coarseModel : found->second.canopyModel) :
-                    (lod == 0u ? found->second.nearModel : found->second.coarseModel);
+                    (lod == 0u && !coarseOnly ? found->second.nearModel : found->second.coarseModel);
                 // This catalog supplies timed negative caching; a corrected file must not remain in URI's 404 cache.
                 Registry::instance()->unblacklist(uri.full());
                 node = uri.getNode(impl.readOptions, progress);
@@ -243,7 +284,7 @@ Chonk::Ptr AssetCatalog::acquireModel(const ScatterGroup& group, const std::stri
             StaticModel check;
             if (node) node->accept(check);
             if (!node || !check.valid || !model->add(node,
-                !canopySource && lod == 0u && group.lodPixels > 0.0f ? group.lodPixels : group.minPixels,
+                !canopySource && !coarseOnly && lod == 0u && group.lodPixels > 0.0f ? group.lodPixels : group.minPixels,
                 lod == 0u ? FLT_MAX : group.lodPixels, impl.factory))
             {
                 failure = "Cannot load static " + std::string(canopySource ? "canopy" : (lod ? "coarse" : "near")) +
@@ -263,6 +304,7 @@ Chonk::Ptr AssetCatalog::acquireModel(const ScatterGroup& group, const std::stri
                 break;
             }
     }
+    model->getBound(); // initialize immutable bounds before sharing across paging workers
     const auto bytes = contentBytes(*model, *impl.arena);
     const bool denied = failure.empty() && bytes > impl.budget - impl.counts->bytes.load();
     if (denied || !failure.empty())

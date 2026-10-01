@@ -94,9 +94,12 @@ float osgEarth::Procedural2::canopyBlend(double pixels, double threshold, float 
     return float(std::min(t,arrival));
 }
 
-unsigned osgEarth::Procedural2::canopySplit(unsigned low, unsigned high, float childWeight)
+osg::Vec2f osgEarth::Procedural2::canopyAlphaWeights(float childWeight)
 {
-    return low+unsigned(std::floor((high-low)*(1.0-std::max(0.0f,std::min(1.0f,childWeight)))+0.5));
+    const float t = std::max(0.0f,std::min(1.0f,childWeight));
+    // A2C masks overlap: half coverage in each draw does not cover the whole pixel. Fade the incoming
+    // representation up before fading the outgoing one down; recursive products retain one full path.
+    return osg::Vec2f(std::min(1.0f,2.0f*(1.0f-t)),std::min(1.0f,2.0f*t));
 }
 
 osg::StateSet* CanopyTransitionStates::get(unsigned low, unsigned high)
@@ -134,10 +137,11 @@ void osgEarth::Procedural2::configureCanopyTransition(Util::PagedNode2* node, do
         osg::Vec2f inherited(0,64);
         nv.getUserValue("oe_p2_coverage_interval",inherited);
         const unsigned low = unsigned(inherited.x()), high = unsigned(inherited.y());
-        const unsigned split = canopySplit(low,high,weight);
-        //! Traverses one interval without mutable per-camera Uniforms; visitor-local inheritance composes nested fades.
-        auto visit = [&](osg::Node* target, unsigned a, unsigned b)
+        const osg::Vec2f alpha = canopyAlphaWeights(weight);
+        //! Multiplies inherited page visibility by a handover ramp without mutating per-camera Uniforms.
+        auto visit = [&](osg::Node* target, float opacity)
         {
+            const unsigned a = low, b = low+unsigned(std::floor((high-low)*opacity+0.5f));
             if (a == b || !target) return;
             nv.setUserValue("oe_p2_coverage_interval",osg::Vec2f(float(a),float(b)));
             if (cv) cv->pushStateSet(states->get(a,b));
@@ -146,9 +150,9 @@ void osgEarth::Procedural2::configureCanopyTransition(Util::PagedNode2* node, do
             nv.setUserValue("oe_p2_coverage_interval",inherited);
         };
         for (unsigned i=0; i<node->getNumChildren(); ++i)
-            if (node->getChild(i) != children) visit(node->getChild(i),low,split);
-        visit(children,split,high);
-        return split < high;
+            if (node->getChild(i) != children) visit(node->getChild(i),alpha.x());
+        visit(children,alpha.y());
+        return children && alpha.y() > 0.0f;
     });
 }
 
@@ -184,8 +188,8 @@ void osgEarth::Procedural2::installCanopyShader(osg::StateSet* state)
                 if (clip != 0u)
                 {
                     uint code = clip-1u;
-                    vec2 low = vec2(code & 3u,(code >> 2u) & 3u)*0.25-0.5;
-                    vec2 high = low+float((code >> 4u)+1u)*0.25;
+                    vec2 low = vec2(code & 15u,(code >> 4u) & 15u)/16.0-0.5;
+                    vec2 high = low+float((code >> 8u)+1u)/16.0;
                     p2CanopyClipDistances = vec4(position.xy-low,high-position.xy);
                 }
                 uint mask = uint(-instance.local_uv.x);
@@ -208,22 +212,6 @@ void osgEarth::Procedural2::installCanopyShader(osg::StateSet* state)
 
 void osgEarth::Procedural2::installPopulationFadeShader(osg::StateSet* state)
 {
-    auto* vp = VirtualProgram::getOrCreate(state);
-    vp->setFunction("oe_p2_canopy_transition",R"glsl(
-        #pragma import_defines(OE_CHONK_OPAQUE)
-        uniform vec2 oe_chonk_coverage = vec2(0.0,1.0);
-        // Complementary intervals share the same pixel pattern in color, depth, and each shadow cascade.
-        void oe_p2_canopy_transition(inout vec4 color)
-        {
-            #ifndef OE_CHONK_OPAQUE
-            // The culler puts only complete coverage on the opaque path, preserving its discard-free shader.
-            if (oe_chonk_coverage.x <= 0.0 && oe_chonk_coverage.y >= 1.0) return;
-            uvec2 pixel = uvec2(gl_FragCoord.xy);
-            uint h = pixel.x*0x9e3779b9u ^ pixel.y*0x85ebca6bu;
-            h ^= h >> 16u; h *= 0x7feb352du; h ^= h >> 15u;
-            float rank = (float(h & 65535u)+0.5)/65536.0;
-            if (rank < oe_chonk_coverage.x || rank >= oe_chonk_coverage.y) discard;
-            #endif
-        }
-    )glsl",VirtualProgram::LOCATION_FRAGMENT_COLORING,-0.5f);
+    // Chonk applies the interval's width after material alpha/mip correction and before A2C or alpha testing.
+    state->setDefine("OE_CHONK_COVERAGE");
 }

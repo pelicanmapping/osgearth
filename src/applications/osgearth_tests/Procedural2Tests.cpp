@@ -110,6 +110,19 @@ TEST_CASE("Procedural2 population edits isolate paging and reject invalid change
     REQUIRE(oldTrees.valid());
     REQUIRE(shrubs.valid());
     REQUIRE(grass.valid());
+
+    // Debug controls are session-only and must not touch page identity, worker requests, or configuration.
+    const auto configuration = layer->options().getConfig().toJSON();
+    CHECK(layer->getClusterDebugMode() == ClusterDebugMode::OFF);
+    layer->setClusterDebug(ClusterDebugMode::CLUSTERS,2u);
+    CHECK(layer->getClusterDebugMode() == ClusterDebugMode::CLUSTERS);
+    CHECK(layer->getClusterDebugTiers() == 2u);
+    CHECK(populationPager(layer,"trees") == oldTrees);
+    CHECK(layer->options().getConfig().toJSON() == configuration);
+    osg::Vec3f debug;
+    REQUIRE(layer->getStateSet()->getUniform("oe_p2_cluster_debug")->get(debug));
+    CHECK(debug == osg::Vec3f(2,0,1));
+    layer->setClusterDebug(ClusterDebugMode::OFF);
     CHECK(source->requests.empty());
 
     auto profile = Profile::create("global-geodetic");
@@ -149,6 +162,10 @@ TEST_CASE("Procedural2 population edits isolate paging and reject invalid change
     osg::Vec2f quality;
     REQUIRE(newTrees->getStateSet()->getUniform("oe_chonk_sse_adjust")->get(quality));
     CHECK(quality.x() == 50.0f);
+    CHECK(newTrees->getStateSet()->getDefinePair("OE_CHONK_SSE_LOD_ONLY") != nullptr);
+    CHECK(newTrees->getStateSet()->getDefinePair("OE_CHONK_SSE_PIXEL_CUTOFF") == nullptr);
+    CHECK(grass->getStateSet()->getDefinePair("OE_CHONK_SSE_LOD_ONLY") == nullptr);
+    CHECK(grass->getStateSet()->getDefinePair("OE_CHONK_SSE_PIXEL_CUTOFF") != nullptr);
     CHECK(quality.y() == Approx(1.0f/25.0f));
     REQUIRE(grass->getStateSet()->getUniform("oe_chonk_sse_adjust")->get(quality));
     CHECK(quality.x() == 0.0f);

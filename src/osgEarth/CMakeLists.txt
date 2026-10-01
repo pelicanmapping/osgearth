@@ -74,6 +74,7 @@ set(TARGET_GLSL
     CascadeDraping.glsl
     Chonk.glsl
     Chonk.Culling.glsl
+    Chonk.ScreenSize.glsl
     Chonk.HiZ.glsl
     Decals.h.glsl
     Decals.glsl

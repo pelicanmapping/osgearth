@@ -184,8 +184,8 @@ def boulder():
 
 def write_dds(atlas, path):
     """Write bottom-up BC3 plus every mip for OSG; fail instead of silently saving uncompressed runtime art."""
-    if atlas.mode != 'RGBA' or any(size < 1 or size & (size-1) for size in atlas.size):
-        raise ValueError('Starter atlases must be RGBA with power-of-two dimensions')
+    if atlas.mode != 'RGBA' or any(size < 1 for size in atlas.size):
+        raise ValueError('Starter atlases must be nonempty RGBA images')
     levels, header = [], None
     mip = atlas
     while True:

@@ -1,17 +1,221 @@
 # osgEarthProcedural2 development plan
 
 Rendering checkpoint: **Step 4B initial forest hierarchy -- detailed trees, medium canopy, and far canopy on real OSM coverage.**
-Current checkpoint: **Step 4B in progress: directly paged, two-scale canopy hierarchy. Runtime area modifiers moved to Later.**
-Latest addition: **Offline BC3/mipmap preparation for starter atlases; investigating loading stalls and asset residency.**
-Next planned checkpoint: **Step 4B color/coverage matching and total resident page/upload budgets; generalize aggregation policy across populations.**
+Current checkpoint: **Step 4B art detour: imported VRV trees and generated LODs in `tests/a.earth`. Step 4A editable exclusion overlays are available.**
+Latest addition: **October 1: replacing stretched canopy templates with instanced clusters of individual tree cards. Exact-placement prototype with corrected A2C handovers. Tree quality selects representations; maximum range controls visibility.**
+Next planned checkpoint: **Step 4B tree-card visual evaluation and total resident page/upload budgets; consider approximate coverage clusters if exact placement costs too much.**
 The main OSM scene retains agricultural rows. `tests/procedural2-canopy-osm.earth` is the new forest hierarchy demo.
 Step 2C procedural grass remains optional; adoption is still undecided.
+
+## Current Step 4B direction: tree-card clusters
+
+The active forest hierarchy replaces the stretched nine-piece canopy templates with shared card-slot meshes.
+The first version groups the **actual accepted placements**: species choice, scale, rotation, exclusions, structured
+rows, explicit source points, and individual terrain-clamped roots remain intact. Exact matching is a prototype
+choice, not an architectural requirement. A later placement provider may generate approximate coverage groups
+while feeding the same renderer; reusable art and bounded resident metadata remain the goal.
+
+Each species shares a coarse impostor mesh repeated into a fixed number of slots. A page supplies four vec4s
+(64 bytes) per tree for its affine transform and local tree sphere (used for the range fade). Chonk draws one instance per spatial cluster, with a conservative
+bound, and optionally GPU-culls that cluster. Draw-local data is bound immediately before drawing because
+Chonk flattens source StateGraphs. No per-location texture baking or permanent world-sized atlas is required.
+Source textures stay precompressed, with the existing normal/PBR, A2C, alpha-ramp, and crude-shadow paths.
+
+The ImGui controls are **Medium trees/cluster** (32 by default) and **Far trees/cluster** (64), each 8..256.
+These are maximum counts per species/spatial group, not tree-size multipliers. Both tiers retain every accepted
+tree; the far tier uses larger culling groups and coarser paging. The old footprint, fullness, and height controls
+are retired from the live renderer and panel. Their parser/API and old canopy utilities remain for compatibility
+and historical fixtures. `canopy` and `canopy_far` still select hierarchy tiers; the additive quality budget,
+independent GPU-culling switches, maximum range, and transitions remain available.
+
+This prototype reduces instance/culling records, **not the number of tree cards or their fragment work**.
+Exact placement also requires generating and height-sampling the far forest, unlike the old coverage-only path.
+Existing per-cell and per-request limits still apply atomically; overflow/cancellation never publishes half a forest.
+Resident tree tables are paged data, separate from the asset-catalog byte budget, like existing instance buffers.
+Total resident geometry/table/upload budgeting and a cheaper coverage-based population remain follow-up work.
+CPU triangle intersections do not reconstruct this shader-expanded representation; use detailed trees/terrain for picking.
+
+Validation: optimized RelWithDebInfo build/install succeeds. The vegetation regression selection passes 58 cases;
+new CPU checks reconstruct every clustered transform, verify conservative bounds and matching parent/child IDs,
+reject invalid transforms, and check shared source ownership. GPU comparisons match ordinary individual impostors
+in color, depth, and shadow passes with GPU culling enabled and disabled across multiple independent page buffers.
+The main testing scene remains `tests/a.earth`; it now explicitly selects 32/64-tree clusters. No benchmarks were run.
+
+
+### Tree-card transition correction -- October 1
+
+The first cluster prototype inherited complementary parent/child alpha ramps. These were incorrect for A2C:
+two half-opacity copies can cover the same samples, exposing the ground instead of reconstructing a full forest.
+This produced the pale page-sized bands reported during visual evaluation. The old interval partition was a
+holdover from screen-door transitions; there is still no dithering in the active Vegetation2 path.
+
+Handover now brings the incoming representation to full coverage before fading the outgoing representation.
+For child weight t, parent/child alphas are min(1,2*(1-t)) and min(1,2*t). Nested handovers multiply those weights
+by inherited visibility; at least one complete path keeps that inherited visibility. This is an overlapping A2C
+replacement, not additive transparency. It retains the existing screen-error band, arrival timing, parent fallback,
+outer-page disappearance, tree density, and independent culling controls. No new textures, shader work, or finer
+shadow treatment is introduced; the existing hard-cutout shadow behavior is retained.
+
+GPU regression exercises actual asynchronous replacement callbacks with independent page buffers, matching
+individual/clustered cards at five transition positions, two/three tiers, partial outer visibility, and all four
+medium/far culling combinations. The original two-tier midpoint retained only about 68% of reference color
+coverage in the fixture; corrected transitions stay within the 1.5% reference tolerance. Settled color,
+depth, and shadow comparisons still pass. The production forest capture with imagery/buildings removed also
+shows the recovered coverage. The optimized build/install and all 58 selected vegetation regression cases pass.
+Step 4B remains in progress; no benchmarks were generated.
+
+### Tree quality and visible range separated -- October 1 (current policy)
+
+The requested behavior is now: **Maximum range controls how far the forest is visible; global SSE plus the
+population Quality offset controls which representation is drawn.** Increasing error brings individual
+impostors, medium clusters, and far clusters closer. Lowering it retains finer representations farther out;
+zero offset still inherits global SSE. Medium-only and individuals-only modes keep the same range policy.
+
+The previous per-tree disappearance cutoff could erase most of the forest before the canopy handovers, even
+with offset zero. Tree populations now opt into `OE_CHONK_SSE_LOD_ONLY`: the final representation has no
+screen-size disappearance threshold. This also removes the pixel cutoff from the individual fallback while
+cluster pages load. Neither individual members nor the enclosing cluster/page are removed by the quality
+budget. Cluster bounds still drive spatial culling; the hierarchy's projected reference error still drives
+refinement. The existing maximum-range fade (last fifth of the range) and optional explicit density thinning
+remain independent. This supersedes the tree-visibility policies in the next two historical sections.
+
+The generic Chonk member-LOD and literal-pixel policies remain available to other callers. Tree member metadata
+is retained for group-independent maximum-distance fades in both GPU culling modes; the tree path skips its
+member projection calculation. Other population types retain their existing screen-size disappearance policy.
+No new quality slider, page rebuild, asset regeneration, or earth-file retuning is required. The disabled
+"Cull below" field explains that tree visibility uses Maximum range instead. Cluster debug colors remain live.
+
+Validation targets the actual asynchronous page callbacks: increasing global SSE or the additive offset must
+select individuals, medium, then far while settled forest coverage stays constant. GPU comparisons cover
+multiple cluster sizes, both culling modes, perspective/orthographic projections, very large quality budgets,
+and maximum-range rejection. The optimized RelWithDebInfo build/install and all 89 selected vegetation/Chonk
+regression cases pass (880,048 assertions). The two targeted GPU workers pass 1,107 assertions. No benchmarks
+were generated. Forest-only captures derived from `tests/a.earth`, retaining its source/render levels and 30km
+range, show global SSE 25 plus offset 200 bringing medium/far tiers closer than offset zero, with distant
+coverage retained. Captures: `build/forest-range-quality-near-0.png` and
+`build/forest-range-quality-near-200.png`. Step 4B remains in visual evaluation.
+
+### Tree-sized quality across cluster tiers -- October 1 (superseded for trees)
+
+Global SSE plus the population offset now governs each clustered tree using the same literal pixel visibility
+cutoff and alpha ramp as an individual impostor. Group bounds remain for spatial culling. Cluster size therefore
+cannot make small trees survive a higher quality budget merely by enlarging their enclosing bound. Maximum range
+and its final distance fade also evaluate the member tree center, independently of cluster grouping.
+
+Each tree's auxiliary table adds a local bounding sphere to its three transform vectors (64 bytes total).
+A generic opt-in Chonk member-LOD contract describes the record layout and source cutoff. Its compute path
+rejects a whole cluster when every member is below the cutoff/range. The expansion shader evaluates individual
+members, collapses rejected cards before rasterization, and applies ordinary A2C alpha fades to survivors.
+With cluster GPU culling disabled, the vertex path still honors the same quality policy; fully rejected clusters
+retain vertex work in that comparison mode. Partial clusters still use fixed-slot geometry. No dithering or
+per-frame CPU readback is involved. Shared projection/fade GLSL prevents the two policies drifting apart.
+
+Tree populations no longer use the separate page-diameter disappearance rule, since different page levels gave
+the same trees different cutoffs. Their CPU hierarchy still chooses representations with the combined error,
+and the outer range still bounds paging. Other populations retain their page fade. Quality-only edits remain
+live and reuse resident placement data. This change reduces rendered coverage; avoiding distant feature queries
+and height sampling when all trees would be too small remains a paging/budget follow-up.
+
+GPU validation compares identical individual and clustered trees at 8/32/128-tree group sizes, perspective and
+orthographic views, partial/full rejection, range fades, both GPU-culling modes, and equivalent global/offset
+budgets. Restoring quality restores the same forest. A correctness query confirms zero generated primitives
+for fully rejected GPU-culled clusters. The earlier A2C handover regression still passes. The optimized build/install,
+59 selected vegetation cases, and 29 Chonk cases pass. Same-camera forest captures at global SSE 25 and 200 show
+the distant tree cutoff moving inward while nearby coverage remains intact. These first captures used the old
+normalized cutoff; the literal-pixel correction below supersedes their quality settings. No benchmarks generated.
+
+### Literal pixel visibility correction -- October 1 (superseded for trees)
+
+The first member-sized implementation shared the individual renderer's old normalization, so both paths agreed
+while the slider's units were wrong. With global SSE 25, offset 400 and min_pixels 0.75, the old disappearance
+threshold was (25+400)/25*0.75 = 12.75px instead of the intended 425px. Equivalence tests alone missed that error.
+
+Vegetation now opts into a literal visibility threshold: max(effective_error, min_pixels), with the existing LOD
+scale applied consistently. The reference-25 normalization remains only for the authored mesh/impostor handover.
+Every individual LOD respects the final visibility floor; clustered trees use the same floor per member, with
+GPU culling on or off. Group bounds still govern spatial culling only, maximum range remains a cap, and the A2C
+fade band remains around the size threshold. This changes the visual meaning of existing quality settings:
+there is deliberately no compatibility divisor or automatic retuning to retain the old distant coverage.
+Ordinary Chonk clients keep their prior behavior unless they opt into the literal-pixel policy.
+
+An independent GPU unit check uses a one-world-unit-per-pixel orthographic projection and tree bounds measuring
+20, 80 and 200 pixels. It checks visible, fading and rejected cases against known screen sizes, including global
+25 plus offset 400 and the equivalent global 425. It covers single/two-LOD individuals and clusters with both
+culling settings. The wider grouping/projection comparison also uses the literal-pixel production policy.
+Validation: optimized RelWithDebInfo build/install passes, as do all 59 selected vegetation and 29 Chonk cases.
+The pixel/cluster GPU worker passes 409 assertions. No benchmarks generated.
+
+### Live cluster visualization -- October 1
+
+The Vegetation2 panel has a session-only **Cluster visualization** section: Off, Tier colors, or Cluster colors,
+with independent medium/far selection. Tier mode uses cyan for medium and orange for far. Cluster mode varies
+cool/warm hues per spatial culling group. Individual trees retain their material appearance. The controls queue
+an update-thread uniform edit and never rebuild placement pages, reload assets, or change saved earth settings.
+
+Colors derive from stable cluster metadata, not the compacted GPU draw index. Far membership occupies an exact
+quarter fraction of the existing negative member-count coordinate; rounding still recovers the same count in
+all cull/expansion paths. This avoids extra geometry, instance buffers or a diagnostic draw pass. Color-only
+shading preserves A2C, alpha ramps, normal visibility, and depth/shadow passes. It does not draw bounds for hidden
+clusters or fill the empty gaps between trees. Both tiers can be visible during the normal overlapping handover.
+
+The capture application accepts `--cluster-debug tiers` or `--cluster-debug clusters` for reproducible examples.
+The Coarse LOD below control remains Apply-based, as requested; this diagnostic adds only live visualization.
+Validation: optimized RelWithDebInfo build/install and 60 selected vegetation cases pass. The new GPU worker
+checks tier selection, draw-order/culling stability, unchanged alpha/depth coverage, unaffected individuals,
+normal-color restoration, and exclusion from the depth pass. The forest capture uses a temporary finer-paged
+fixture (source/render level 17, maximum range 3km, global SSE 10) to expose both tiers at once; main demo settings
+remain unchanged. No benchmarks generated.
+
+The earlier canopy-art checkpoints below describe the superseded prototype, not the active tree-card renderer.
+
+The PBR art experiment supplies the other demo catalogs; `tests/a.earth` now selects local VRV trees. It retains the starter art
+for comparison. Generated trees stay below 1,000 triangles; imported VRV trees use 4,273ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“6,178. All individual/canopy proxies remain six triangles. The overlay editor
+and Step 4B architecture are unchanged. See [PBR art checkpoint](procedural2-pbr-art.md).
+
+The source-normal correction keeps six triangles per proxy and 54 per assembled canopy.
+Compact precompressed atlases fit the current 64 MiB catalog budget (55.2 MiB in the mixed-LOD
+OSM check). Runtime crown shading now reorients the baked normal distribution toward the
+actual view and suppresses grazing cards, avoiding the bright-cap/dark-wall appearance.
+Color/normal bake, runtime frame, camera-depth, shadow and A2C checks pass; crossed-card
+parallax and self-shadow approximation remain limitations. Step 4B remains in progress.
+The user accepts the crude impostor shadows; improving their geometry/depth is not required for this checkpoint.
+The stationary shimmer follow-up found VisibleLayer's parent blending override defeating the child blend-disable.
+Vegetation2 now protects its unblended A2C state, with a regression using actual layer state and reordered GPU instances.
+The follow-up removes explicit pixel-pattern dithering: individual LOD/range fades, page arrival/disappearance, and
+canopy handovers use alpha ramps with MSAA/A2C. Material mip-alpha compensation is saturated before the fade so it
+cannot restore fading vegetation at distance. Depth/shadow targets retain hard cutouts and crude impostor silhouettes.
+This supersedes the historical screen-door transition descriptions below; no placement or density change is involved.
+The leaf-shadow follow-up applies the same mip-alpha compensation in shadow/depth passes as color rendering.
+Filtered leaf textures were otherwise averaging below the hard shadow cutoff and casting only trunks. Canopy shade
+is restored at the existing shadow-map resolution; the requested coarse shadow appearance is retained.
+
+The far-coverage follow-up separates art sizing from nominal LOD error. Each tier uses a fixed reference scale
+for handovers, plus measured terrain-fit residual; footprint multipliers no longer increase that reference error.
+The shared crown layout overlaps more, and `canopy_cover_scale` (ImGui **Canopy fullness**, default 1, range 0.25..4)
+calibrates crown coverage from population density and configured canopy height. It affects both aggregate tiers;
+individual placement, density, and the global-plus-population quality budget remain separate. Apply population
+rebuilds the affected pages. This remains an artistic coverage estimate, not measured source-tree crown area.
+Local VRV canopy art now bakes thirteen tightly packed source trees per reusable piece, still six proxy triangles;
+assembled aggregates retain nine pieces / 54 triangles and the same precompressed texture dimensions.
+Larger footprints also keep the default terminal coverage/terrain resolution, with up to four refinement splits
+and a 16x16 clipping grid. Exclusions remain conservative; unresolved slivers can still be omitted. This supersedes
+the size/error coupling and fixed two-split clipping descriptions in the historical checkpoints below.
+
+The multisampling follow-up removes Vegetation2's local `GL_MULTISAMPLE` mode. The application sample-count request
+creates multisample storage and OpenGL starts with multisampling enabled, but tracking a local ON in OSG introduced
+an OFF fallback when leaving the vegetation state. This disabled multisampling for sibling draws and subsequent
+frames. Vegetation2 now inherits that switch and scopes only A2C and blending. Existing per-framebuffer shader
+fallbacks and shadow cutouts are unchanged; no application/root workaround or extra shader work is added.
+Build/install and GPU inheritance checks pass for ordinary draws before/after the actual layer, multiple frames,
+single/four-sample targets, both culling paths, explicit application ON/OFF/ON, and layer removal. Existing ImGui
+state restoration, A2C order-independence, and leaf-shadow checks also pass. Step 4B remains in progress.
 
 September 28 loading-stall checkpoint: all nine starter atlases now use BC3/DXT5 DDS payloads with complete
 mip chains. The baker preserves editable PNGs and supports `--compress-only`; existing earth files pick up
 the prepared art through their unchanged catalog/model paths. Build/install and all 45 Procedural2 tests passed,
 including actual GPU checks and DDS format, mip completeness, color, cutout, and orientation validation.
-This removes render-time compression/mip generation for these atlases; no frame-stall reduction has been measured.
+This removes render-time compression/mip generation for these atlases. The user confirmed vegetation-only stalls stopped
+in fresh flights; no benchmark measurements were generated.
 Asset residency remains tied to the final live page/template owner. Investigate eviction/reupload churn if stalls
 persist, and consider a bounded warm cache for source art. Step 4B remains in progress; no benchmarks generated.
 See [loading-stall investigation](procedural2-stall-investigation.md).
@@ -30,10 +234,10 @@ and undergrowth have independent settings. Rocks exercise the shared placement p
 | 2B controls | ImGui population editor with safe per-population rebuilds | Complete |
 | 2C (optional) | Procedural grass patches: GPU blade generation, conservative bounds, LOD, and visual evaluation | Prototype complete; adoption undecided |
 | 3 | Original starter art, representation-specific asset loading, canopy aggregate prototypes and bounded residency | Starter checkpoint complete |
-| 4A | Composable geographic sources, extensible placement strategies, exclusions/overlaps | Initial scope complete; runtime area modifiers deferred |
+| 4A | Composable geographic sources, extensible placement strategies, exclusions/overlaps | Initial scope complete; editable exclusion overlay checkpoint added |
 | 4B | Population aggregation by default, beginning with two forest scales, terrain-aware coverage and transitions | In progress; core scalability milestone |
 | 5 | Wind, production material/shadow polish, terrain attachment, geographic and multi-camera validation | Planned |
-| Later | Application-owned runtime area modifiers, local revisions, edit/paging/shadow consistency | Deferred September 27; not a prerequisite for 4B |
+| Later | Density/parameter modifiers, feathering/painting, catalog editor, production persistence | Hard-exclusion subset brought into 4A September 28 |
 | Later | Evaluate GPU instance clamping using independently paged elevation textures | Candidate; deferred |
 | Later | Terrain splatting sharing landscape inputs; evaluate water separately | Future scope |
 
@@ -54,7 +258,10 @@ remain separate from candidate placement. See [coverage and exclusion design](pr
 The first runnable 4A checkpoint establishes OSM coverage, composable feature inputs, placement extension points,
 and boundary correctness. The structured-layout checkpoint adds an application strategy registry and row fixtures,
 with real agricultural OSM polygons in the main scene and synthetic parcels in an isolated fixture.
-Runtime area modifiers and their interactive demos moved to Later on September 27. Step 4B is active.
+Runtime area modifiers moved to Later September 27. On September 28 the user brought a scoped subset back into 4A:
+catalog-driven polygon and buffered-line exclusions, interactive outline tools, undo/redo, and local GeoJSON persistence.
+Keep catalog, document, storage adapter, composition provider, and UI separate. SQLite/MVT or other storage remains a
+later application choice. See [editable feature overlay design](procedural2-feature-overlays.md).
 
 Project terminology: **land cover** describes natural ground/surface cover, such as forest, water, tundra, and sand.
 **Land use** describes human use, such as vineyards, roads, and urban areas. Preserve these as distinct inputs;
@@ -178,14 +385,14 @@ Current 4B implementation checkpoint (September 27):
   Large terrain residuals trigger subdivision; measured residual enters projected-error refinement afterwards.
 - SimplePager still owns loading and REPLACE residency. An optional cull traversal hook overlaps representations
   across a screen-error band and retains the full parent until the complete child set is merged. A merge-time ramp
-  introduces late-arriving pages. Complementary screen-door intervals compose through nested levels, without blended
-  draw ordering or per-instance animation uploads. Normal pages retain Chonk's discard-free opaque path; only partially
+  introduces late-arriving pages. Complementary alpha weights compose through nested levels and feed A2C, without
+  conventional alpha blending, explicit pixel-pattern dithering, or per-instance animation uploads. Normal pages retain Chonk's discard-free opaque path; only partially
   covered pages require the cutout path. Immutable interval states are shared by a population (at most 2145).
 - All canopy levels keep distance-based load priority. Projected-error refinement runs separately, so detail requests
   no longer outrank initial coarse coverage merely because their priorities used different units.
 - ShadowCaster paging and blend weights use the primary view's projection, viewport, LOD scale, and shared merge time.
-  Color/depth/shadow shader variants apply the same interval rule in each render target. Parents and children share
-  AssetCatalog art; canceled child sets cannot publish partial replacements. No worldwide unique-art bake or disk cache.
+  Color uses the composed alpha weight with A2C; depth/shadow passes threshold that weight at one half and retain
+  the existing hard silhouette cutout. Parents and children share AssetCatalog art; canceled child sets cannot publish partial replacements. No worldwide unique-art bake or disk cache.
 - `canopy_pixels` defaults to 48 and shares one projected-error budget across both aggregate handovers.
   Higher values retain aggregates closer to the camera. `canopy_height` controls the prototype crown height.
   `canopy_transition` is the fractional overlap around the nominal switch (default 0.25, range 0..0.5).
@@ -216,7 +423,9 @@ individual-placement cap, checking that aggregation does not enumerate that fine
 
 ### Later -- runtime area modifiers
 
-Deferred at the user's request September 27, 2026. Preserve these requirements without blocking Step 4B:
+Originally deferred September 27. The September 28 4A checkpoint implements local hard-exclusion edits, immutable
+snapshots, regional invalidation and interactive outlines. The broader density/parameter/brush features below remain
+Later; the catalog-definition editor and production persistence/backend selection are also deferred:
 
 - Make exclusions and local vegetation parameters editable by the application at runtime. Define geographic area
   modifiers with stable handles, add/update/remove operations, population filters, and explicit priority/composition
@@ -517,9 +726,9 @@ Validation:
 [Forest overview](../../tests/procedural2-lod-overview.png) |
 [Distant trees](../../tests/procedural2-lod-distant.png)
 
-Remaining representation limits: screen-door patterns can be visible or shimmer during motion. Shadow membership
-uses primary-camera distance, but the shadow shader keeps its existing hard alpha test rather than matching the
-color pass's dither. Canopy aggregates, polished transition coverage, multi-camera validation, production art,
+Historical Step 2B representation limits (superseded September 30): screen-door patterns could be visible or
+shimmer during motion. Vegetation2 now uses alpha ramps with A2C instead. Shadow membership uses primary-camera
+distance, and the shadow shader keeps its hard alpha test. Canopy aggregates, polished transition coverage, multi-camera validation, production art,
 and memory/upload budgets still need work. Step 3 develops art, asset loading, residency, and canopy prototypes
 using synthetic coverage. Step 4 replaces uniform worldwide synthetic coverage with modular geographic inputs
 and validates canopy representations against real coverage boundaries.
@@ -1216,8 +1425,8 @@ Coverage/terrain refinement still clips the original art instead of placing a fr
 
 These are evaluation controls for the current shared templates. A larger footprint stretches its existing source art
 horizontally; it does not generate more source trees inside the clump. The longer-term parent representation still needs
-to summarize more trees without enlarging each tree. Larger footprints also increase projected error, so changing a size
-can shift its SSE handover distance at the same `canopy_pixels`. Coverage stays approximately constant in uniform forest,
+to summarize more trees without enlarging each tree. At this historical checkpoint larger footprints increased projected
+error and shifted handovers; the September 30 correction separates those controls. Coverage stays approximate in uniform forest,
 while conservative exclusion handling can remove a different amount near boundaries. This is not a constant apparent
 individual-tree-size or exact-coverage comparison. Heights remain separately controlled by `canopy_height`.
 
@@ -1250,10 +1459,10 @@ the explicit Apply workflow.
 
 That same budget now governs:
 
-- GPU individual mesh/impostor or procedural-grass representation and size culling. Existing `lod_pixels` and
-  `min_pixels` are advanced authored cutoffs calibrated at a 25px effective budget (the default global SSE). They
-  scale by effective error / 25. This preserves their previous meaning at the default quality and keeps asset
-  geometry shared across populations with different quality adjustments. The Chonk adjustment is opt-in; other
+- GPU individual mesh/impostor or procedural-grass representation and size culling. Originally both `lod_pixels`
+  and `min_pixels` scaled by effective error / 25. The October 1 literal-pixel correction supersedes this for
+  visibility: max(effective_error, min_pixels) is the cutoff. Only the authored `lod_pixels` representation
+  threshold retains reference-25 scaling. Asset geometry remains shared across different quality adjustments. The Chonk adjustment is opt-in; other
   Chonk users retain existing behavior. The population-level `oe_sse=1` override is removed.
 - CPU canopy refinement/blending. Projected representation error in meters is converted to pixels and compared
   against the combined budget. Global SSE is no longer subtracted from projected page diameter before a differently
@@ -1272,8 +1481,8 @@ This is a conservative spatial proxy, not a measured albedo/contrast/silhouette 
 appearance summaries remain future 4B refinements. Population pixel error is a quality target, not a frame-time limit.
 Color, depth, and shadow shader paths use matching page intervals; missing primary projection data retains content.
 
-The independent footprint selectors remain advanced art/partition controls. Increasing a footprint still increases
-its estimated representation error and can bring finer tiers in farther out at a fixed quality budget. Density,
+The independent footprint selectors remain advanced art/partition controls. The September 30 correction fixes the nominal
+handover reference independently of footprint size; measured terrain-fit residual can still request finer detail. Density,
 source IDs, placement, exclusions, and maximum range are not modified by quality. Maximum range remains a hard cap
 with its existing distance fade. Structured rows and other populations use their currently supported representation
 paths; this change does not add new aggregate backends.

@@ -88,20 +88,20 @@
         <seed>17</seed>
         <asset_budget_mb>64</asset_budget_mb>
         <assets>
-            <asset name="broadleaf" near="../data/procedural2/starter/broadleaf-near.osg"
-                coarse="../data/procedural2/starter/broadleaf-coarse.osg"/>
-            <asset name="conifer" near="../data/procedural2/starter/conifer-near.osg"
-                coarse="../data/procedural2/starter/conifer-coarse.osg"/>
-            <asset name="shrub" near="../data/procedural2/starter/shrub-near.osg"
-                coarse="../data/procedural2/starter/shrub-coarse.osg"/>
-            <asset name="grass-tuft" near="../data/procedural2/starter/grass-tuft-near.osg"
-                coarse="../data/procedural2/starter/grass-tuft-coarse.osg"/>
-            <asset name="fern" near="../data/procedural2/starter/fern-near.osg"
-                coarse="../data/procedural2/starter/fern-coarse.osg"/>
-            <asset name="boulder" near="../data/procedural2/starter/boulder-near.osg"
-                coarse="../data/procedural2/starter/boulder-coarse.osg"/>
-            <asset name="canopy-cluster" near="../data/procedural2/starter/canopy-cluster-near.osg"
-                coarse="../data/procedural2/starter/canopy-cluster-coarse.osg"/>
+            <asset name="broadleaf" near="../data/procedural2/pbr/broadleaf-near.osg"
+                coarse="../data/procedural2/pbr/broadleaf-coarse.osg"/>
+            <asset name="conifer" near="../data/procedural2/pbr/conifer-near.osg"
+                coarse="../data/procedural2/pbr/conifer-coarse.osg"/>
+            <asset name="shrub" near="../data/procedural2/pbr/shrub-near.osg"
+                coarse="../data/procedural2/pbr/shrub-coarse.osg"/>
+            <asset name="grass-tuft" near="../data/procedural2/pbr/grass-tuft-near.osg"
+                coarse="../data/procedural2/pbr/grass-tuft-coarse.osg"/>
+            <asset name="fern" near="../data/procedural2/pbr/fern-near.osg"
+                coarse="../data/procedural2/pbr/fern-coarse.osg"/>
+            <asset name="boulder" near="../data/procedural2/pbr/boulder-near.osg"
+                coarse="../data/procedural2/pbr/boulder-coarse.osg"/>
+            <asset name="canopy-cluster" near="../data/procedural2/pbr/canopy-cluster-near.osg"
+                coarse="../data/procedural2/pbr/canopy-cluster-coarse.osg"/>
         </assets>
         <profile>global-geodetic</profile>
         <elevation_resolution>10m</elevation_resolution>

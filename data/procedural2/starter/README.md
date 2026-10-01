@@ -56,8 +56,9 @@ osgearth_imgui procedural2-art.earth --sky2 --shadows --nvgl --samples 4 --veget
 osgearth_imgui procedural2-canopy.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
 ```
 
-The original `procedural2.earth` still provides the geometric placeholder comparison;
-`procedural2-grass.earth` retains the separate optional GPU grass experiment.
+The Vegetation2 demo earth files now select the textured PBR catalog in `../pbr`.
+This original starter set remains available by switching the catalog paths back to this directory;
+`procedural2-grass.earth` retains the separate optional GPU grass experiment with PBR asset fallback.
 
 The catalog accepts static groups, affine matrix transforms and geometry with standard textures.
 Animated models, callbacks, custom programs, nested LOD and paging nodes are rejected. Each entry

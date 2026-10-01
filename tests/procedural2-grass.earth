@@ -11,22 +11,51 @@
     </TMSElevation>
     <Vegetation2 name="Optional grass experiment">
         <seed>17</seed>
+        <asset_budget_mb>64</asset_budget_mb>
+        <assets>
+            <asset name="broadleaf" near="../data/procedural2/pbr/broadleaf-near.osg"
+                coarse="../data/procedural2/pbr/broadleaf-coarse.osg"
+                canopy="../data/procedural2/pbr/broadleaf-canopy.osg"/>
+            <asset name="conifer" near="../data/procedural2/pbr/conifer-near.osg"
+                coarse="../data/procedural2/pbr/conifer-coarse.osg"
+                canopy="../data/procedural2/pbr/conifer-canopy.osg"/>
+            <asset name="shrub" near="../data/procedural2/pbr/shrub-near.osg"
+                coarse="../data/procedural2/pbr/shrub-coarse.osg"/>
+            <asset name="grass-tuft" near="../data/procedural2/pbr/grass-tuft-near.osg"
+                coarse="../data/procedural2/pbr/grass-tuft-coarse.osg"/>
+            <asset name="fern" near="../data/procedural2/pbr/fern-near.osg"
+                coarse="../data/procedural2/pbr/fern-coarse.osg"/>
+            <asset name="boulder" near="../data/procedural2/pbr/boulder-near.osg"
+                coarse="../data/procedural2/pbr/boulder-coarse.osg"/>
+            <asset name="canopy-cluster" near="../data/procedural2/pbr/canopy-cluster-near.osg"
+                coarse="../data/procedural2/pbr/canopy-cluster-coarse.osg"/>
+        </assets>
         <profile>global-geodetic</profile>
         <elevation_resolution>10m</elevation_resolution>
         <groups>
             <group name="trees" asset="trees" density="80" cell_level="16" render_cell_level="14"
-                max_range="3000" lod_pixels="32"/>
+                max_range="3000" lod_pixels="32">
+                <models><model>broadleaf</model><model>conifer</model></models>
+            </group>
             <group name="shrubs" asset="shrubs" density="400" cell_level="18" render_cell_level="16"
-                max_range="700" lod_pixels="18"/>
+                max_range="700" lod_pixels="18">
+                <models><model>shrub</model></models>
+            </group>
             <!-- Density is patches/km2: 250,000 patches x 64 blades = 16 nominal near blades/m2. -->
             <group name="grass" asset="grass" procedural_grass="true" density="250000"
                 cell_level="20" render_cell_level="17" max_range="180" lod_pixels="60" min_pixels="0.75"
                 grass_blades="64" grass_radius="1.5" grass_height="0.65" grass_width="0.025" grass_wind="0.15"
-                min_scale="0.85" max_scale="1.15" max_per_batch="65536"/>
+                min_scale="0.85" max_scale="1.15" max_per_batch="65536">
+                <models><model>grass-tuft</model></models>
+            </group>
             <group name="undergrowth" asset="undergrowth" density="2000" cell_level="19" render_cell_level="17"
-                max_range="280" lod_pixels="12"/>
+                max_range="280" lod_pixels="12">
+                <models><model>fern</model></models>
+            </group>
             <group name="rocks" asset="rocks" density="100" cell_level="17" render_cell_level="15"
-                max_range="1000" lod_pixels="20"/>
+                max_range="1000" lod_pixels="20">
+                <models><model>boulder</model></models>
+            </group>
         </groups>
     </Vegetation2>
     <viewpoints home="0" time="0" map_keys="false">

@@ -44,6 +44,11 @@ namespace osgEarth { namespace Procedural2
         //! Reads/converts a bundle once across concurrent workers. Empty name requests the built-in fallback/grass.
         //! Returns null on cancellation, invalid data or budget pressure; callers may request a fallback.
         Chonk::Ptr acquire(const ScatterGroup&, const std::string& name, ProgressCallback* = nullptr);
+        //! Loads only the individual coarse asset, sharing it across pages without reading near or canopy art.
+        Chonk::Ptr acquireImpostor(const ScatterGroup&, const std::string& name, ProgressCallback* = nullptr);
+        //! Shares one instanced card-slot mesh per species/count, retaining its source textures and budget lease.
+        Chonk::Ptr acquireTreeCards(const ScatterGroup&, const std::string& name, unsigned slots,
+            ProgressCallback* = nullptr);
         //! Assembles a shared nine-piece template from this population's source proxies. Empty models use placeholders.
         //! Holds source content leases; templates share textures and page out with their final owner. CPU/worker-safe.
         Chonk::Ptr acquireCanopy(const ScatterGroup&, unsigned coverage, unsigned layout, ProgressCallback* = nullptr);
@@ -54,7 +59,8 @@ namespace osgEarth { namespace Procedural2
 
     private:
         //! Loads either the individual LOD bundle or a single canopy proxy into the same bounded weak cache.
-        Chonk::Ptr acquireModel(const ScatterGroup&, const std::string&, bool canopySource, ProgressCallback*);
+        Chonk::Ptr acquireModel(const ScatterGroup&, const std::string&, bool canopySource, ProgressCallback*,
+            bool coarseOnly = false);
         struct Impl;
         std::unique_ptr<Impl> _impl;
     };

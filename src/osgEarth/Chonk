@@ -84,6 +84,9 @@ namespace osgEarth
         //! Authored volume normals: retain orientation and atlas UVs on either face of impostor cards.
         //! Supply an osg::UByteArray in vertex attribute slot 6 (overall or per vertex).
         static GLubyte NORMAL_TECHNIQUE_VOLUME;
+        //! Six-view baked impostor: planar geometric normals and full-sphere tangent normal maps.
+        //! UVs address the top half of an atlas; back faces sample the corresponding bottom half.
+        static GLubyte NORMAL_TECHNIQUE_BAKED;
 
         static unsigned MATERIAL_VERTEX_SLOT;
 
@@ -398,6 +401,18 @@ namespace osgEarth
         //! Reports whether this drawable supports GPU visibility, including optional multi-view passes.
         bool getUseGPUCulling() const { return _gpucull; }
 
+        //! Copies custom vertex-shader records to draw-local SSBO binding 3. Set before publishing or on update;
+        //! never concurrently with drawing. Empty data unbinds the buffer. Records survive context recreation.
+        //! The shader must bounds-check its own indices. This does not change CPU intersection geometry.
+        void setAuxiliaryData(const std::vector<osg::Vec4f>& records);
+
+        //! Enables member-sized LOD for uniform-scale grouped instances; zero stride disables it.
+        //! Auxiliary records at binding 3 contain a local bounding sphere (xyz center, w radius) per member.
+        //! Instance UV is (-member count, first member index). The expansion shader applies per-member alpha;
+        //! GPU culling rejects the group only if all members fail. Returns false for invalid layout/cutoff.
+        //! Set before publication or on update, never concurrently with drawing; ordinary instances bypass this.
+        bool setMemberLOD(unsigned stride, unsigned sphereOffset, float minPixels, unsigned sourceLOD = 0u);
+
         //! Render bin number to use for this drawable
         void setRenderBinNumber(int value);
         int getRenderBinNumber() const;
@@ -484,6 +499,8 @@ namespace osgEarth
         using PageBatches = std::unordered_map<ChonkGeometryPage::Ptr, std::vector<PageInstance>>;
         PageBatches _pageBatches;
         osg::ref_ptr<MaterialArena> _materialArena;
+        std::vector<osg::Vec4f> _auxiliaryData;
+        osg::Vec4f _memberLOD;
         //! Encode a placement with a conservative radius, shared by both paths.
         static Instance makeInstance(const osg::BoundingBoxf&, const osg::Matrixf&, const osg::Vec2f&);
         //! Check the common arena with _m held; empty drawables accept any.
@@ -499,6 +516,9 @@ namespace osgEarth
         //! be stored and managed for each unique OSG state,
         //! since they will differ for each view based on the camera
         //! location and will potentially change every frame.
+        //! Binds optional member data/policy for the active compute or draw program, including disabled defaults.
+        void applyMemberLOD(osg::State&) const;
+
         struct GLObjects : public PerStateGLObjects
         {
             // GPU variant/lod def. Keep me 16-byte aligned.
@@ -542,6 +562,7 @@ namespace osgEarth
             GLBuffer::Ptr _instanceInputBuf;
             GLBuffer::Ptr _instanceOutputBuf;
             GLBuffer::Ptr _chonkBuf;
+            GLBuffer::Ptr _auxiliaryBuf;
             struct DrawGroup
             {
                 GLBuffer::Ptr vertices, indices;
@@ -703,6 +724,7 @@ namespace osgEarth
             int _list;
             bool _first, _last, _publish;
             osg::Vec2f _coverage{0.0f,1.0f}; // immutable per-leaf snapshot, independent of flattened bin state
+            osg::Vec2f _sseAdjustment{0.0f,1.0f}; // grouped vertex LOD uses the same budget as compute culling
         };
         //! Copies the current depth buffer and reduces it into the camera's occlusion pyramid.
         struct HiZLeaf : public Util::CustomRenderLeaf {

@@ -641,6 +641,7 @@ GLubyte Chonk::NORMAL_TECHNIQUE_DEFAULT = 0;
 GLubyte Chonk::NORMAL_TECHNIQUE_ZAXIS = 1;
 GLubyte Chonk::NORMAL_TECHNIQUE_HEMISPHERE = 2;
 GLubyte Chonk::NORMAL_TECHNIQUE_VOLUME = 3;
+GLubyte Chonk::NORMAL_TECHNIQUE_BAKED = 4;
 
 unsigned Chonk::MATERIAL_VERTEX_SLOT = 7;
 
@@ -1807,6 +1808,39 @@ ChonkDrawable::setAlphaCutoff(float value)
     dirtyGLObjects();
 }
 
+void ChonkDrawable::setAuxiliaryData(const std::vector<osg::Vec4f>& records)
+{
+    if (records.size() > std::size_t(std::numeric_limits<GLsizei>::max()) / sizeof(osg::Vec4f))
+        throw std::length_error("Chonk auxiliary data exceeds GPU buffer capacity");
+    std::lock_guard<std::mutex> lock(_m);
+    _auxiliaryData = records;
+    dirtyGLObjects();
+}
+
+bool ChonkDrawable::setMemberLOD(unsigned stride, unsigned sphereOffset, float minPixels, unsigned sourceLOD)
+{
+    if (stride > 4096u || (stride && sphereOffset >= stride) ||
+        !std::isfinite(minPixels) || minPixels < 0.0f || sourceLOD > 3u) return false;
+    std::lock_guard<std::mutex> lock(_m);
+    _memberLOD.set(float(stride),float(sphereOffset),minPixels,float(sourceLOD));
+    dirtyGLObjects();
+    return true;
+}
+
+void ChonkDrawable::applyMemberLOD(osg::State& state) const
+{
+    auto& gl = GLObjects::get(_globjects,state);
+    if (gl._auxiliaryBuf) gl._auxiliaryBuf->bindBufferBase(3);
+    else state.get<osg::GLExtensions>()->glBindBufferBase(GL_SHADER_STORAGE_BUFFER,3,0);
+    auto* program = state.getLastAppliedProgramObject();
+    if (!program) return;
+    auto* ext = state.get<osg::GLExtensions>();
+    const GLint lod = program->getUniformLocation(osg::Uniform::getNameID("oe_chonk_member_lod"));
+    if (lod >= 0) ext->glUniform4fv(lod,1,_memberLOD.ptr());
+    const GLint range = program->getUniformLocation(osg::Uniform::getNameID("oe_chonk_member_range"));
+    if (range >= 0) ext->glUniform2f(range,_fadeNear,_fadeFar);
+}
+
 void
 ChonkDrawable::installRenderBin(ChonkDrawable* d)
 {
@@ -2003,6 +2037,7 @@ ChonkDrawable::update_and_cull_batches(osg::State& state, int pass, const Occlus
         update_gl_objects(globjects, state);
     }
 
+    applyMemberLOD(state);
     if (_gpucull)
     {
         auto views = ChonkRenderPass::find(state);
@@ -2021,6 +2056,8 @@ void
 ChonkDrawable::draw_batches(osg::State& state, int list) const
 {
     auto& globjects = GLObjects::get(_globjects, state);
+    // ChonkBin flattens StateGraphs, so draw-local data must bind here, not through an inherited StateSet.
+    applyMemberLOD(state);
 
     auto views = _gpucull ? ChonkRenderPass::find(state) : nullptr;
     if (views)
@@ -2047,6 +2084,19 @@ ChonkDrawable::update_gl_objects(GLObjects& globjects, osg::State& state) const
         std::lock_guard<std::mutex> lock(_m);
         globjects._gpucull = _gpucull;
         globjects.update(_batches, _pageBatches, this, _fadeNear, _fadeFar, _birthday, _alphaCutoff, state);
+        if (_auxiliaryData.empty()) globjects._auxiliaryBuf.reset();
+        else
+        {
+            if (!globjects._auxiliaryBuf)
+            {
+                globjects._auxiliaryBuf = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+                // Materialize the generated name before uploadData can use named-buffer operations.
+                globjects._auxiliaryBuf->bind();
+                globjects._auxiliaryBuf->debugLabel("Chonk drawable", "auxiliary " + getName());
+                globjects._auxiliaryBuf->unbind();
+            }
+            globjects._auxiliaryBuf->uploadData(_auxiliaryData, GL_STATIC_DRAW);
+        }
     }
 }
 
@@ -2841,6 +2891,7 @@ ChonkDrawable::GLObjects::release()
     _instanceInputBuf = nullptr;
     _instanceOutputBuf = nullptr;
     _chonkBuf = nullptr;
+    _auxiliaryBuf = nullptr;
     _templateBuf = nullptr;
     _groupBuf = nullptr;
     _coreVAO = nullptr;
@@ -3460,6 +3511,7 @@ ChonkRenderBin::DrawLeaf::DrawLeaf(osgUtil::RenderLeaf* leaf, int list, bool fir
     _publish(publish)
 {
     _coverage = leafCoverage(leaf);
+    _sseAdjustment = leafSSEAdjustment(leaf);
 }
 
 void
@@ -3482,6 +3534,7 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
     }
 
     applyCoverage(state,_coverage);
+    applySSEAdjustment(state,_sseAdjustment);
     drawable->draw_batches(state, _list);
 
     if (_last)

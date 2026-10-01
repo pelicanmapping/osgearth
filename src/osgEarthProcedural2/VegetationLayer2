@@ -7,19 +7,24 @@
 #include <osgEarthProcedural2/Scatter>
 #include <osgEarthProcedural2/AssetCatalog>
 #include <osgEarthProcedural2/FeaturePlacement>
+#include <osgEarthProcedural2/FeatureOverlay>
 #include <osgEarth/VisibleLayer>
 #include <osgEarth/Profile>
 #include <osgEarth/SimplePager>
 #include <osg/Group>
 #include <memory>
+#include <atomic>
 
 namespace osgEarth { namespace Procedural2
 {
+    //! Session-only visualization; changes color without changing placement, visibility or saved configuration.
+    enum class ClusterDebugMode { OFF = 0, TIERS = 1, CLUSTERS = 2 };
+
     //! Loaded scene counts for one population; cached parent/child pages can coexist, so these are not GPU-visible counts.
     struct AggregateResidency
     {
         std::size_t midClumps = 0, farClumps = 0;
-        std::size_t midPieces = 0, farPieces = 0; // extra pieces subdivide coverage/terrain without duplicating the forest
+        std::size_t midPieces = 0, farPieces = 0; // represented tree cards; includes retained parent/child pages
     };
 
     //! Independently paged populations with shared Chonk models, independent of terrain tiles.
@@ -39,6 +44,8 @@ namespace osgEarth { namespace Procedural2
             OE_PROPERTY(std::vector<ScatterAsset>, assets, {});
             OE_PROPERTY(std::vector<FeatureInput>, sources, {});
             OE_PROPERTY(std::vector<CoverageRule>, coverage, {});
+            OE_PROPERTY(std::vector<OverlayType>, overlayTypes, {});
+            OE_OPTION(std::string, overlaySource, "edits");
             OE_OPTION(unsigned, assetBudgetMB, 128u); // canonical mesh and image content, not total GPU memory
 
             //! Serializes the bounded coverage profile, seed, and independent population policies.
@@ -60,6 +67,18 @@ namespace osgEarth { namespace Procedural2
         //! Invalid policies leave options and scene unchanged. Disabled/zero-density groups release their pager.
         //! Detached/closed layers retain the new policy for their next attachment; names cannot be added here.
         Status setGroup(const ScatterGroup& group);
+        //! Updates live debug coloring on the update thread; tier bits are 1=medium, 2=far. Invalid modes become OFF.
+        //! Applies to existing/future pages without rebuilding them; not serialized in earth configuration.
+        void setClusterDebug(ClusterDebugMode mode, unsigned tiers = 3u);
+        //! Thread-safe snapshots for UI state; OFF by default, retained while this layer detaches/reopens.
+        ClusterDebugMode getClusterDebugMode() const;
+        //! Returns the selected medium/far bit mask; safe on GUI threads.
+        unsigned getClusterDebugTiers() const;
+        //! Returns the configured edit document, or null when authoring is not configured. Snapshot reads are thread-safe.
+        std::shared_ptr<const FeatureOverlay> getFeatureOverlay() const { return _overlay; }
+        //! Runs a local document edit on the update thread and invalidates changed bounds plus rule buffers.
+        //! The callback must not retain the mutable reference. Persistence I/O belongs on a separate worker.
+        Status editOverlay(const std::function<Status(FeatureOverlay&)>& edit);
         //! Returns model residency without waiting for worker I/O; call from the scene/update or GUI thread.
         AssetResidency getAssetResidency() const;
         //! Scans merged scene pages for the named population; update-thread only, no I/O or GPU readback.
@@ -99,5 +118,8 @@ namespace osgEarth { namespace Procedural2
         bool _customSource = false;
         PlacementStrategies _strategies;
         std::shared_ptr<AssetCatalog> _assets;
+        std::shared_ptr<FeatureOverlay> _overlay;
+        std::shared_ptr<const PlacementFeatureProvider> _baseFeatures;
+        std::atomic<unsigned> _clusterDebug{12u}; // low two bits are mode, upper two select medium/far
     };
 } }

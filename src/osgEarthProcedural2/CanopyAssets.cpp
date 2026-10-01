@@ -47,11 +47,13 @@ Status osgEarth::Procedural2::assembleCanopyAsset(unsigned coverage, unsigned la
             v.position.set(shape.center.x()+2.0f*shape.size.x()*unit.x(),
                 shape.center.y()+2.0f*shape.size.y()*unit.y(),(shape.center.z()+shape.size.z())*unit.z());
             // Preserve authored foliage normals; ordinary carrier-card normals need a volume approximation.
-            if (v.normal_technique == Chonk::NORMAL_TECHNIQUE_VOLUME)
+            if (v.normal_technique == Chonk::NORMAL_TECHNIQUE_VOLUME ||
+                v.normal_technique == Chonk::NORMAL_TECHNIQUE_BAKED)
                 v.normal = osg::Matrixf::transform3x3(v.normal,rotation);
             else v.normal.set(unit.x(),unit.y(),std::max(0.35f,unit.z()-0.5f));
             v.normal.normalize();
-            v.normal_technique = Chonk::NORMAL_TECHNIQUE_VOLUME;
+            if (v.normal_technique != Chonk::NORMAL_TECHNIQUE_BAKED)
+                v.normal_technique = Chonk::NORMAL_TECHNIQUE_VOLUME;
             v.flex.set(float(crown),0,0);
             result->_box.expandBy(v.position);
             result->_ebo_store.push_back(Chonk::element_t(result->_vbo_store.size()));

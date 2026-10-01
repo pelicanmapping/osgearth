@@ -7,6 +7,7 @@
 #include <osgEarth/ShaderLoader>
 #include <osgEarth/LogarithmicDepthBuffer>
 #include <osg/Texture3D>
+#include <osg/Multisample>
 #include <osgDB/FileNameUtils>
 #include <cmath>
 #include <cstring>
@@ -16,6 +17,155 @@
 
 using namespace osgEarth;
 namespace osgEarth { namespace Tests { extern std::string executablePath; } }
+
+//! Baked normals must survive atlas scaling, instance rotation, and viewing either face without a second leaf flip.
+TEST_CASE("Chonk baked impostor normals retain their source frame", "[chonk][gpu][chonk-baked-normals]")
+{
+    if (!Capabilities::get().supportsNVGL())
+    {
+        WARN("Baked normal test needs NVGL");
+        return;
+    }
+    ChonkTest::Renderer renderer;
+    REQUIRE(renderer.initialize());
+    auto geometry = ChonkTest::mesh();
+    auto* uv = dynamic_cast<osg::Vec2Array*>(geometry->getTexCoordArray(0));
+    for (auto& p : *uv) p.set(0.05f+p.x()*0.15f,0.55f+p.y()*0.4f);
+    auto technique = new osg::UByteArray();
+    technique->push_back(Chonk::NORMAL_TECHNIQUE_BAKED);
+    geometry->setVertexAttribArray(6,technique,osg::Array::BIND_OVERALL);
+    osg::ref_ptr<osg::Image> normal = new osg::Image();
+    normal->allocateImage(16,8,1,GL_RGBA,GL_UNSIGNED_BYTE);
+    for (unsigned y=0; y<8; ++y)
+        for (unsigned x=0; x<16; ++x)
+        {
+            auto* p = normal->data(x,y);
+            p[0] = y < 4 ? 128 : 204; p[1] = y < 4 ? 204 : 128;
+            p[2] = y < 4 ? 26 : 230; p[3] = 255;
+        }
+    auto texture = new osg::Texture2D(normal);
+    texture->setFilter(osg::Texture::MIN_FILTER,osg::Texture::NEAREST);
+    texture->setFilter(osg::Texture::MAG_FILTER,osg::Texture::NEAREST);
+    geometry->getOrCreateStateSet()->setTextureAttributeAndModes(1,texture);
+    auto model = Chonk::create();
+    REQUIRE(model->add(geometry,0,FLT_MAX,*renderer.factory));
+    auto* state = renderer.root->getOrCreateStateSet();
+    state->setMode(GL_CULL_FACE,osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE);
+    // A view-stage hook requests the same model-to-view normal transform used by the scene lighting shaders.
+    VirtualProgram::getOrCreate(state)->setFunction("baked_normal_view",
+        "void baked_normal_view(inout vec4 vertex) { }", VirtualProgram::LOCATION_VERTEX_VIEW);
+    VirtualProgram::getOrCreate(state)->setFunction("baked_normal_test", R"glsl(
+        in vec3 vp_Normal;
+        void baked_normal_test(inout vec4 color) { color = vec4(normalize(vp_Normal)*0.5+0.5,1); }
+    )glsl", VirtualProgram::LOCATION_FRAGMENT_LIGHTING,1.0f);
+    for (float rotation : {0.0f,0.7f})
+        for (int side : {1,-1})
+        {
+            INFO("rotation=" << rotation << " side=" << side);
+            auto* drawable = new ChonkDrawable();
+            drawable->setUseGPUCulling(false);
+            drawable->setBirthday(-10);
+            drawable->add(model,osg::Matrixf::scale(2,0.5f,1)*osg::Matrixf::rotate(rotation,0,0,1));
+            renderer.setScene(drawable);
+            auto* camera = renderer.viewer.getCamera();
+            camera->setViewMatrixAsLookAt(osg::Vec3d(0,0,side*5),osg::Vec3d(),osg::Vec3d(0,1,0));
+            renderer.frame(); renderer.frame();
+            const osg::Vec3f source = side > 0 ? osg::Vec3f(0.6f,0,0.8f) : osg::Vec3f(0,0.6f,-0.8f);
+            auto expected = osg::Matrixf::transform3x3(source,osg::Matrixf::rotate(rotation,0,0,1)*
+                osg::Matrixf(camera->getViewMatrix()));
+            auto pixels = renderer.pixels();
+            const auto* actual = pixels->data(128,128);
+            for (unsigned c=0; c<3; ++c)
+                CHECK(std::abs(int(actual[c])-int((expected[c]*0.5f+0.5f)*255.0f)) <= 4);
+        }
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+//! Exercise A2C and its single-sample fallback in separate processes so each framebuffer owns its GL resources.
+TEST_CASE("Chonk alpha coverage follows the active framebuffer", "[chonk][gpu][chonk-alpha-coverage]")
+{
+    for (const std::string tag : {"[.chonk-alpha-single-worker]", "[.chonk-alpha-msaa-worker]"})
+    {
+#ifdef _WIN32
+        const auto command = "\"\"" + osgEarth::Tests::executablePath + "\" \"" + tag + "\"\"";
+#else
+        std::string quoted = "'";
+        for (char c : osgEarth::Tests::executablePath) quoted += c == '\'' ? "'\\''" : std::string(1, c);
+        const auto command = quoted + "' '" + tag + "'";
+#endif
+        INFO(tag);
+        REQUIRE(std::system(command.c_str()) == 0);
+    }
+}
+
+//! Render transparent, quarter, half, and opaque coverage; disabled MSAA must never expose carrier rectangles.
+static void validateAlphaCoverage(unsigned samples)
+{
+    if (!Capabilities::get().supportsNVGL())
+    {
+        WARN("Chonk coverage test needs NVGL");
+        return;
+    }
+    osg::DisplaySettings::instance()->setNumMultiSamples(samples);
+    ChonkTest::Renderer renderer;
+    REQUIRE(renderer.initialize());
+    GLint actual = 0;
+    glGetIntegerv(GL_SAMPLES_ARB, &actual);
+    REQUIRE(actual == int(samples));
+    auto* state = renderer.root->getOrCreateStateSet();
+    state->setDefine("OE_CHONK_ALPHA_TO_COVERAGE");
+    state->setMode(GL_MULTISAMPLE_ARB, osg::StateAttribute::ON);
+    state->setMode(GL_SAMPLE_ALPHA_TO_COVERAGE_ARB, osg::StateAttribute::ON);
+    state->setMode(GL_BLEND, osg::StateAttribute::OFF);
+    renderer.viewer.getCamera()->setViewMatrixAsLookAt(
+        osg::Vec3d(0,0,5), osg::Vec3d(), osg::Vec3d(0,1,0));
+    auto geometry = ChonkTest::mesh();
+    osg::ref_ptr<osg::Image> image = new osg::Image();
+    image->allocateImage(8, 8, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+    const unsigned char alpha[] = {0,64,128,255};
+    for (unsigned y = 0; y < 8; ++y)
+        for (unsigned x = 0; x < 8; ++x)
+        {
+            auto* pixel = image->data(x,y);
+            pixel[0] = pixel[1] = pixel[2] = 255;
+            pixel[3] = alpha[x/2];
+        }
+    osg::ref_ptr<osg::Texture2D> texture = new osg::Texture2D(image);
+    texture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::NEAREST);
+    texture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::NEAREST);
+    geometry->getOrCreateStateSet()->setTextureAttribute(0, texture);
+    auto model = renderer.factory->getOrCreateChonk(geometry);
+    REQUIRE(model);
+    osg::ref_ptr<ChonkDrawable> drawable = new ChonkDrawable();
+    drawable->add(model, osg::Matrixf::identity());
+    drawable->setUseGPUCulling(false);
+    renderer.setScene(drawable);
+    renderer.frame(); renderer.frame();
+    auto pixels = renderer.pixels();
+    CHECK(pixels->data(32,128)[2] == 0);
+    CHECK(pixels->data(224,128)[2] > 240);
+    if (samples > 1)
+    {
+        // WGL may resolve a linear or sRGB default framebuffer; either must retain ordered fractional coverage.
+        const int quarter = pixels->data(96,128)[2], half = pixels->data(160,128)[2];
+        CHECK(quarter > 30);
+        CHECK(quarter < 170);
+        CHECK(half > quarter + 30);
+        CHECK(half < 230);
+    }
+    else
+    {
+        CHECK(pixels->data(96,128)[2] == 0);
+        CHECK(pixels->data(160,128)[2] > 240);
+    }
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
+//! A2C requested on a non-MSAA target must retain ordinary alpha-tested cutouts.
+TEST_CASE("Chonk alpha single-sample worker", "[.chonk-alpha-single-worker]") { validateAlphaCoverage(0); }
+
+//! Four samples retain fractional foliage coverage while preserving fully transparent texels.
+TEST_CASE("Chonk alpha multisample worker", "[.chonk-alpha-msaa-worker]") { validateAlphaCoverage(4); }
 
 namespace
 {

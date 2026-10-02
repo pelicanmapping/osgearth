@@ -394,8 +394,8 @@ LayerDrawableNVGL::drawImplementation(osg::RenderInfo& ri) const
             // Set up a VAO that we'll use to render with bindless NV.
             gl.vao = GLVAO::create(state);
 
-            // Start recording
-            gl.vao->bind();
+            // Keep OSG's cached VAO binding synchronized with the GL context.
+            state.bindVertexArrayObject(gl.vao->name());
 
             // after the bind, please
             gl.vao->debugLabel("Terrain geometry", "VAO");
@@ -422,7 +422,7 @@ LayerDrawableNVGL::drawImplementation(osg::RenderInfo& ri) const
             }
 
             // Finish recording
-            gl.vao->unbind();
+            state.unbindVertexArrayObject();
         }
 
         if (gl.shared == nullptr || !gl.shared->valid())
@@ -502,7 +502,7 @@ LayerDrawableNVGL::drawImplementation(osg::RenderInfo& ri) const
         // Bind the shared data to its layout(binding=X) in the shader.
         gl.shared->bindBufferBase(30);
 
-        gl.vao->bind();
+        state.bindVertexArrayObject(gl.vao->name());
 
         GLenum primitive_type =
             _context->options().getGPUTessellation() == true ?
@@ -520,7 +520,7 @@ LayerDrawableNVGL::drawImplementation(osg::RenderInfo& ri) const
             sizeof(DrawElementsIndirectBindlessCommandNV),
             1);
 
-        gl.vao->unbind();
+        state.unbindVertexArrayObject();
 
         gl.commands->unbind();
 

@@ -8,6 +8,7 @@
 #include <osgEarth/TerrainEngineNode>
 #include <osgEarth/TerrainResources>
 #include <osgEarth/ShaderLoader>
+#include <osgEarth/Shaders>
 #include <osgEarth/ResampleFilter>
 #include <osgEarth/TextureArena>
 #include <osgEarth/Math>
@@ -1428,9 +1429,13 @@ namespace
         [break]
 
         #pragma vp_function oe_road_substrate_fs, fragment
+        #pragma include PBRMaterial.glsl
+        #pragma import_defines(OE_ROAD_HAS_PBR_TEX, OE_ROAD_HAS_OCCLUSION_TEX)
         uniform sampler2D road_tex_albedo;
         uniform sampler2D road_tex_normal;
         uniform sampler2D road_tex_pbr;
+        uniform sampler2D road_tex_occlusion;
+        uniform vec4 road_layoutAndFactors;
         in vec2 oe_road_substrate_uv;
         in float oe_layer_opacity;
         vec3 vp_Normal;
@@ -1451,7 +1456,15 @@ namespace
         {                    
             vec4 albedo = texture(road_tex_albedo, oe_road_substrate_uv);
             vec4 nn = texture(road_tex_normal, oe_road_substrate_uv);
-            vec4 pbr = texture(road_tex_pbr, oe_road_substrate_uv);
+            vec4 pbr = oe_pbr_default(road_layoutAndFactors.x);
+          #ifdef OE_ROAD_HAS_PBR_TEX
+            pbr = texture(road_tex_pbr, oe_road_substrate_uv);
+          #endif
+            float ao = -1.0;
+          #ifdef OE_ROAD_HAS_OCCLUSION_TEX
+            ao = texture(road_tex_occlusion, oe_road_substrate_uv).r;
+          #endif
+            pbr = oe_pbr_decode(pbr, road_layoutAndFactors, ao);
                     
             const float min_h = 0.5;
             float a = 1.0-color.r;
@@ -1510,7 +1523,7 @@ namespace
         
         const RoadLayerArt* _artConfig = nullptr;
         PBRMaterial _material;
-        std::array<TextureImageUnitReservation, 3> _units;
+        std::array<TextureImageUnitReservation, 4> _units;
 
         void init() override
         {
@@ -1549,11 +1562,17 @@ namespace
             super::prepareForRendering(engine);
 
             PBRTexture textures;
-            textures.load(_material);
+            const auto status = textures.load(_material, getReadOptions());
+            if (status.isError())
+            {
+                setStatus(status);
+                return;
+            }
 
             if (!engine->getResources()->reserveTextureImageUnitForLayer(_units[0], this) ||
                 !engine->getResources()->reserveTextureImageUnitForLayer(_units[1], this) ||
-                !engine->getResources()->reserveTextureImageUnitForLayer(_units[2], this))
+                !engine->getResources()->reserveTextureImageUnitForLayer(_units[2], this) ||
+                (textures.occlusion && !engine->getResources()->reserveTextureImageUnitForLayer(_units[3], this)))
             {
                 setStatus(Status::ResourceUnavailable, "Failed to reserve texture image units");
                 return;
@@ -1567,13 +1586,26 @@ namespace
             ss->setTextureAttribute(_units[1].unit(), textures.normal.get());
             ss->getOrCreateUniform("road_tex_normal", osg::Uniform::SAMPLER_2D)->set(_units[1].unit());
 
-            ss->setTextureAttribute(_units[2].unit(), textures.pbr.get());
-            ss->getOrCreateUniform("road_tex_pbr", osg::Uniform::SAMPLER_2D)->set(_units[2].unit());
+            ss->getOrCreateUniform("road_layoutAndFactors", osg::Uniform::FLOAT_VEC4)->set(textures.layoutAndFactors);
+            if (textures.pbr)
+            {
+                ss->setTextureAttribute(_units[2].unit(), textures.pbr.get());
+                ss->getOrCreateUniform("road_tex_pbr", osg::Uniform::SAMPLER_2D)->set(_units[2].unit());
+                ss->setDefine("OE_ROAD_HAS_PBR_TEX");
+            }
+            if (textures.occlusion)
+            {
+                ss->setTextureAttribute(_units[3].unit(), textures.occlusion.get());
+                ss->getOrCreateUniform("road_tex_occlusion", osg::Uniform::SAMPLER_2D)->set(_units[3].unit());
+                ss->setDefine("OE_ROAD_HAS_OCCLUSION_TEX");
+            }
 
             // and the shader itself:
             auto vp = VirtualProgram::getOrCreate(getOrCreateStateSet());
             vp->setName("Road Surface");
-            ShaderLoader::load(vp, substrate_shaders);
+            osgEarth::Util::Shaders shaders;
+            shaders.add("RoadSubstrate.glsl", substrate_shaders);
+            ShaderLoader::load(vp, "RoadSubstrate.glsl", shaders);
         }
     };
 

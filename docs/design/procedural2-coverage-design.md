@@ -1,7 +1,8 @@
 # Procedural2 coverage and exclusions -- Step 4A design
 
-September 28 addition: [editable feature overlays](procedural2-feature-overlays.md) adds a catalog-driven local provider
-through these same coverage rules, with modular storage, ImGui polygon/path authoring and regional canopy invalidation.
+October 2 source-composition cleanup: [editable feature overlays](procedural2-feature-overlays.md) adds a catalog-driven local provider
+as an ordinary named source through these same coverage rules, with independent storage, a reusable ImGui document
+editor and generic geographic source invalidation. The layer has no overlay editing API.
 The broader runtime density/parameter modifier design remains Later.
 
 The initial source is the existing osgEarth FeatureSource configuration in tests/osm.earth. Its tiled OSM data
@@ -25,7 +26,7 @@ Compile matching polygons and buffered lines into a spatial grid of candidate ge
 only relevant grid entries and performs polygon-with-holes or line-distance tests. This represents a sampled field
 without quantizing exclusion edges to texels. It preserves narrow roads/small clearings and avoids placement changes
 caused solely by a render-cell size change. The initial approach filters deterministic scatter candidates and admits
-explicit tree points through the same hard exclusions. Named region strategies now supply rows/grids and
+explicit tree points through polygon exclusions, bypassing buffered lines. Named region strategies now supply rows/grids and
 application-defined layouts through the same field.
 
 This is a deliberate first implementation of the field interface, not a requirement to retain vector tests forever.
@@ -73,7 +74,7 @@ MixedPlacementStrategy dispatches NaturalPlacementStrategy for scatter/explicit 
 structured layouts. Applications register RegionPlacementStrategy implementations on the layer before open; advanced
 sources can still replace the whole dispatcher through FeatureScatterSource.
 
-Vegetation2 accepts a sources collection of named feature-layer references and a coverage collection of attribute
+Vegetation2 accepts a sources collection of named feature-layer references or application providers and a coverage collection of attribute
 rules. Match source and group by name or '*'; match a non-null attribute key against a value or '*'. The optional
 except value supports tags such as building=no. Actions are include (polygon), exclude (polygon or buffered line),
 and points. Matching inclusions use priority and region ownership; ties for the same region/scatter combine density by
@@ -85,6 +86,10 @@ placeholder, not a claim to reproduce surveyed road widths. Polygon exclusions r
 Each mapped point is owned by one source cell. Duplicate point records within a named input collapse by stable ID;
 source namespaces separate unrelated IDs. A polygon's scatter and its explicitly mapped trees currently coexist;
 reserving tree spacing around mapped points or assigning point-over-area priority is a subsequent policy refinement.
+Explicit roots use `sampleExplicit`: buffered linear exclusions are ignored, including at road centerlines. Polygon
+exclusions still apply, including water, buildings, and editable clearings. Generated scatter, rows, and stands use
+ordinary sampling and continue to respect buffers. Custom fields default to ordinary sampling unless they override
+the explicit-root query. Tier retention, accepted-placement caps, and cell ownership remain unchanged.
 Masks test plant roots/patch centers; they do not clip branches, crowns, or grass blades that overhang a boundary.
 Density controls change polygon scatter; explicit source points remain authoritative unless the population is disabled
 or density is set to zero. Model choices remain independent of positions and coverage.
@@ -178,14 +183,14 @@ new strategies inherit application edits as well as static exclusions.
 
 Inclusion rules combine by priority. Higher priority wins; equal-priority named regions take precedence over natural scatter.
 Equal-priority different regions select the lowest stable region ID; duplicates of one region combine density by maximum.
-Exclusions veto all inclusion priorities. Explicit source points remain authoritative except for hard exclusions, as before.
+Exclusions veto all inclusion priorities. Explicit source points bypass line buffers; polygon exclusions still veto them.
 Changing a mask removes slots without reseeding the lattice. Changing cell or render levels also leaves row identity/phase
 unchanged; natural scatter retains its existing source-cell-based identity policy.
 
 Population controls `row_density` (0..1), `row_spacing_scale`, and `plant_spacing_scale` (0.1..10) provide live tuning through
 ImGui. Occupancy thins a stable set of slots and restoring it restores those exact plants. Spacing multiplies the rule/feature
 spacing and intentionally moves plants. `density` still controls natural scatter; zero retains its existing whole-population
-disable behavior. Source and region rules are still configured before open; runtime area edits are deferred to Later.
+disable behavior. Source and region rules are still configured before open; hard-exclusion documents can update at runtime; broader density/parameter modifiers remain Later.
 
 Run the synthetic multi-source demonstration:
 
@@ -199,7 +204,7 @@ The main `procedural2-osm.earth` demo now uses the live OSM source for agricultu
 trees. Its startup viewpoint visits mapped vineyards near Sion; named orchard/crop viewpoints show the other pathways.
 Separate `orchards`, `vineyards`, and `crop_rows` populations make row controls independent of natural vegetation.
 Higher-priority agricultural coverage suppresses random woodland scatter inside fields. All populations share OSM road,
-building, and water exclusions; explicit mapped trees remain authoritative except where excluded. No synthetic parcel or
+building, and water exclusions; explicit mapped trees bypass line buffers but retain polygon exclusions. No synthetic parcel or
 exclusion source is loaded by this main demo. The original synthetic fixture remains an isolated regression/visual example.
 
 ```bat
@@ -258,3 +263,10 @@ ancestors can starve the first coarse coverage. The distance blend does not chan
 
 This adds temporary overlap residency and recovers more small boundary pieces. It is bounded per page, but a global
 resident-page/upload budget remains necessary. A smooth handover alone is not evidence of faster rendering.
+
+## Accepted placement limits (October 2)
+
+Cell and batch caps now select a deterministic subset after coverage/ownership/exclusion filtering and tier retention.
+They no longer reject a request just because its accepted population is large. A separate candidate-work limit guards
+pre-filter generation and allocation; source/feature/vertex work bounds still apply. Successful capped results preserve
+stable identities and carry a ProgressCallback diagnostic. See the current Master Plan for the setting semantics.

@@ -5,7 +5,6 @@
 #include <osgEarthProcedural2/AssetCatalog>
 #include "PlaceholderAssets.h"
 #include "Grass.h"
-#include "CanopyAssets.h"
 #include "TreeCards.h"
 #include <osgEarth/Registry>
 #include <osgEarth/VirtualProgram>
@@ -321,7 +320,7 @@ Chonk::Ptr AssetCatalog::acquireModel(const ScatterGroup& group, const std::stri
     if (denied || !failure.empty())
     {
         entry.retry = now + std::chrono::seconds(5);
-        impl.error(denied ? "Content budget exceeded by " + model->name() + "; requesting built-in fallback" : failure, denied);
+        impl.error(denied ? "Content budget exceeded by " + model->name() + "" : failure, denied);
         return {};
     }
     auto resident = std::make_shared<Resident>();
@@ -332,77 +331,6 @@ Chonk::Ptr AssetCatalog::acquireModel(const ScatterGroup& group, const std::stri
     impl.counts->bytes.fetch_add(bytes);
     ++impl.counts->assets;
     Chonk::Ptr alias(resident, model.get());
-    entry.model = alias;
-    return alias;
-}
-
-Chonk::Ptr AssetCatalog::acquireCanopy(const ScatterGroup& group, unsigned coverage, unsigned layout,
-    ProgressCallback* progress)
-{
-    if (coverage < 1 || coverage > 8 || layout > 3 || (progress && progress->isCanceled())) return {};
-    if (group.models.empty())
-    {
-        ScatterGroup art = group;
-        art.asset = "canopy"+std::to_string(coverage)+"-"+std::to_string(layout);
-        art.lodPixels = art.minPixels = 0.0f;
-        return acquire(art,"",progress);
-    }
-    auto& impl = *_impl;
-    std::ostringstream key;
-    key << "canopy:" << coverage << ':' << layout;
-    for (const auto& name : group.models) key << ':' << name.size() << ':' << name;
-    const auto identity = key.str();
-    {
-        std::lock_guard<std::mutex> lock(impl.mutex);
-        auto found = impl.cache.find(identity);
-        if (found != impl.cache.end())
-        {
-            if (auto resident = found->second.model.lock()) return resident;
-            if (found->second.retry > std::chrono::steady_clock::now()) return {};
-        }
-    }
-    // Source admission has its own serialization. Do not nest its I/O/cache lock inside the template lock.
-    ScatterGroup proxy;
-    proxy.asset = "canopy-source";
-    proxy.lodPixels = proxy.minPixels = 0.0f;
-    std::array<Chonk::Ptr,9> sources;
-    for (unsigned i=0; i<sources.size(); ++i)
-    {
-        ScatterPlacement selection;
-        selection.id = UINT64_C(0x78d3a2f097e15863)+layout*65537u+i;
-        sources[i] = acquireModel(proxy,group.models[selection.modelIndex(unsigned(group.models.size()))],true,progress);
-        if (!sources[i]) return {};
-    }
-    std::lock_guard<std::mutex> lock(impl.mutex);
-    if (progress && progress->isCanceled()) return {};
-    auto& entry = impl.cache[identity];
-    if (auto resident = entry.model.lock()) return resident; // another worker may have completed the same recipe
-    const auto now = std::chrono::steady_clock::now();
-    if (entry.retry > now) return {};
-    Chonk::Ptr model;
-    Status status;
-    try { status = assembleCanopyAsset(coverage,layout,sources,model); }
-    catch (const std::exception& e) { status = Status(Status::GeneralError,e.what()); }
-    if (progress && progress->isCanceled()) return {};
-    // Source owners already account for the shared material records and decoded textures. Charge only new mesh data.
-    const std::size_t bytes = model ? model->_vbo_store.size()*sizeof(Chonk::VertexGPU)+
-        model->_ebo_store.size()*sizeof(Chonk::element_t) : 0u;
-    const bool denied = status.isOK() && bytes > impl.budget-impl.counts->bytes.load();
-    if (status.isError() || denied)
-    {
-        entry.retry = now+std::chrono::seconds(5);
-        impl.error(denied ? "Canopy template exceeds content budget" : status.message(),denied);
-        return {};
-    }
-    model->name() = identity;
-    auto resident = std::make_shared<Resident>();
-    resident->model = model; resident->arena = impl.arena; resident->counts = impl.counts; resident->bytes = bytes;
-    std::set<const Chonk*> retained;
-    for (const auto& source : sources)
-        if (retained.insert(source.get()).second) resident->sources.push_back(source);
-    impl.counts->bytes.fetch_add(bytes);
-    ++impl.counts->assets;
-    Chonk::Ptr alias(resident,model.get());
     entry.model = alias;
     return alias;
 }

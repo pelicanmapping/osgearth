@@ -40,6 +40,8 @@ namespace
     Status validateGroup(const ScatterGroup& group, const std::vector<ScatterAsset>& assets)
     {
         OE_RETURN_STATUS_ON_ERROR(group.validate());
+        if (group.models.empty() && !group.proceduralGrass && !assets.empty())
+            return Status(Status::ConfigurationError, "Select at least one model from the configured asset catalog");
         if (group.asset != "trees" && group.asset != "shrubs" && group.asset != "grass" &&
             group.asset != "undergrowth" && group.asset != "rocks")
             return Status(Status::ConfigurationError, "Unknown population type: " + group.asset);
@@ -176,7 +178,6 @@ namespace
                         aggregate ? assets->acquireImpostor(group, name, progress) :
                         assets->acquire(group, name, progress);
                     if (aggregate && !model) return {};
-                    if (!model && (!progress || !progress->isCanceled())) model = assets->acquire(group, "", progress);
                     if (!model) return {};
                     models.push_back(model);
                 }
@@ -271,7 +272,7 @@ namespace
 
         //! Builds a bounded coverage representation without visiting fine placement cells. Art stays at authored scale.
         osg::ref_ptr<osg::Node> createCoverage(const TileKey& key, const ScatterGroup& group, int bin,
-            ProgressCallback* progress)
+            ProgressCallback* progress, float retention)
         {
             const bool far = key.getLOD()+2u == group.renderCellLevel;
             std::vector<AggregateArt> descriptions;
@@ -320,12 +321,15 @@ namespace
             if (status.isOK() && field && !field->regions().empty())
             {
                 // Preserve specialized land-use layouts until a strategy explicitly approximates their coverage.
-                auto exact = group; exact.canopyStrategy = "exact";
+                auto exact = group; exact.canopyMidStrategy = exact.canopyFarStrategy = "exact";
                 return createCanopy(key,exact,bin,progress);
             }
             AggregateCoverageResult proxies;
+            auto request = group; request.placementRetention = retention;
             if (status.isOK() && field)
-                status = aggregateStrategy->generate(key,group,seed,*field,descriptions,far,proxies,progress);
+                status = aggregateStrategy->generate(key,request,seed,*field,descriptions,far,proxies,progress);
+            if (status.isOK()) status = retainAggregatePlacements(retention,proxies.trees,progress);
+            if (status.isOK()) status = retainAggregatePlacements(retention,proxies.stands,progress);
             if (status.isError() || !field)
             {
                 if (!progress || !progress->isCanceled())
@@ -349,9 +353,22 @@ namespace
         osg::ref_ptr<osg::Node> createCanopy(const TileKey& key, const ScatterGroup& group, int bin,
             ProgressCallback* progress)
         {
-            if (group.canopyStrategy == "coverage") return createCoverage(key,group,bin,progress);
+            const float retention = key.getLOD()+2u == group.renderCellLevel ?
+                group.canopyFarRetention : group.canopyMidRetention;
+            if (progress && progress->isCanceled()) return {};
+            if (retention == 0.0f)
+            {
+                osg::ref_ptr<osg::Group> empty = new osg::Group();
+                empty->setUserValue("oe_p2_canopy_error",canopyReferenceError(key));
+                return empty; // a valid empty tier, not a failed page that would keep its parent forever
+            }
+            const auto& strategy = key.getLOD()+2u == group.renderCellLevel ?
+                group.canopyFarStrategy : group.canopyMidStrategy;
+            if (strategy == "coverage") return createCoverage(key,group,bin,progress,retention);
             std::vector<ScatterPlacement> placements;
-            const auto status = source->generateBatch(key,group,seed,placements,progress);
+            auto request = group; request.placementRetention = retention;
+            auto status = source->generateBatch(key,request,seed,placements,progress);
+            if (status.isOK()) status = retainAggregatePlacements(retention,placements,progress);
             if (status.isError())
             {
                 if (!progress || !progress->isCanceled()) OE_WARN << "[Vegetation2] " << status.toString() << std::endl;
@@ -376,9 +393,6 @@ void VegetationLayer2::Options::fromConfig(const Config& conf)
     for (const auto& c : conf.child("sources").children("source")) sources().emplace_back(c);
     coverage().clear();
     for (const auto& c : conf.child("coverage").children("rule")) coverage().emplace_back(c);
-    overlayTypes().clear();
-    conf.child("overlay").get("source", overlaySource());
-    for (const auto& c : conf.child("overlay").children("type")) overlayTypes().emplace_back(c);
     assets().clear();
     for (const auto& c : conf.child("assets").children("asset")) assets().emplace_back(c);
     if (conf.hasChild("groups"))
@@ -387,7 +401,7 @@ void VegetationLayer2::Options::fromConfig(const Config& conf)
         for (const auto& c : conf.child("groups").children("group"))
             groups().emplace_back(c);
     }
-    else if (groups().empty())
+    else if (assets().empty() && groups().empty())
     {
         const char* names[] = {"trees", "shrubs", "grass", "undergrowth", "rocks"};
         const double densities[] = {1200, 4000, 180000, 18000, 800};
@@ -417,6 +431,7 @@ Config VegetationLayer2::Options::getConfig() const
     conf.set("render_bin_number", renderBinNumber());
     conf.set("elevation_resolution", elevationResolution());
     conf.set("asset_budget_mb", assetBudgetMB());
+    conf.remove("demo"); // Retired option; placeholder selection follows the asset catalog.
     conf.remove("sources");
     Config inputs("sources");
     for (const auto& input : sources()) inputs.add(input.getConfig());
@@ -425,13 +440,6 @@ Config VegetationLayer2::Options::getConfig() const
     Config rules("coverage");
     for (const auto& rule : coverage()) rules.add(rule.getConfig());
     conf.add(rules);
-    conf.remove("overlay");
-    if (!overlayTypes().empty())
-    {
-        Config overlay("overlay"); overlay.set("source", overlaySource());
-        for (const auto& type : overlayTypes()) overlay.add(type.getConfig());
-        conf.add(overlay);
-    }
     conf.remove("assets");
     Config catalog("assets");
     for (const auto& asset : assets()) catalog.add(asset.getConfig());
@@ -536,20 +544,12 @@ Status VegetationLayer2::openImplementation()
     std::set<std::string> inputNames;
     for (auto& input : options().sources())
     {
-        if (input.name.empty() || !inputNames.insert(input.name).second || !input.features.isSet())
-            return Status(Status::ConfigurationError, "Feature inputs require unique names and a feature-layer reference");
-        OE_RETURN_STATUS_ON_ERROR(input.features.open(getReadOptions()));
+        if (input.name.empty() || !inputNames.insert(input.name).second || (bool(input.provider) == input.features.isSet()))
+            return Status(Status::ConfigurationError, "Feature inputs require unique names and exactly one FeatureSource or provider");
+        if (input.provider) { OE_RETURN_STATUS_ON_ERROR(input.provider->validate()); }
+        else { OE_RETURN_STATUS_ON_ERROR(input.features.open(getReadOptions())); }
     }
     std::set<std::string> ruleNames;
-    if (!options().overlayTypes().empty())
-    {
-        if (_customSource || options().sources().empty())
-            return Status(Status::ConfigurationError, "Editable overlays require configured feature inputs");
-        if (!inputNames.insert(options().overlaySource().get()).second)
-            return Status(Status::ConfigurationError, "Overlay source name conflicts with a base input");
-        _overlay = std::make_shared<FeatureOverlay>(options().overlayTypes(), options().overlaySource().get());
-        OE_RETURN_STATUS_ON_ERROR(_overlay->validateCatalog(options().coverage(), options().groups()));
-    }
     for (const auto& rule : options().coverage())
     {
         OE_RETURN_STATUS_ON_ERROR(rule.validate());
@@ -581,12 +581,18 @@ Status VegetationLayer2::openImplementation()
     for (const auto& group : options().groups())
     {
         OE_RETURN_STATUS_ON_ERROR(validateGroup(group, options().assets()));
-        if (group.canopy && group.canopyStrategy == "coverage" && options().sources().empty() && !_source->supportsCoverage())
+        if (group.usesCoverage() && options().sources().empty() && !_source->supportsCoverage())
             return Status(Status::ConfigurationError,"Coverage aggregation requires a geographic coverage source");
 
         if (!names.insert(group.name).second)
             return Status(Status::ConfigurationError, "Duplicate group name: " + group.name);
     }
+    if (options().assets().empty() && std::any_of(options().groups().begin(), options().groups().end(),
+        [](const ScatterGroup& group) { return group.enabled && !group.proceduralGrass; }))
+        OE_NOTICE << "[Vegetation2] No asset catalog configured; using built-in placeholder vegetation." << std::endl;
+    if (!_customSource && options().sources().empty() && !options().groups().empty())
+        OE_NOTICE << "[Vegetation2] No geographic sources configured; using synthetic scatter over the layer profile."
+            << std::endl;
     return Status::NoError;
 }
 
@@ -614,7 +620,7 @@ Status VegetationLayer2::setGroup(const ScatterGroup& group)
 {
     OE_RETURN_STATUS_ON_ERROR(validateGroup(group, options().assets()));
 
-    if (group.canopy && group.canopyStrategy == "coverage" && options().sources().empty() && !_source->supportsCoverage())
+    if (group.usesCoverage() && options().sources().empty() && !_source->supportsCoverage())
         return Status(Status::ConfigurationError,"Coverage aggregation requires a geographic coverage source");
     auto& groups = options().groups();
     auto found = std::find_if(groups.begin(), groups.end(), [&group](const ScatterGroup& value)
@@ -652,44 +658,30 @@ Status VegetationLayer2::setGroup(const ScatterGroup& group)
     return Status::NoError;
 }
 
-Status VegetationLayer2::editOverlay(const std::function<Status(FeatureOverlay&)>& edit)
+void VegetationLayer2::updateSource()
 {
-    if (!_overlay || !edit || !isOpen())
-        return Status(Status::ConfigurationError, "No open, configured editable feature overlay");
-    const auto before = _overlay->snapshot();
-    const auto status = edit(*_overlay);
-    const auto after = _overlay->snapshot();
-    if (before == after) return status;
-    // Pointer equality identifies unchanged immutable features, including undo/redo snapshots.
-    std::vector<osg::ref_ptr<const Feature>> changed;
-    for (const auto& feature : before->features)
-        if (std::find(after->features.begin(),after->features.end(),feature) == after->features.end()) changed.push_back(feature);
-    for (const auto& feature : after->features)
-        if (std::find(before->features.begin(),before->features.end(),feature) == before->features.end()) changed.push_back(feature);
+    if (!_source || _source->revision() == _sourceRevision) return;
+    auto current = _source->snapshot();
+    if (!current) current = _source;
+    std::vector<GeoExtent> changes;
+    current->changesSince(_sourceSnapshot.get(), changes);
     for (unsigned i = 0; i < _pagers.size(); ++i)
     {
         auto* pager = dynamic_cast<OverlayPager*>(_pagers[i].get());
         if (!pager) continue;
-        std::vector<GeoExtent> regions;
-        for (const auto& feature : changed)
-        {
-            bool matches = false; double buffer = 0.0;
-            for (const auto& rule : options().coverage())
-                if (rule.matches(_overlay->source(),options().groups()[i],*feature))
-                { matches = true; buffer = std::max(buffer,rule.buffer); }
-            if (!matches) continue;
-            // Coverage proxies can straddle page edges. Invalidate the maximum admitted art halo as well,
-            // including in-flight pages whose actual model bounds have not been loaded yet.
-            const auto& group = options().groups()[i];
-            if (group.canopy && group.canopyStrategy == "coverage") buffer += 1000.0;
-            auto extent = feature->getExtent();
-            // A small halo also makes zero-width/height line extents queryable at exact tile boundaries.
-            extent.expand(Distance(2.0*buffer+0.1,Units::METERS),Distance(2.0*buffer+0.1,Units::METERS));
-            regions.push_back(extent);
-        }
+        const auto& group = options().groups()[i];
+        double buffer = 0.0;
+        for (const auto& rule : options().coverage())
+            if (rule.group == "*" || rule.group == group.name) buffer = std::max(buffer, rule.buffer);
+        // Coverage stands may cross page edges; retain the existing conservative maximum art halo.
+        if (group.usesCoverage()) buffer += 1000.0;
+        auto regions = changes;
+        for (auto& region : regions)
+            region.expand(Distance(2.0*buffer+0.1, Units::METERS), Distance(2.0*buffer+0.1, Units::METERS));
         if (!regions.empty()) pager->invalidate(regions);
     }
-    return status;
+    _sourceSnapshot = current;
+    _sourceRevision = current->revision();
 }
 
 osg::ref_ptr<SimplePager> VegetationLayer2::createPager(const ScatterGroup& group, unsigned index)
@@ -721,7 +713,7 @@ osg::ref_ptr<SimplePager> VegetationLayer2::createPager(const ScatterGroup& grou
     else if (!group.models.empty())
         installAssetLighting(state);
     state->addUniform(new osg::Uniform("oe_chonk_lod_transition_factor", group.lodTransition));
-    if (group.farDensity < 1.0f)
+    if (group.asset != "trees" && group.farDensity < 1.0f)
     {
         state->setDefine("OE_CHONK_DENSITY_LOD");
         state->addUniform(new osg::Uniform("oe_chonk_density_lod",
@@ -737,17 +729,12 @@ osg::ref_ptr<SimplePager> VegetationLayer2::createPager(const ScatterGroup& grou
         Units::convert(extent.getSRS()->getUnits(), Units::METERS, extent.height()) : extent.height(Units::METERS);
     pager->setRangeFactor(float(std::max(8.0, group.maxRange / std::max(1.0, cellHeight * 0.25))));
     pager->setTimeoutSeconds(2.0);
-    auto overlay = _overlay;
-    auto base = _baseFeatures;
-    auto rules = options().coverage();
-    auto strategy = std::make_shared<MixedPlacementStrategy>(_strategies);
-    pager->setCreateNodeFunction([runtime, group, index, quality, transitions, overlay, base, rules, strategy]
+    pager->setCreateNodeFunction([runtime, group, index, quality, transitions]
         (const TileKey& key, ProgressCallback* progress)
         {
-            // One page uses one document revision, even when individual placement queries many source cells.
             Runtime page = *runtime;
-            if (overlay) page.source = std::make_shared<FeatureScatterSource>(
-                std::make_shared<OverlayFeatureProvider>(base,overlay->snapshot(),overlay->source()),rules,strategy);
+            // Source adapters freeze their input composition when querying a field. Keep the original
+            // generator here so application overrides of generateBatch/queryField remain in effect.
             auto node = group.canopy && key.getLOD() < group.renderCellLevel ?
                 page.createCanopy(key, group, static_cast<int>(index), progress) :
                 page.createBatch(key, group, static_cast<int>(index), progress);
@@ -791,6 +778,7 @@ void VegetationLayer2::addedToMap(const Map* map)
     {
         for (auto& input : options().sources())
         {
+            if (input.provider) continue;
             input.features.addedToMap(map);
             auto* features = input.features.getLayer();
             if (!features || !features->isOpen() || !features->getFeatureProfile())
@@ -799,17 +787,22 @@ void VegetationLayer2::addedToMap(const Map* map)
                 return;
             }
         }
-        _baseFeatures = std::make_shared<MapFeatureProvider>(options().sources());
         _source = std::make_shared<FeatureScatterSource>(
-            _baseFeatures, options().coverage(),
+            std::make_shared<MapFeatureProvider>(options().sources()), options().coverage(),
             std::make_shared<MixedPlacementStrategy>(_strategies));
     }
+    _sourceSnapshot = _source->snapshot();
+    if (!_sourceSnapshot) _sourceSnapshot = _source;
+    _sourceRevision = _sourceSnapshot->revision();
     _assets = std::make_shared<AssetCatalog>(options().assets(),
         std::size_t(options().assetBudgetMB().get()) * 1024u * 1024u, getReadOptions());
     _content = new osg::Group();
     auto assets = _assets;
-    _content->addUpdateCallback(new LambdaCallback<>([assets](osg::NodeVisitor& nv)
+    osg::observer_ptr<VegetationLayer2> weakLayer = this;
+    _content->addUpdateCallback(new LambdaCallback<>([assets, weakLayer](osg::NodeVisitor& nv)
         {
+            osg::ref_ptr<VegetationLayer2> layer;
+            if (weakLayer.lock(layer)) layer->updateSource();
             assets->textures()->update(nv);
             return true;
         }));
@@ -847,13 +840,14 @@ void VegetationLayer2::clear()
     _root->removeChildren(0, _root->getNumChildren());
     _content = nullptr;
     _assets.reset();
+    _sourceSnapshot.reset();
     _map = nullptr;
 }
 
 void VegetationLayer2::removedFromMap(const Map* map)
 {
     clear();
-    for (auto& input : options().sources()) input.features.removedFromMap(map);
+    for (auto& input : options().sources()) if (!input.provider) input.features.removedFromMap(map);
     if (!_customSource) _source = std::make_shared<UniformScatterSource>();
     super::removedFromMap(map);
 }

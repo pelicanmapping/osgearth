@@ -3,6 +3,7 @@
  * MIT License
  */
 #include <osgEarthProcedural2/Scatter>
+#include "PlacementLimits.h"
 #include <cmath>
 #include <algorithm>
 
@@ -42,29 +43,33 @@ ScatterGroup::ScatterGroup(const Config& conf)
     conf.get("render_cell_level", renderCellLevel);
     conf.get("max_per_cell", maxPerCell);
     conf.get("max_per_batch", maxPerBatch);
+    conf.get("max_candidates_per_cell", maxCandidatesPerCell);
+    conf.get("max_work_per_request", maxWorkPerRequest);
     conf.get("min_scale", minScale);
     conf.get("max_scale", maxScale);
     conf.get("lod_pixels", lodPixels);
-    conf.get("min_pixels", minPixels);
+    if (asset != "trees") conf.get("min_pixels", minPixels);
     conf.get("lod_transition", lodTransition);
-    conf.get("density_start", densityStart);
-    conf.get("density_end", densityEnd);
-    conf.get("far_density", farDensity);
+    if (asset != "trees")
+    {
+        conf.get("density_start", densityStart);
+        conf.get("density_end", densityEnd);
+        conf.get("far_density", farDensity);
+    }
+    conf.get("canopy_mid_retention", canopyMidRetention);
+    conf.get("canopy_far_retention", canopyFarRetention);
     conf.get("canopy", canopy);
-    conf.get("canopy_strategy", canopyStrategy);
+    // Legacy single-strategy scenes retain their choice for both tiers; explicit tier settings take precedence.
+    conf.get("canopy_strategy", canopyMidStrategy);
+    conf.get("canopy_strategy", canopyFarStrategy);
+    conf.get("canopy_mid_strategy", canopyMidStrategy);
+    conf.get("canopy_far_strategy", canopyFarStrategy);
     conf.get("canopy_far", canopyFar);
     conf.get("canopy_mid_gpu_culling", canopyMidGPUCulling);
     conf.get("canopy_far_gpu_culling", canopyFarGPUCulling);
     conf.get("canopy_mid_cluster_size", canopyMidClusterSize);
     conf.get("canopy_far_cluster_size", canopyFarClusterSize);
-    conf.get("canopy_mid_patch_scale", canopyMidPatchScale);
-    conf.get("canopy_far_patch_scale", canopyFarPatchScale);
-    conf.get("canopy_cover_scale", canopyCoverScale);
-    // Legacy scenes specified an absolute canopy budget; preserve it at the default global SSE of 25px.
-    float legacyPixels = 48.0f;
-    if (conf.get("canopy_pixels", legacyPixels)) qualityOffset = legacyPixels - 25.0f;
     conf.get("quality_offset", qualityOffset);
-    conf.get("canopy_height", canopyHeight);
     conf.get("canopy_transition", canopyTransition);
     conf.get("canopy_fade_seconds", canopyFadeSeconds);
     conf.get("procedural_grass", proceduralGrass);
@@ -93,26 +98,30 @@ Config ScatterGroup::getConfig() const
     conf.set("render_cell_level", renderCellLevel);
     conf.set("max_per_cell", maxPerCell);
     conf.set("max_per_batch", maxPerBatch);
+    conf.set("max_candidates_per_cell", maxCandidatesPerCell);
+    conf.set("max_work_per_request", maxWorkPerRequest);
     conf.set("min_scale", minScale);
     conf.set("max_scale", maxScale);
     conf.set("lod_pixels", lodPixels);
-    conf.set("min_pixels", minPixels);
+    if (asset != "trees") conf.set("min_pixels", minPixels);
     conf.set("lod_transition", lodTransition);
-    conf.set("density_start", densityStart);
-    conf.set("density_end", densityEnd);
-    conf.set("far_density", farDensity);
+    if (asset != "trees")
+    {
+        conf.set("density_start", densityStart);
+        conf.set("density_end", densityEnd);
+        conf.set("far_density", farDensity);
+    }
+    conf.set("canopy_mid_retention", canopyMidRetention);
+    conf.set("canopy_far_retention", canopyFarRetention);
     conf.set("canopy", canopy);
-    conf.set("canopy_strategy", canopyStrategy);
+    conf.set("canopy_mid_strategy", canopyMidStrategy);
+    conf.set("canopy_far_strategy", canopyFarStrategy);
     conf.set("canopy_far", canopyFar);
     conf.set("canopy_mid_gpu_culling", canopyMidGPUCulling);
     conf.set("canopy_far_gpu_culling", canopyFarGPUCulling);
     conf.set("canopy_mid_cluster_size", canopyMidClusterSize);
     conf.set("canopy_far_cluster_size", canopyFarClusterSize);
-    conf.set("canopy_mid_patch_scale", canopyMidPatchScale);
-    conf.set("canopy_far_patch_scale", canopyFarPatchScale);
-    conf.set("canopy_cover_scale", canopyCoverScale);
     conf.set("quality_offset", qualityOffset);
-    conf.set("canopy_height", canopyHeight);
     conf.set("canopy_transition", canopyTransition);
     conf.set("canopy_fade_seconds", canopyFadeSeconds);
     conf.set("procedural_grass", proceduralGrass);
@@ -147,40 +156,44 @@ Status ScatterGroup::validate() const
             "Levels must satisfy 1 <= render <= source <= 24, with at most six levels between them");
     if (maxPerCell == 0u || maxPerCell > 1000000u || maxPerBatch == 0u || maxPerBatch > 1000000u)
         return Status(Status::ConfigurationError, "Request limits must be between 1 and 1,000,000 instances");
+    if (maxCandidatesPerCell == 0u || maxCandidatesPerCell > 2000000u)
+        return Status(Status::ConfigurationError, "Candidate work limit must be between 1 and 2,000,000");
+    if (maxWorkPerRequest == 0u || maxWorkPerRequest > 64000000u)
+        return Status(Status::ConfigurationError, "Request work limit must be between 1 and 64,000,000");
+    if (!std::isfinite(placementRetention) || placementRetention < 0.0f || placementRetention > 1.0f)
+        return Status(Status::ConfigurationError, "Request retention must be between 0 and 1");
     if (!std::isfinite(minScale) || !std::isfinite(maxScale) || minScale <= 0.0f || maxScale < minScale)
         return Status(Status::ConfigurationError, "Scales must be finite, with 0 < minimum <= maximum");
     if (!std::isfinite(lodPixels) || lodPixels < 0.0f || !std::isfinite(minPixels) || minPixels < 0.0f ||
-        (lodPixels > 0.0f && lodPixels <= minPixels))
+        (asset != "trees" && lodPixels > 0.0f && lodPixels <= minPixels))
         return Status(Status::ConfigurationError,
             "Pixel cutoffs must be finite and nonnegative; coarse LOD must be zero or above the cull cutoff");
     if (!std::isfinite(lodTransition) || lodTransition < 0.0f || lodTransition > 0.5f)
         return Status(Status::ConfigurationError, "LOD transition must be between 0 and 0.5");
-    if (!std::isfinite(farDensity) || farDensity < 0.0f || farDensity > 1.0f)
+    for (float retained : {canopyMidRetention,canopyFarRetention})
+        if (!std::isfinite(retained) || retained < 0.0f || retained > 1.0f)
+            return Status(Status::ConfigurationError,"Aggregate retention must be between 0 and 100 percent");
+    if (asset != "trees" && (!std::isfinite(farDensity) || farDensity < 0.0f || farDensity > 1.0f))
         return Status(Status::ConfigurationError, "Far density must be between 0 and 100 percent");
-    if (!std::isfinite(densityStart) || densityStart < 0.0f || !std::isfinite(densityEnd) || densityEnd < 0.0f ||
-        (farDensity < 1.0f && (densityEnd <= densityStart || densityEnd > maxRange)))
+    if (asset != "trees" && (!std::isfinite(densityStart) || densityStart < 0.0f ||
+        !std::isfinite(densityEnd) || densityEnd < 0.0f ||
+        (farDensity < 1.0f && (densityEnd <= densityStart || densityEnd > maxRange))))
         return Status(Status::ConfigurationError,
             "Thinning needs 0 <= start < end <= maximum range when far density is below 100 percent");
-    if (canopyStrategy != "exact" && canopyStrategy != "coverage")
-        return Status(Status::ConfigurationError, "Canopy strategy must be exact or coverage");
-    if (canopy && (asset != "trees" || renderCellLevel < 3u || farDensity != 1.0f))
+    for (const auto& strategy : {canopyMidStrategy, canopyFarStrategy})
+        if (strategy != "exact" && strategy != "coverage")
+            return Status(Status::ConfigurationError, "Each canopy strategy must be exact or coverage");
+    if (canopy && (asset != "trees" || renderCellLevel < 3u))
         return Status(Status::ConfigurationError,
-            "Canopy requires trees, render level >= 3, and disabled distance thinning");
+            "Canopy requires trees and render level >= 3");
     if (canopyMidClusterSize < 8u || canopyMidClusterSize > 256u ||
         canopyFarClusterSize < 8u || canopyFarClusterSize > 256u)
         return Status(Status::ConfigurationError, "Tree card clusters need 8..256 trees per group");
-    for (float size : {canopyMidPatchScale,canopyFarPatchScale})
-        if (size != 0.5f && size != 1.0f && size != 2.0f && size != 4.0f)
-            return Status(Status::ConfigurationError, "Canopy footprint scales must be 0.5, 1, 2, or 4");
-    if (!std::isfinite(canopyCoverScale) || canopyCoverScale < 0.25f || canopyCoverScale > 4.0f)
-        return Status(Status::ConfigurationError, "Canopy cover scale must be between 0.25 and 4");
     if (!std::isfinite(canopyTransition) || canopyTransition < 0.0f || canopyTransition > 0.5f ||
         !std::isfinite(canopyFadeSeconds) || canopyFadeSeconds < 0.0f || canopyFadeSeconds > 5.0f)
         return Status(Status::ConfigurationError, "Canopy overlap needs 0..0.5 and arrival fade needs 0..5 seconds");
     if (!std::isfinite(qualityOffset) || qualityOffset < -4096.0f || qualityOffset > 4096.0f)
         return Status(Status::ConfigurationError, "Quality offset must be finite and between -4096 and 4096 pixels");
-    if (!std::isfinite(canopyHeight) || canopyHeight < 1.0f || canopyHeight > 80.0f)
-        return Status(Status::ConfigurationError, "Canopy height must be between 1 and 80 meters");
     if (proceduralGrass && asset != "grass")
         return Status(Status::ConfigurationError, "Procedural grass is only available for the grass asset");
     if (grassBlades < 4u || grassBlades > 128u)
@@ -212,10 +225,43 @@ unsigned ScatterPlacement::modelIndex(unsigned count) const
     return count == 0u ? 0u : static_cast<unsigned>(mix(id ^ UINT64_C(0x3c6ef372fe94f82b)) % count);
 }
 
+Status osgEarth::Procedural2::retainAggregatePlacements(float fraction, std::vector<ScatterPlacement>& placements,
+    ProgressCallback* progress)
+{
+    if (!std::isfinite(fraction) || fraction < 0.0f || fraction > 1.0f)
+    {
+        placements.clear();
+        return Status(Status::ConfigurationError,"Aggregate retention must be between 0 and 100 percent");
+    }
+    if (progress && progress->isCanceled())
+    {
+        placements.clear();
+        return Status(Status::ResourceUnavailable,"Aggregate thinning canceled");
+    }
+    if (fraction == 1.0f) return Status::NoError;
+    if (fraction == 0.0f) { placements.clear(); return Status::NoError; }
+    std::size_t kept = 0;
+    for (std::size_t i=0; i<placements.size(); ++i)
+    {
+        if ((i&255u) == 0u && progress && progress->isCanceled())
+        {
+            placements.clear();
+            return Status(Status::ResourceUnavailable,"Aggregate thinning canceled");
+        }
+        // A separate stream prevents fractional coverage masks from biasing this retained percentage.
+        const double rank = double(mix(placements[i].id^UINT64_C(0xa54ff53a5f1d36f1))>>11)/9007199254740992.0;
+        if (rank < fraction) placements[kept++] = placements[i];
+    }
+    placements.resize(kept);
+    return Status::NoError;
+}
+
 Status ScatterSource::generateBatch(const TileKey& key, const ScatterGroup& group, unsigned seed,
     std::vector<ScatterPlacement>& output, ProgressCallback* progress) const
 {
     output.clear();
+    osg::ref_ptr<PlacementWorkProgress> budget = new PlacementWorkProgress(progress, group.maxWorkPerRequest);
+    progress = budget.get();
     OE_RETURN_STATUS_ON_ERROR(group.validate());
     const unsigned firstLevel = group.canopy ? group.renderCellLevel-(group.canopyFar ? 2u : 1u) : group.renderCellLevel;
     if (!key.valid() || key.getLOD() < firstLevel || key.getLOD() > group.renderCellLevel)
@@ -226,7 +272,8 @@ Status ScatterSource::generateBatch(const TileKey& key, const ScatterGroup& grou
 
     // Source keys are unchanged at every representation. Aggregate requests cover at most 65536 source cells.
     const unsigned side = 1u << (group.cellLevel - key.getLOD());
-    std::vector<ScatterPlacement> result, cell;
+    PlacementSelection<ScatterPlacement> result(group.maxPerBatch);
+    std::vector<ScatterPlacement> cell;
     for (unsigned y = 0; y < side; ++y)
     for (unsigned x = 0; x < side; ++x)
     {
@@ -235,17 +282,18 @@ Status ScatterSource::generateBatch(const TileKey& key, const ScatterGroup& grou
         const TileKey sourceKey(group.cellLevel, key.getTileX()*side + x, key.getTileY()*side + y, key.getProfile());
         cell.clear();
         OE_RETURN_STATUS_ON_ERROR(generate(sourceKey, group, seed, cell, progress));
-        if (cell.size() > group.maxPerCell || cell.size() > group.maxPerBatch - result.size())
-            return Status(Status::ConfigurationError, "Scatter batch exceeds its instance limits: " + group.name);
-        result.insert(result.end(), cell.begin(), cell.end());
+        OE_RETURN_STATUS_ON_ERROR(consumePlacementWork(cell.size(), progress));
+        if (cell.size() > group.maxCandidatesPerCell)
+            return Status(Status::ConfigurationError, "Source exceeds candidate work limit: " + group.name);
+        OE_RETURN_STATUS_ON_ERROR(limitPlacements(cell, group.maxPerCell, group.placementRetention, progress, "source cell"));
+        for (const auto& placement : cell) result.add(placement);
     }
     if (progress && progress->isCanceled())
         return Status(Status::ResourceUnavailable, "Scatter canceled");
-    output.swap(result);
-    return Status::NoError;
+    return result.finish(output, progress, "render batch");
 }
 
-Status UniformScatterSource::generate(const TileKey& key, const ScatterGroup& group, unsigned seed,
+Status UniformScatterSource::generateCandidates(const TileKey& key, const ScatterGroup& group, unsigned seed,
     std::vector<ScatterPlacement>& output, ProgressCallback* progress) const
 {
     output.clear();
@@ -275,8 +323,8 @@ Status UniformScatterSource::generate(const TileKey& key, const ScatterGroup& gr
         area = width * height * 1e-6;
     }
     const double expected = area * group.density;
-    if (!std::isfinite(expected) || expected < 0.0 || std::ceil(expected) > group.maxPerCell)
-        return Status(Status::ConfigurationError, "Scatter cell exceeds max_per_cell: " + group.name);
+    if (!std::isfinite(expected) || expected < 0.0 || std::ceil(expected) > group.maxCandidatesPerCell)
+        return Status(Status::ConfigurationError, "Scatter exceeds candidate work limit: " + group.name);
 
     std::uint64_t salt = mix(seed);
     for (unsigned char c : group.name)
@@ -285,6 +333,7 @@ Status UniformScatterSource::generate(const TileKey& key, const ScatterGroup& gr
     salt = mix(salt ^ key.getTileX());
     salt = mix(salt ^ (std::uint64_t(key.getTileY()) << 32));
     const unsigned count = unsigned(expected) + (unit(salt) < expected - std::floor(expected) ? 1u : 0u);
+    OE_RETURN_STATUS_ON_ERROR(consumePlacementWork(count, progress));
     std::vector<ScatterPlacement> result;
     result.reserve(count);
     for (unsigned i = 0; i < count; ++i)
@@ -301,4 +350,11 @@ Status UniformScatterSource::generate(const TileKey& key, const ScatterGroup& gr
     }
     output.swap(result);
     return Status::NoError;
+}
+
+Status UniformScatterSource::generate(const TileKey& key, const ScatterGroup& group, unsigned seed,
+    std::vector<ScatterPlacement>& output, ProgressCallback* progress) const
+{
+    OE_RETURN_STATUS_ON_ERROR(generateCandidates(key, group, seed, output, progress));
+    return limitPlacements(output, group.maxPerCell, group.placementRetention, progress, "source cell");
 }

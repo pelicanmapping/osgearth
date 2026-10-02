@@ -3,67 +3,10 @@
  * MIT License
  */
 #pragma once
-#include <osgEarthProcedural2/FeaturePlacement>
-#include <osg/Matrixd>
-#include <functional>
-#include <array>
+#include <osgEarthProcedural2/Scatter>
 
 namespace osgEarth { namespace Procedural2
 {
-    //! One crown in shared unit-footprint art; CPU coverage checks use the same dimensions as the renderer.
-    struct CanopyCrown
-    {
-        osg::Vec3 center, size;
-        osg::Vec4 color;
-    };
-
-    //! Returns the base subdivision depth for a validated tier policy; footprint scaling does not alter pager levels.
-    OSGEARTHPROCEDURAL2_EXPORT unsigned canopySubdivisionLevels(const ScatterGroup&, bool far);
-
-    //! Nominal handover error at the reference 16x16 patch grid; independent of footprint and fullness controls.
-    //! Caller supplies a valid page key. Terrain-fit residual is added separately.
+    //! Nominal tier handover error in meters for a valid page; independent of cluster size and retention.
     OSGEARTHPROCEDURAL2_EXPORT double canopyReferenceError(const TileKey&);
-
-    //! Returns immutable art for occupancy 1..8 and layout 0..3; invalid indices are clamped. Thread-safe.
-    OSGEARTHPROCEDURAL2_EXPORT const std::array<CanopyCrown,9>& canopyTemplate(unsigned coverage, unsigned layout);
-
-    //! Maps a template crown's conservative rectangle into the request SRS, including the patch's quarter turn.
-    OSGEARTHPROCEDURAL2_EXPORT GeoExtent canopyCrownFootprint(const GeoExtent&, unsigned coverage,
-        unsigned layout, unsigned turn, unsigned crown);
-
-    //! Compact page-local description; geometry is shared across patches and both spatial tiers.
-    struct CanopyPatch
-    {
-        GeoExtent footprint; // terrain/coverage region; disjoint pieces partition the original art footprint
-        GeoExtent artFootprint; // stable template bounds; refinement clips instead of shrinking the art
-        osg::Matrixd localToWorld;
-        unsigned coverage = 1; // one of eight shared crown-coverage variants
-        unsigned layout = 0; // one of four irregular arrangements shared by all pages
-        unsigned turn = 0; // quarter turns in the unit square before terrain fitting
-        unsigned clip = 0u; // zero = full art; otherwise 1+x+16*y+256*(side-1), in a template-local 16x16 grid
-        unsigned mask = 511u; // nine independently certified crowns; no per-page unique geometry
-        double error = 0.0; // nominal tier handover scale plus measured terrain-fit residual, meters
-    };
-
-    //! Returns the visible part of one crown after the terrain/coverage region clips its stable art footprint.
-    //! An invalid or zero-area extent means the crown does not intersect this piece.
-    OSGEARTHPROCEDURAL2_EXPORT GeoExtent canopyPatchCrownFootprint(const CanopyPatch&, unsigned crown);
-
-    //! Encodes a patch region in the art template's coordinates, undoing its quarter turn.
-    //! Requires four or fewer equal refinement splits within artFootprint; zero represents the full footprint.
-    OSGEARTHPROCEDURAL2_EXPORT unsigned canopyClipCode(const CanopyPatch&);
-
-    //! CPU elevation adapter: transforms request-SRS points in place to absolute heights, or fails atomically.
-    using CanopyElevation = std::function<Status(std::vector<osg::Vec3d>&)>;
-
-    //! Compiles coverage directly, never enumerating detailed trees. At the smallest footprint, work is bounded to
-    //! 16384 pieces and 21504 sampled cells per page (4096 pieces and at most 5456 cells at footprint scales >= 1).
-    //! Samples elevations in up to five bounded batches. Mixed boundaries refine before certifying clipped crowns;
-    //! larger footprints retain the default terminal resolution instead of discarding more forest near exclusions.
-    //! Refinement preserves the original clump layout and horizontal scale; only its region and terrain plane change.
-    //! Unresolved crowns are omitted, with at most nine additional footprint checks per terminal cell.
-    //! Caller supplies a worker-safe elevation adapter; failure/cancellation leaves output empty.
-    OSGEARTHPROCEDURAL2_EXPORT Status buildCanopy(const TileKey&, const ScatterGroup&, const PlacementField&,
-        const SpatialReference* worldSRS, const CanopyElevation&, std::vector<CanopyPatch>&,
-        ProgressCallback* = nullptr);
 } }

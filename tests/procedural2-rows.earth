@@ -58,7 +58,7 @@
         <profile>global-geodetic</profile>
         <elevation_resolution>10m</elevation_resolution>
         <groups>
-            <group name="trees" asset="trees" density="1600" cell_level="18" render_cell_level="16" max_range="2500" lod_pixels="48" min_pixels="0.1" min_scale="0.55" max_scale="0.6050000000000001">
+            <group name="trees" asset="trees" density="1600" cell_level="18" render_cell_level="16" max_range="2500" lod_pixels="48" min_scale="0.55" max_scale="0.6050000000000001">
                 <models>
                     <model>broadleaf</model>
                 </models>

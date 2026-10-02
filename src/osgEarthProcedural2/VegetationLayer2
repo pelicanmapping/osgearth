@@ -7,7 +7,6 @@
 #include <osgEarthProcedural2/Scatter>
 #include <osgEarthProcedural2/AssetCatalog>
 #include <osgEarthProcedural2/FeaturePlacement>
-#include <osgEarthProcedural2/FeatureOverlay>
 #include <osgEarthProcedural2/AggregateCoverage>
 #include <osgEarth/VisibleLayer>
 #include <osgEarth/Profile>
@@ -45,8 +44,6 @@ namespace osgEarth { namespace Procedural2
             OE_PROPERTY(std::vector<ScatterAsset>, assets, {});
             OE_PROPERTY(std::vector<FeatureInput>, sources, {});
             OE_PROPERTY(std::vector<CoverageRule>, coverage, {});
-            OE_PROPERTY(std::vector<OverlayType>, overlayTypes, {});
-            OE_OPTION(std::string, overlaySource, "edits");
             OE_OPTION(unsigned, assetBudgetMB, 128u); // canonical mesh and image content, not total GPU memory
 
             //! Serializes the bounded coverage profile, seed, and independent population policies.
@@ -78,16 +75,13 @@ namespace osgEarth { namespace Procedural2
         ClusterDebugMode getClusterDebugMode() const;
         //! Returns the selected medium/far bit mask; safe on GUI threads.
         unsigned getClusterDebugTiers() const;
-        //! Returns the configured edit document, or null when authoring is not configured. Snapshot reads are thread-safe.
-        std::shared_ptr<const FeatureOverlay> getFeatureOverlay() const { return _overlay; }
-        //! Runs a local document edit on the update thread and invalidates changed bounds plus rule buffers.
-        //! The callback must not retain the mutable reference. Persistence I/O belongs on a separate worker.
-        Status editOverlay(const std::function<Status(FeatureOverlay&)>& edit);
         //! Returns model residency without waiting for worker I/O; call from the scene/update or GUI thread.
         AssetResidency getAssetResidency() const;
         //! Scans merged scene pages for the named population; update-thread only, no I/O or GPU readback.
         //! Disabled, detached, or unknown populations return zero counts; unmerged worker results are excluded.
         AggregateResidency getAggregateResidency(const std::string& population) const;
+
+    public:
         //! Returns the stable scene root, including independently controlled group pagers.
         osg::Node* getNode() const override;
         //! Creates group pagers using a snapshot of configuration and shared asset residency.
@@ -123,8 +117,10 @@ namespace osgEarth { namespace Procedural2
         PlacementStrategies _strategies;
         std::shared_ptr<const AggregateCoverageStrategy> _aggregateStrategy;
         std::shared_ptr<AssetCatalog> _assets;
-        std::shared_ptr<FeatureOverlay> _overlay;
-        std::shared_ptr<const PlacementFeatureProvider> _baseFeatures;
+        //! Responds to generic source revisions on update; no document editing or overlay ownership.
+        void updateSource();
+        std::shared_ptr<const ScatterSource> _sourceSnapshot;
+        std::uint64_t _sourceRevision = 0;
         std::atomic<unsigned> _clusterDebug{12u}; // low two bits are mode, upper two select medium/far
     };
 } }

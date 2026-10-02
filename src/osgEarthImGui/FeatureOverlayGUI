@@ -4,7 +4,7 @@
  */
 #pragma once
 #include <osgEarthImGui/ImGuiPanel>
-#include <osgEarthProcedural2/VegetationLayer2>
+#include <osgEarthProcedural2/FeatureOverlay>
 #include <osgEarth/FeatureNode>
 #include <osgEarth/Utils>
 #include <osgViewer/ViewerBase>
@@ -73,7 +73,7 @@ namespace osgEarth { namespace Procedural2
             Status status;
             OverlaySnapshot document;
         };
-        osg::observer_ptr<VegetationLayer2> _layer;
+        std::shared_ptr<FeatureOverlay> _document;
         osg::observer_ptr<osgViewer::View> _view;
         osg::observer_ptr<MapNode> _map;
         osg::ref_ptr<Picker> _picker;
@@ -82,7 +82,7 @@ namespace osgEarth { namespace Procedural2
         std::shared_ptr<Result> _pending;
         std::future<IOResult> _io;
         std::shared_ptr<const OverlayStorage> _storage;
-        osg::observer_ptr<VegetationLayer2> _ioLayer;
+        std::weak_ptr<FeatureOverlay> _ioDocument;
         bool _suspended = false;
         bool _loading = false, _show = true;
         int _type = 0;
@@ -94,14 +94,14 @@ namespace osgEarth { namespace Procedural2
         std::string _message;
 
         //! Queues scene/document changes; publication status is read only after the release/acquire handshake.
-        void submit(osgViewer::View* view, VegetationLayer2* layer,
+        void submit(osgViewer::View* view, std::shared_ptr<FeatureOverlay> document,
             const std::function<Status(FeatureOverlay&,FeatureID&)>& edit)
         {
             auto result = std::make_shared<Result>(); _pending = result;
-            osg::ref_ptr<VegetationLayer2> retained = layer;
+            auto retained = document;
             view->getViewerBase()->addUpdateOperation(new OneTimer([retained,result,edit]()
             {
-                result->status = retained->editOverlay([&](FeatureOverlay& document) { return edit(document,result->id); });
+                result->status = edit(*retained,result->id);
                 result->ready.store(true,std::memory_order_release);
             }));
         }
@@ -122,7 +122,7 @@ namespace osgEarth { namespace Procedural2
                     if (map && preview) map->removeChild(preview);
                 }));
             }
-            _picker = nullptr; _preview = nullptr; _sketch.reset(); _layer = nullptr;
+            _picker = nullptr; _preview = nullptr; _sketch.reset(); _document.reset();
         }
 
         //! Builds an outline on update. Policy buffers remain in the coverage compiler, not the preview renderer.
@@ -172,7 +172,7 @@ namespace osgEarth { namespace Procedural2
             _storage(storage ? std::move(storage) : std::make_shared<GeoJSONOverlayStorage>()) { }
         //! Stops picking and queues removal of owned scene helpers.
         ~FeatureOverlayGUI() { detach(); }
-        //! Suspends drawing when the parent panel hides or the selected layer disappears.
+        //! Suspends drawing when the parent panel hides or the selected document disappears.
         void suspend()
         {
             if (_suspended) return;
@@ -192,14 +192,13 @@ namespace osgEarth { namespace Procedural2
                 }
             }
         }
-        //! Draws controls inside Vegetation2; all document and scene mutations are queued to update traversal.
-        void draw(VegetationLayer2* layer, MapNode* map, osgViewer::View* view)
+        //! Draws an independent document editor; document and scene mutations are queued to update traversal.
+        void draw(std::shared_ptr<FeatureOverlay> document, MapNode* map, osgViewer::View* view)
         {
-            auto document = layer->getFeatureOverlay();
-            if (!document || !view || !view->getViewerBase()) { suspend(); return; }
-            if (_layer.get() != layer || _view.get() != view)
+            if (!document || document->types().empty() || !view || !view->getViewerBase()) { suspend(); return; }
+            if (_document != document || _view.get() != view)
             {
-                detach(); _layer = layer; _view = view; _map = map;
+                detach(); _document = document; _view = view; _map = map;
                 _sketch = std::make_shared<Sketch>(); _picker = new Picker(_sketch,map); _preview = new osg::Group();
                 _selected = 0; _type = 0; _pending.reset(); _shownRevision = ~std::uint64_t(0);
                 auto picker = _picker; auto preview = _preview; osg::ref_ptr<MapNode> retainedMap = map;
@@ -228,9 +227,9 @@ namespace osgEarth { namespace Procedural2
             {
                 const auto result = _io.get();
                 _message = result.status.isOK() ? "Saved overlay." : result.status.toString();
-                if (_loading && result.status.isOK() && _ioLayer.get() == layer)
-                    submit(view,layer,[result](FeatureOverlay& target,FeatureID&) { return target.replace(result.document); });
-                else if (_loading && result.status.isOK()) _message = "Layer changed; loaded document was not applied.";
+                if (_loading && result.status.isOK() && _ioDocument.lock() == document)
+                    submit(view,document,[result](FeatureOverlay& target,FeatureID&) { return target.replace(result.document); });
+                else if (_loading && result.status.isOK()) _message = "Document changed; loaded document was not applied.";
             }
             auto snapshot = document->snapshot();
             auto previewGroup = _preview;
@@ -260,16 +259,6 @@ namespace osgEarth { namespace Procedural2
                 const auto& chosen = types[_type];
                 for (const auto& attr : chosen.attributes)
                     ImGui::TextDisabled("%s = %s",attr.first.c_str(),attr.second.c_str());
-                osg::ref_ptr<Feature> sample = new Feature(nullptr,SpatialReference::get("wgs84"));
-                for (const auto& attr : chosen.attributes) sample->set(attr.first,attr.second);
-                for (const auto& rule : layer->options().coverage())
-                {
-                    bool applies = false;
-                    for (const auto& group : layer->options().groups())
-                        applies = applies || rule.matches(document->source(),group,*sample);
-                    if (applies) ImGui::TextDisabled("%s: %s, buffer %.1fm (half-width)",
-                        rule.group.c_str(),rule.action.c_str(),rule.buffer);
-                }
                 if (ImGui::Button("Draw new outline"))
                 {
                     std::lock_guard<std::mutex> lock(_sketch->mutex);
@@ -288,9 +277,9 @@ namespace osgEarth { namespace Procedural2
                         "Backspace removes a point, Escape cancels. Right-drag still navigates.",
                         _sketch->type.c_str(),_sketch->points.size());
                 }
-                if (ImGui::Button("Undo")) submit(view,layer,[](FeatureOverlay& target,FeatureID&) { return target.undo(); });
+                if (ImGui::Button("Undo")) submit(view,document,[](FeatureOverlay& target,FeatureID&) { return target.undo(); });
                 ImGui::SameLine();
-                if (ImGui::Button("Redo")) submit(view,layer,[](FeatureOverlay& target,FeatureID&) { return target.redo(); });
+                if (ImGui::Button("Redo")) submit(view,document,[](FeatureOverlay& target,FeatureID&) { return target.redo(); });
                 ImGui::SameLine(); ImGui::Checkbox("Show outlines",&_show);
                 ImGui::Text("%zu local features",snapshot->features.size());
                 if (ImGui::BeginListBox("##overlay-features",ImVec2(-1,100)))
@@ -305,7 +294,7 @@ namespace osgEarth { namespace Procedural2
                 if (ImGui::Button("Delete selected"))
                 {
                     const auto id = _selected;
-                    submit(view,layer,[id](FeatureOverlay& target,FeatureID&) { return target.erase(id); });
+                    submit(view,document,[id](FeatureOverlay& target,FeatureID&) { return target.erase(id); });
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Redraw selected"))
@@ -319,7 +308,7 @@ namespace osgEarth { namespace Procedural2
                 ImGui::InputText("Overlay location",_path,sizeof(_path));
                 if (ImGui::Button("Save overlay"))
                 {
-                    const std::string path = _path; _loading = false; _ioLayer = layer;
+                    const std::string path = _path; _loading = false; _ioDocument = document;
                     auto storage = _storage;
                     _io = std::async(std::launch::async,[path,snapshot,storage]()
                     { IOResult result; result.status = storage->write(path,*snapshot); return result; });
@@ -327,7 +316,7 @@ namespace osgEarth { namespace Procedural2
                 ImGui::SameLine();
                 if (ImGui::Button("Load / replace"))
                 {
-                    const std::string path = _path; _loading = true; _ioLayer = layer;
+                    const std::string path = _path; _loading = true; _ioDocument = document;
                     auto storage = _storage;
                     _io = std::async(std::launch::async,[path,storage]()
                     { IOResult result; result.status = storage->read(path,result.document); return result; });
@@ -342,7 +331,7 @@ namespace osgEarth { namespace Procedural2
                 osg::ref_ptr<Geometry> geometry = _sketch->polygon ? static_cast<Geometry*>(new Polygon()) : new LineString();
                 geometry->assign(_sketch->points.begin(),_sketch->points.end());
                 const auto type = _sketch->type; const auto replaceID = _sketch->replaceID;
-                submit(view,layer,[geometry,type,replaceID](FeatureOverlay& target,FeatureID& id)
+                submit(view,document,[geometry,type,replaceID](FeatureOverlay& target,FeatureID& id)
                 { id = replaceID; return target.put(type,geometry,SpatialReference::get("wgs84"),id); });
                 _sketch->active = false;
             }

@@ -91,6 +91,21 @@ const OverlayType* FeatureOverlay::findType(const std::string& name) const
 
 std::shared_ptr<const OverlaySnapshot> FeatureOverlay::snapshot() const { return std::atomic_load(&_current); }
 
+Status FeatureOverlay::validateCatalog() const
+{
+    if (_source.empty() || _source == "*") return invalid("Overlay requires a named source namespace");
+    std::set<std::string> names;
+    for (const auto& type : _types)
+    {
+        if (type.name.empty() || !names.insert(type.name).second ||
+            (type.geometry != "polygon" && type.geometry != "line") || type.attributes.empty())
+            return invalid("Overlay types require unique names, polygon/line geometry, and attributes");
+        for (const auto& attribute : type.attributes)
+            if (attribute.first.empty() || attribute.first == "p2:type") return invalid("Invalid overlay catalog attribute");
+    }
+    return Status::NoError;
+}
+
 Status FeatureOverlay::validateCatalog(const std::vector<CoverageRule>& rules, const std::vector<ScatterGroup>& groups) const
 {
     if (_source.empty() || _source == "*") return invalid("Overlay requires a named source namespace");
@@ -315,6 +330,64 @@ Status GeoJSONOverlayStorage::write(const std::string& path, const OverlaySnapsh
         return Status(Status::ResourceUnavailable, "Cannot finish overlay save: " + path);
     }
     return Status::NoError;
+}
+
+EditableFeatureProvider::EditableFeatureProvider(const std::string& source, const Config& config)
+{
+    std::vector<OverlayType> types;
+    for (const auto& type : config.children("type")) types.emplace_back(type);
+    _document = std::make_shared<FeatureOverlay>(types, source);
+}
+
+EditableFeatureProvider::EditableFeatureProvider(std::shared_ptr<FeatureOverlay> document) :
+    _document(std::move(document)) { }
+
+Status EditableFeatureProvider::validate() const
+{
+    return _document ? _document->validateCatalog() : invalid("Missing editable feature document");
+}
+
+Config EditableFeatureProvider::getConfig() const
+{
+    Config config("overlay");
+    if (_document) for (const auto& type : _document->types()) config.add(type.getConfig());
+    return config;
+}
+
+std::uint64_t EditableFeatureProvider::revision() const
+{
+    return _snapshot ? _snapshot->revision : _document ? _document->snapshot()->revision : 0;
+}
+
+std::shared_ptr<const PlacementFeatureProvider> EditableFeatureProvider::snapshot() const
+{
+    auto provider = std::make_shared<EditableFeatureProvider>(_document);
+    provider->_snapshot = _snapshot ? _snapshot : _document ? _document->snapshot() : nullptr;
+    return provider;
+}
+
+void EditableFeatureProvider::changesSince(const PlacementFeatureProvider* previous, std::vector<GeoExtent>& output) const
+{
+    auto prior = dynamic_cast<const EditableFeatureProvider*>(previous);
+    auto after = _snapshot ? _snapshot : _document ? _document->snapshot() : nullptr;
+    if (!prior || !prior->_snapshot || !after)
+    { PlacementFeatureProvider::changesSince(previous, output); return; }
+    const auto& before = prior->_snapshot;
+    for (const auto& feature : before->features)
+        if (std::find(after->features.begin(), after->features.end(), feature) == after->features.end())
+            output.push_back(feature->getExtent());
+    for (const auto& feature : after->features)
+        if (std::find(before->features.begin(), before->features.end(), feature) == before->features.end())
+            output.push_back(feature->getExtent());
+}
+
+Status EditableFeatureProvider::query(const TileKey& key, double buffer, std::vector<PlacementFeature>& output,
+    ProgressCallback* progress) const
+{
+    output.clear();
+    if (!_document) return invalid("Missing editable feature document");
+    OverlayFeatureProvider provider({}, _snapshot ? _snapshot : _document->snapshot(), _document->source());
+    return provider.query(key, buffer, output, progress);
 }
 
 OverlayFeatureProvider::OverlayFeatureProvider(std::shared_ptr<const PlacementFeatureProvider> base,

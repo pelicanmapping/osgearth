@@ -3,6 +3,7 @@
  * MIT License
  */
 #include <osgEarthProcedural2/AggregateCoverage>
+#include "PlacementLimits.h"
 #include <algorithm>
 #include <cmath>
 
@@ -44,6 +45,8 @@ Status SampledAggregateCoverage::generate(const TileKey& key, const ScatterGroup
     AggregateCoverageResult& output, ProgressCallback* progress) const
 {
     output = AggregateCoverageResult();
+    osg::ref_ptr<PlacementWorkProgress> budget = new PlacementWorkProgress(progress, group.maxWorkPerRequest);
+    progress = budget.get();
     OE_RETURN_STATUS_ON_ERROR(group.validate());
     if (!key.valid() || models.empty()) return Status(Status::ConfigurationError,"Missing coverage key or art");
     double minimumTrees = 256.0;
@@ -57,16 +60,28 @@ Status SampledAggregateCoverage::generate(const TileKey& key, const ScatterGroup
     }
     if (progress && progress->isCanceled()) return Status(Status::ResourceUnavailable,"Coverage canceled");
     if (!group.enabled || group.density <= 0.0) return Status::NoError;
-    AggregateCoverageResult result;
+    struct Proxy : ScatterPlacement { bool stand = false; };
+    PlacementSelection<Proxy> selected(group.maxPerBatch);
+    // Both representations share one accepted cap, after their footprint/point exclusions and tier retention.
+    auto accept = [&](const ScatterPlacement& placement, bool stand)
+    {
+        if (!retainPlacement(placement, group.placementRetention)) return;
+        Proxy proxy; static_cast<ScatterPlacement&>(proxy) = placement; proxy.stand = stand;
+        selected.add(proxy);
+    };
+    std::size_t work = 0;
     std::vector<ScatterPlacement> candidates;
     if (field.hasDensity())
     {
         // Work scales with coarse representatives, never the detailed source's cell level or region algorithms.
         ScatterGroup coarse = group;
         coarse.density /= minimumTrees;
-        coarse.maxPerCell = group.maxPerBatch;
-        OE_RETURN_STATUS_ON_ERROR(UniformScatterSource().generate(key,coarse,seed^0x51ed270bu,candidates,progress));
+        OE_RETURN_STATUS_ON_ERROR(UniformScatterSource().generateCandidates(key,coarse,seed^0x51ed270bu,candidates,progress));
     }
+    OE_RETURN_STATUS_ON_ERROR(consumePlacementWork(field.points().size(), progress));
+    work = candidates.size() + field.points().size();
+    if (work > group.maxCandidatesPerCell)
+        return Status(Status::ConfigurationError, "Coverage exceeds candidate work limit");
     const auto& extent = key.getExtent();
     for (const auto& p : candidates)
     {
@@ -76,7 +91,7 @@ Status SampledAggregateCoverage::generate(const TileKey& key, const ScatterGroup
         if (!far)
         {
             const auto at = field.sample(p.point);
-            if (!at.excluded && p.densityRank() < at.density) result.trees.push_back(p);
+            if (!at.excluded && p.densityRank() < at.density) accept(p, false);
         }
         else
         {
@@ -85,7 +100,7 @@ Status SampledAggregateCoverage::generate(const TileKey& key, const ScatterGroup
             CoverageSample whole;
             if (field.uniform(box,whole))
             {
-                if (!whole.excluded && p.densityRank() < whole.density) result.stands.push_back(p);
+                if (!whole.excluded && p.densityRank() < whole.density) accept(p, true);
             }
             else
             {
@@ -93,6 +108,10 @@ Status SampledAggregateCoverage::generate(const TileKey& key, const ScatterGroup
                 // not reconstructed detailed placements. The halo field applies the same exclusions across page edges.
                 const unsigned count = unsigned(art.trees) +
                     (unit(p.id^UINT64_C(0xf82b5903)) < art.trees-std::floor(art.trees) ? 1u : 0u);
+                OE_RETURN_STATUS_ON_ERROR(consumePlacementWork(count, progress));
+                work += count;
+                if (work > group.maxCandidatesPerCell)
+                    return Status(Status::ConfigurationError, "Coverage boundary exceeds candidate work limit");
                 for (unsigned i=0; i<count; ++i)
                 {
                     auto tree = p;
@@ -109,22 +128,23 @@ Status SampledAggregateCoverage::generate(const TileKey& key, const ScatterGroup
                     }
                     // The stand center owns these representatives, even when a root lies across a page edge.
                     const auto sample = field.sample(tree.point);
-                    if (!sample.excluded && tree.densityRank() < sample.density) result.trees.push_back(tree);
+                    if (!sample.excluded && tree.densityRank() < sample.density) accept(tree, false);
                 }
             }
         }
-        if (result.trees.size()+result.stands.size() > group.maxPerBatch)
-            return Status(Status::ConfigurationError,"Coverage proxies exceed max_per_batch");
+
     }
     for (const auto& point : field.points())
     {
         if (progress && progress->isCanceled()) return Status(Status::ResourceUnavailable,"Coverage canceled");
         if (point.point.x() >= extent.xMin() && point.point.x() < extent.xMax() &&
-            point.point.y() >= extent.yMin() && point.point.y() < extent.yMax() && !field.sample(point.point).excluded)
-            result.trees.push_back(point);
-        if (result.trees.size()+result.stands.size() > group.maxPerBatch)
-            return Status(Status::ConfigurationError,"Coverage points exceed max_per_batch");
+            point.point.y() >= extent.yMin() && point.point.y() < extent.yMax() && !field.sampleExplicit(point.point).excluded)
+            accept(point, false);
+
     }
-    output = std::move(result);
+    std::vector<Proxy> accepted;
+    OE_RETURN_STATUS_ON_ERROR(selected.finish(accepted, progress, "coverage batch"));
+    for (const auto& proxy : accepted)
+        (proxy.stand ? output.stands : output.trees).push_back(proxy);
     return Status::NoError;
 }

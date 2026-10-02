@@ -1,6 +1,6 @@
 # Vegetation2 editable feature overlays
 
-September 28, 2026: scoped return to Step 4A. Catalog-driven local hard exclusions now compose with base features.
+October 2, 2026: source-composition cleanup of Step 4A. Catalog-driven local hard exclusions now compose with base features.
 Density painting, feathering, parameter modifiers, and a catalog-definition editor remain Later.
 
 ## Modular boundaries
@@ -11,22 +11,32 @@ Density painting, feathering, parameter modifiers, and a catalog-definition edit
 | `FeatureOverlay` | Document edits, stable IDs, geometry validation, immutable snapshots, bounded undo/redo |
 | `OverlayStorage` | Blocking read/write of detached documents; independent of placement, rendering and UI |
 | `GeoJSONOverlayStorage` | Initial local-file adapter; replaceable with SQLite/MVT, project database, or service |
-| `OverlayFeatureProvider` | Compose one retained edit snapshot with a base provider through ordinary coverage rules |
-| `VegetationLayer2::editOverlay` | Update-thread mutation and geographic invalidation, including canopy ancestors |
+| `EditableFeatureProvider` | Expose a standalone document as a named source, immutable snapshots, revisions and changed extents |
+| `MapFeatureProvider` | Compose named FeatureSources and application providers through ordinary coverage rules |
+| Source revision consumer | Refresh affected pages, including aggregate ancestors; no editor-specific layer API |
 | `FeatureOverlayGUI` | Picking, outline preview, catalog selection, history controls, and asynchronous storage I/O |
+
+The demo passes `FeatureOverlayGUI::draw(document, mapNode, view)` a shared document; mutations are serialized on the
+application/update thread. It can be embedded without a VegetationLayer2. Storage completion targets the document that
+started the operation, even if the user selects another source.
 
 Large databases can also implement `PlacementFeatureProvider` directly; they need not load a world's edits into the
 small local document. Changing persistence does not require a renderer or placement algorithm change.
 
 ```xml
-<overlay source="edits">
-    <type name="path" label="Footpath" geometry="line">
-        <attribute key="highway" value="path"/>
-    </type>
-    <type name="clearing" label="Clear vegetation" geometry="polygon">
-        <attribute key="vegetation:exclude" value="yes"/>
-    </type>
-</overlay>
+<sources>
+    <source name="osm"><features>data:osm</features></source>
+    <source name="edits">
+        <overlay>
+            <type name="path" label="Footpath" geometry="line">
+                <attribute key="highway" value="path"/>
+            </type>
+            <type name="clearing" label="Clear vegetation" geometry="polygon">
+                <attribute key="vegetation:exclude" value="yes"/>
+            </type>
+        </overlay>
+    </source>
+</sources>
 <coverage>
     <!-- This wildcard-source rule applies to OSM and authored paths. Buffer is half-width. -->
     <rule key="highway" value="*" except="no" action="exclude" buffer="4"/>
@@ -40,17 +50,18 @@ restores what remaining inputs permit; it cannot remove an OSM road/water exclus
 
 These are authoring types, not all land cover: preserve the agreed distinction between natural land cover, human land
 use, and infrastructure. `vegetation:exclude=yes` is our explicit clearing attribute, not an OSM taxonomy assertion.
-Playground/lawn/orchard tools can extend this vocabulary and use the existing strategy registry. This first checkpoint
-validates catalog types against applicable **exclusion** rules; inclusion/replacement tools need their own composition
-and parameter-design checkpoint. The catalog-definition UI is expressly deferred.
+Playground/lawn/orchard tools can extend this vocabulary and use the existing strategy registry. The provider validates authoring vocabulary independently
+of placement policy. A tool may additionally validate that its types match applicable exclusion rules. The current
+ImGui demo authors hard exclusions; inclusion/replacement tools need their own composition and parameter-design checkpoint. The catalog-definition UI is expressly deferred.
 
 ## Paging and concurrency
 
-Each page job captures one immutable document revision before querying source cells. Individual instances and both
+Each coverage field query captures immutable editable-input snapshots before querying source cells. Individual instances and both
 aggregate tiers use the same composed field. Document state outlives resident pages; flying away does not lose edits.
 
-After an edit, the layer finds changed features and matching populations. It expands **old and new** bounds by each
-population's largest applicable rule buffer. `OverlayPager` extends SimplePager with geographic node identities; its
+After an edit, the source reports changed extents through the generic revision interface. The layer expands
+**old and new** bounds by each population's largest rule buffer, plus a conservative stand-footprint halo in coverage
+mode. This may refresh extra nearby pages; it avoids coupling invalidation to editor types. `OverlayPager` extends SimplePager with geographic node identities; its
 invalidation visitor unloads intersecting branches immediately before their first content level, including pending
 ancestors. PagedNode2's existing revision gate prevents pre-edit workers from merging after invalidation.
 
@@ -61,19 +72,20 @@ Finer content replacement or an immediate GPU exclusion mask could reduce this t
 
 ## Demo and workflow
 
-The latest forest scene remains `tests/procedural2-canopy-osm.earth`. Its catalog offers clearing, building footprint,
+The main working scene is `tests/a.earth`; the portable forest scene is `tests/procedural2-canopy-osm.earth`. Its catalog offers clearing, building footprint,
 water area, and buffered path. The same catalog is in `tests/procedural2-osm.earth` and the offline geographic fixture
 `tests/procedural2-coverage.earth`. Launch ImGui with `--sky2 --shadows --nvgl --samples 4 --vegetation2`.
 
 Under **Vegetation2 > Feature overlays**:
 
-- Select a type; its tags and matching rules are displayed read-only.
+- If several editable sources are configured, select the source document. Select a type; its assigned tags are shown.
+  Coverage policy stays in the shared rules, outside the editor.
 - **Draw new outline**, then click terrain for vertices. **Enter / Finish** commits, **Backspace** removes the last
   point, and **Escape / Cancel** abandons the sketch. Polygon outlines close automatically.
 - Select a feature from the list to highlight it. **Redraw selected** replaces geometry while retaining ID/type.
   **Delete selected**, **Undo**, and **Redo** use the same document API.
 - **Show outlines** controls display only. Yellow marks selection/sketch, cyan other local features. Path previews
-  show centerlines; the displayed rule gives their exclusion half-width.
+  show centerlines; the source-composition rule defines their exclusion half-width.
 - **Save overlay** saves the chosen local file. **Load / replace** validates and replaces the local document as one
   undoable edit. Neither action changes OSM or the earth file. I/O runs off the scene thread.
 

@@ -17,21 +17,28 @@
         <url>../data/procedural2/coverage/fixture.geojson</url>
     </OGRFeatures>
     <Vegetation2 name="OSM landscape populations">
-        <sources><source name="osm"><features>data:osm</features></source></sources>
-        <overlay source="edits">
-            <type name="clearing" label="Clear vegetation" geometry="polygon">
-                <attribute key="vegetation:exclude" value="yes"/>
-            </type>
-            <type name="building" label="Building footprint" geometry="polygon">
-                <attribute key="building" value="yes"/>
-            </type>
-            <type name="water" label="Water area" geometry="polygon">
-                <attribute key="natural" value="water"/>
-            </type>
-            <type name="path" label="Path (4m buffer each side)" geometry="line">
-                <attribute key="highway" value="path"/>
-            </type>
-        </overlay>
+        <sources>
+            <source name="osm">
+                <features>data:osm</features>
+            </source>
+            <source name="edits">
+                <overlay>
+                    <type name="clearing" label="Clear vegetation" geometry="polygon">
+                        <attribute key="vegetation:exclude" value="yes" />
+                    </type>
+                    <type name="building" label="Building footprint" geometry="polygon">
+                        <attribute key="building" value="yes" />
+                    </type>
+                    <type name="water" label="Water area" geometry="polygon">
+                        <attribute key="natural" value="water" />
+                    </type>
+                    <type name="path" label="Path (4m buffer each side)" geometry="line">
+                        <attribute key="highway" value="path" />
+                    </type>
+                </overlay>
+            </source>
+        </sources>
+
         <coverage>
             <rule source="edits" key="vegetation:exclude" value="yes" action="exclude"/>
             <!-- Coverage is a union; mapped holes and hard exclusions take precedence. -->
@@ -67,7 +74,7 @@
         <groups>
             <!-- Tree batching is coarser for 12km residency. Density LOD never changes placement IDs or positions. -->
             <group name="trees" asset="trees" density="2000" cell_level="16" render_cell_level="13"
-                max_range="6000" lod_pixels="96" min_pixels="0.75">
+                max_range="6000" lod_pixels="96">
                 <models><model>broadleaf</model><model>conifer</model></models>
             </group>
             <group name="shrubs" asset="shrubs" density="4500" cell_level="18" render_cell_level="16"

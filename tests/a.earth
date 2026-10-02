@@ -61,25 +61,28 @@
   </XYZFeatures>
   <Vegetation2 name="OSM land-use populations">
     <sources>
-      <source name="osm">
-        <features>data:osm</features>
-      </source>
+        <source name="osm">
+            <features>data:osm</features>
+        </source>
+        <source name="edits">
+            <overlay>
+                <type name="clearing" label="Clear vegetation" geometry="polygon">
+                    <attribute key="vegetation:exclude" value="yes" />
+                </type>
+                <type name="building" label="Building footprint" geometry="polygon">
+                    <attribute key="building" value="yes" />
+                </type>
+                <type name="water" label="Water area" geometry="polygon">
+                    <attribute key="natural" value="water" />
+                </type>
+                <type name="path" label="Path (4m buffer each side)" geometry="line">
+                    <attribute key="highway" value="path" />
+                </type>
+            </overlay>
+        </source>
     </sources>
     <!-- Authoring types use the shared coverage rules below. -->
-    <overlay source="edits">
-      <type name="clearing" label="Clear vegetation" geometry="polygon">
-        <attribute key="vegetation:exclude" value="yes"/>
-      </type>
-      <type name="building" label="Building footprint" geometry="polygon">
-        <attribute key="building" value="yes"/>
-      </type>
-      <type name="water" label="Water area" geometry="polygon">
-        <attribute key="natural" value="water"/>
-      </type>
-      <type name="path" label="Path (4m buffer each side)" geometry="line">
-        <attribute key="highway" value="path"/>
-      </type>
-    </overlay>
+
     <coverage>
       <rule source="edits" key="vegetation:exclude" value="yes" action="exclude"/>
       <!-- Natural populations use OSM. Agricultural groups are included only by their row rules. -->
@@ -136,7 +139,7 @@
                 value="farmland" action="include" strategy="rows" priority="100">
         <placement origin_mode="world" heading="75" row_spacing="3" plant_spacing="1.5"/>
       </rule>
-      <!-- All populations share OSM exclusions. Explicit mapped trees remain authoritative unless excluded. -->
+      <!-- All populations share OSM exclusions. Explicit mapped trees bypass line buffers; polygon exclusions still apply. -->
       <rule key="building" value="*" except="no" action="exclude"/>
       <rule key="natural" value="water" action="exclude"/>
       <rule key="waterway" value="riverbank" action="exclude"/>
@@ -146,7 +149,7 @@
     <seed>17</seed>
     <asset_budget_mb>128</asset_budget_mb>
     <assets>
-      <!-- VRV individual and 13-tree stand impostors. Exact clusters remain the default; choose coverage in ImGui. -->
+      <!-- VRV individual and 13-tree stand impostors. Medium/far strategies can be selected independently in ImGui. -->
       <asset canopy_trees="13" name="red-maple" near="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Maple/RedMaple/osgearth/red-maple-near.osg"
                 coarse="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Maple/RedMaple/osgearth/red-maple-coarse.osg"
                 canopy="D:/data/assets/vrv-vegetation/Trees/DeciduousBroadLeaf/Maple/RedMaple/osgearth/red-maple-canopy.osg"/>
@@ -172,11 +175,13 @@
     <groups>
       <!-- Coarse render batches support long tree ranges; placement identity remains tied to source cells. -->
       <group name="trees" asset="trees" density="10000" cell_level="16" render_cell_level="14"
-                canopy="true" canopy_far="true" quality_offset="23"
+                canopy="true" canopy_far="true" quality_offset="128"
                 canopy_mid_cluster_size="32" canopy_far_cluster_size="64"
+                canopy_mid_strategy="exact" canopy_far_strategy="coverage"
+                canopy_mid_retention="0.9" canopy_far_retention="0.5"
                 canopy_mid_gpu_culling="true" canopy_far_gpu_culling="true"
                 canopy_transition="0.25" canopy_fade_seconds="0.4"
-                max_range="30000" lod_pixels="96" min_pixels="0.75">
+                max_range="30000" lod_pixels="96">
         <models>
           <model>red-maple</model>
           <model>white-oak</model>
@@ -210,7 +215,7 @@
       <!-- Starter proxies make the planting patterns readable; crop/vine art is provisional.
                  These populations keep independent controls; coarser render batches suit continuous agricultural coverage. -->
       <group enabled="false" name="orchards" asset="trees" density="1" cell_level="18" render_cell_level="15"
-                max_range="2500" lod_pixels="48" min_pixels="0.1" min_scale="0.55" max_scale="0.605">
+                max_range="2500" lod_pixels="48" min_scale="0.55" max_scale="0.605">
         <models>
           <model>red-maple</model>
         </models>

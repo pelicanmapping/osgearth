@@ -52,9 +52,6 @@ namespace osgEarth { namespace Procedural2
         //! Shares one card-slot mesh per species/count/source kind, retaining its source textures and budget lease.
         Chonk::Ptr acquireTreeCards(const ScatterGroup&, const std::string& name, unsigned slots,
             ProgressCallback* = nullptr, bool stands = false);
-        //! Assembles a shared nine-piece template from this population's source proxies. Empty models use placeholders.
-        //! Holds source content leases; templates share textures and page out with their final owner. CPU/worker-safe.
-        Chonk::Ptr acquireCanopy(const ScatterGroup&, unsigned coverage, unsigned layout, ProgressCallback* = nullptr);
         //! Returns a nonblocking content-count snapshot; brief error-text locking never waits for model I/O.
         AssetResidency residency() const;
         //! Arena shared by this catalog's Chonks; install above draws and update once per scene update.

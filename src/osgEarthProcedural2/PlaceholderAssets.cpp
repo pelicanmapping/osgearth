@@ -3,8 +3,6 @@
  * MIT License
  */
 #include "PlaceholderAssets.h"
-#include <osgEarthProcedural2/Canopy>
-#include <osgEarth/Chonk>
 #include <osg/Geometry>
 #include <osg/Geode>
 #include <cmath>
@@ -18,8 +16,6 @@ namespace
         osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array();
         osg::ref_ptr<osg::Vec3Array> normals = new osg::Vec3Array();
         osg::ref_ptr<osg::Vec4Array> colors = new osg::Vec4Array();
-        osg::ref_ptr<osg::Vec3Array> crownIDs = new osg::Vec3Array();
-        bool volumeNormals = false;
 
         //! Appends a triangle with a geometric normal and a uniform color.
         void triangle(const osg::Vec3& a, const osg::Vec3& b, const osg::Vec3& c, const osg::Vec4& color)
@@ -46,25 +42,6 @@ namespace
                 triangle(p, q, center + osg::Vec3(0.12f*size.x(), 0, size.z()), color);
                 triangle(q, p, center - osg::Vec3(0, 0, size.z()*0.6f),
                     osg::Vec4(color.r()*0.9f, color.g()*0.9f, color.b()*0.9f, color.a()));
-            }
-        }
-
-        //! Adds the existing crown silhouette with smooth, upward-biased foliage normals in canonical crown space.
-        //! Positive size components come from canopyTemplate; the shader omits footprint stretch and terrain-fit shear.
-        void canopyCrown(const osg::Vec3& center, const osg::Vec3& size, const osg::Vec4& color)
-        {
-            const auto first = vertices->size();
-            mound(center, size, color, 6u);
-            volumeNormals = true;
-            for (auto i = first; i < vertices->size(); ++i)
-            {
-                const auto relative = (*vertices)[i]-center;
-                osg::Vec3 n(relative.x()/(2.0f*size.x()), relative.y()/(2.0f*size.y()),
-                    std::max(0.35f,relative.z()/(2.0f*size.z())));
-                n.normalize();
-                (*normals)[i] = n;
-                // Albedo has no baked lower-face darkening; scene lighting and shadowing supply the shade.
-                (*colors)[i] = color;
             }
         }
 
@@ -116,17 +93,6 @@ namespace
             geometry->setVertexArray(vertices);
             geometry->setNormalArray(normals, osg::Array::BIND_PER_VERTEX);
             geometry->setColorArray(colors, osg::Array::BIND_PER_VERTEX);
-            if (volumeNormals)
-            {
-                auto techniques = new osg::UByteArray(1);
-                (*techniques)[0] = osgEarth::Chonk::NORMAL_TECHNIQUE_VOLUME;
-                geometry->setVertexAttribArray(6, techniques, osg::Array::BIND_OVERALL);
-            }
-            if (!crownIDs->empty())
-            {
-                crownIDs->setBinding(osg::Array::BIND_PER_VERTEX);
-                geometry->setTexCoordArray(3, crownIDs); // Chonk flex carries the separable crown index.
-            }
             geometry->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLES, 0, GLsizei(vertices->size())));
             geometry->setUseDisplayList(false);
             geometry->setUseVertexBufferObjects(true);
@@ -156,19 +122,6 @@ osg::ref_ptr<osg::Node> osgEarth::Procedural2::createPlaceholderAsset(const std:
             mesh.crownSilhouette(3.3f, 3.0f, 6.2f, osg::Vec4(0.15f,0.36f,0.24f,1));
             mesh.crownSilhouette(2.6f, 5.5f, 6.0f, osg::Vec4(0.20f,0.44f,0.28f,1));
             mesh.crownSilhouette(1.7f, 8.0f, 5.0f, osg::Vec4(0.26f,0.51f,0.32f,1));
-        }
-    }
-    else if ((name.size() == 7 || (name.size() == 9 && name[7] == '-' && name[8] >= '0' && name[8] <= '3')) &&
-        name.substr(0,6) == "canopy" && name[6] >= '1' && name[6] <= '8')
-    {
-        const unsigned layout = name.size() == 9 ? unsigned(name[8]-'0') : 0u;
-        const auto& crowns = canopyTemplate(unsigned(name[6]-'0'), layout);
-        for (unsigned i=0; i<crowns.size(); ++i)
-        {
-            const auto& crown = crowns[i];
-            mesh.canopyCrown(crown.center, crown.size, crown.color);
-            while (mesh.crownIDs->size() < mesh.vertices->size())
-                mesh.crownIDs->push_back(osg::Vec3(float(i),0,0));
         }
     }
     else if (name == "shrubs")

@@ -108,8 +108,8 @@
         <groups>
             <!-- Coarse render batches support long tree ranges; placement identity remains tied to source cells. -->
             <group name="trees" asset="trees" density="10000" cell_level="16" render_cell_level="14"
-                canopy="true" canopy_transition="0" canopy_fade_seconds="0" quality_offset="23" canopy_height="14"
-                max_range="30000" lod_pixels="96" min_pixels="0.75">
+                canopy="true" canopy_transition="0" canopy_fade_seconds="0" quality_offset="23"
+                max_range="30000" lod_pixels="96">
                 <models><model>broadleaf</model><model>conifer</model></models>
             </group>
             <group enabled="false" name="shrubs" asset="shrubs" density="4500" cell_level="18" render_cell_level="16"
@@ -131,7 +131,7 @@
             <!-- Starter proxies make the planting patterns readable; crop/vine art is provisional.
                  These populations keep independent controls; coarser render batches suit continuous agricultural coverage. -->
             <group enabled="false" name="orchards" asset="trees" density="1" cell_level="18" render_cell_level="15"
-                max_range="2500" lod_pixels="48" min_pixels="0.1" min_scale="0.55" max_scale="0.605">
+                max_range="2500" lod_pixels="48" min_scale="0.55" max_scale="0.605">
                 <models><model>broadleaf</model></models>
             </group>
             <group enabled="false" name="vineyards" asset="shrubs" density="1" cell_level="18" render_cell_level="15"

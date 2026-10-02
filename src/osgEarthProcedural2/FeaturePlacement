@@ -14,14 +14,17 @@
 
 namespace osgEarth { namespace Procedural2
 {
+    class PlacementFeatureProvider;
+
     //! Named input; its namespace distinguishes feature IDs from other providers.
     struct OSGEARTHPROCEDURAL2_EXPORT FeatureInput
     {
         std::string name;
         LayerReference<FeatureSource> features;
+        std::shared_ptr<const PlacementFeatureProvider> provider; // alternative application/composition input
         //! Creates an unconfigured input for programmatic setup.
         FeatureInput() = default;
-        //! Reads a name and an ordinary osgEarth feature-layer reference.
+        //! Reads a name and either an osgEarth feature-layer reference or an editable provider definition.
         explicit FeatureInput(const Config&);
         //! Serializes the input without reading its data.
         Config getConfig() const;
@@ -108,6 +111,17 @@ namespace osgEarth { namespace Procedural2
     public:
         //! Releases an adapter through its interface.
         virtual ~PlacementFeatureProvider() = default;
+        //! Checks provider configuration without querying data; immutable adapters need no extra validation.
+        virtual Status validate() const { return Status::NoError; }
+        //! Serializes an optional provider definition; external application providers may return empty config.
+        virtual Config getConfig() const { return Config(); }
+        //! Monotonic revision or a revision signature; zero denotes an immutable provider.
+        virtual std::uint64_t revision() const { return 0; }
+        //! Freezes mutable inputs for a worker request; null means this provider is already immutable.
+        virtual std::shared_ptr<const PlacementFeatureProvider> snapshot() const { return {}; }
+        //! Reports changed geographic regions against an earlier snapshot. Unknown changes invalidate the world.
+        virtual void changesSince(const PlacementFeatureProvider*, std::vector<GeoExtent>& output) const
+        { output.emplace_back(SpatialReference::get("wgs84"), -180.0, -90.0, 180.0, 90.0); }
         //! Replaces output on success; failure/cancellation leaves it empty. Buffer is in meters.
         virtual Status query(const TileKey&, double buffer, std::vector<PlacementFeature>&,
             ProgressCallback* = nullptr) const = 0;
@@ -121,7 +135,13 @@ namespace osgEarth { namespace Procedural2
     {
     public:
         //! Retains resolved inputs; they must stay open and worker-queryable while the provider is in use.
-        explicit MapFeatureProvider(const std::vector<FeatureInput>&);
+        explicit MapFeatureProvider(const std::vector<FeatureInput>&, bool frozen = false);
+        //! Combines source revisions without reading features; frozen snapshots retain their captured signature.
+        std::uint64_t revision() const override;
+        //! Captures all editable providers once so a worker batch sees one composition revision.
+        std::shared_ptr<const PlacementFeatureProvider> snapshot() const override;
+        //! Collects changed regions from mutable inputs; ordinary dirty FeatureSources invalidate their extent.
+        void changesSince(const PlacementFeatureProvider*, std::vector<GeoExtent>&) const override;
         //! Queries native source tiles with a halo, bounded to 64 tiles/input and 100,000 features/request.
         Status query(const TileKey&, double, std::vector<PlacementFeature>&, ProgressCallback*) const override;
         //! Applies selection and the buffered page extent before copying; bounds scanned and retained records.
@@ -129,6 +149,8 @@ namespace osgEarth { namespace Procedural2
             std::vector<PlacementFeature>&, ProgressCallback*) const override;
     private:
         std::vector<FeatureInput> _inputs;
+        std::vector<std::uint64_t> _revisions;
+        bool _frozen = false;
     };
 
     //! Fractional density supports future feathering; an exclusion always wins over density.
@@ -145,8 +167,11 @@ namespace osgEarth { namespace Procedural2
     public:
         //! Releases a query field through its interface.
         virtual ~PlacementField() = default;
-        //! Samples at a finite point in the request SRS; hard exclusions also apply to explicit points.
+        //! Samples generated placement coverage at a finite point in the request SRS.
         virtual CoverageSample sample(const osg::Vec3d&) const = 0;
+        //! Samples an explicit source root. Vector fields bypass line buffers but retain polygon exclusions.
+        //! Custom fields inherit ordinary sampling unless they distinguish buffered exclusions themselves.
+        virtual CoverageSample sampleExplicit(const osg::Vec3d& point) const { return sample(point); }
         //! True only when the entire rectangle has one coverage value. False requests subdivision;
         //! the conservative default never certifies untested coverage or misses a narrow exclusion.
         virtual bool uniform(const GeoExtent&, CoverageSample&) const { return false; }
@@ -231,6 +256,12 @@ namespace osgEarth { namespace Procedural2
         //! Copies immutable policy; null strategy selects MixedPlacementStrategy.
         FeatureScatterSource(std::shared_ptr<const PlacementFeatureProvider>, const std::vector<CoverageRule>&,
             std::shared_ptr<const PlacementStrategy> = {});
+        //! Current geographic-source revision, independent of rendering and paging.
+        std::uint64_t revision() const override { return _provider ? _provider->revision() : 0; }
+        //! Captures one composition snapshot while retaining placement rules and strategy.
+        std::shared_ptr<const ScatterSource> snapshot() const override;
+        //! Reports raw source-change regions; consumers account for their own rule/representation buffers.
+        void changesSince(const ScatterSource*, std::vector<GeoExtent>&) const override;
         //! Geographic fields are available without enumerating individual plants.
         bool supportsCoverage() const override { return true; }
         //! Compiles the same rules used by detailed placement, including holes and buffered roads.

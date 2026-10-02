@@ -3,6 +3,8 @@
  * MIT License
  */
 #include <osgEarthProcedural2/FeaturePlacement>
+#include <osgEarthProcedural2/FeatureOverlay>
+#include "PlacementLimits.h"
 #include <osgEarth/Query>
 #include <algorithm>
 #include <cmath>
@@ -268,6 +270,14 @@ namespace
 
         //! Exact polygon/hole and buffered-line tests; overlapping inclusions use max rather than sum.
         CoverageSample sample(const osg::Vec3d& point) const override
+        { return sampleImpl(point, false); }
+
+        //! Explicit roots override approximate line buffers; polygon exclusions still veto them.
+        CoverageSample sampleExplicit(const osg::Vec3d& point) const override
+        { return sampleImpl(point, true); }
+
+        //! Shares polygon/priority evaluation while optionally omitting buffered linear exclusions.
+        CoverageSample sampleImpl(const osg::Vec3d& point, bool explicitRoot) const
         {
             CoverageSample result;
             bool selected = false;
@@ -277,6 +287,7 @@ namespace
             for (unsigned id : _bins[y*SIDE+x])
             {
                 const auto& area = _areas[id];
+                if (explicitRoot && area.line) continue;
                 if (!area.extent.contains(point.x(), point.y())) continue;
                 bool inside = false;
                 if (area.line)
@@ -367,6 +378,7 @@ FeatureInput::FeatureInput(const Config& conf)
 {
     conf.get("name", name);
     features.get(conf, "features");
+    if (conf.hasChild("overlay")) provider = std::make_shared<EditableFeatureProvider>(name, conf.child("overlay"));
 }
 
 Config FeatureInput::getConfig() const
@@ -374,6 +386,7 @@ Config FeatureInput::getConfig() const
     Config conf("source");
     conf.set("name", name);
     features.set(conf, "features");
+    if (provider) conf.add(provider->getConfig());
     return conf;
 }
 
@@ -574,9 +587,11 @@ Status RowPlacementStrategy::generate(const TileKey& key, const ScatterGroup& gr
         const double col0 = std::floor(xmin/pattern.rowSpacing)-1.0, col1 = std::ceil(xmax/pattern.rowSpacing)+1.0;
         const double row0 = std::floor(ymin/pattern.plantSpacing)-1.0, row1 = std::ceil(ymax/pattern.plantSpacing)+1.0;
         candidateCount += (col1-col0+1.0)*(row1-row0+1.0);
-        if (!std::isfinite(candidateCount) || candidateCount > 2000000.0 ||
+        if (!std::isfinite(candidateCount) || candidateCount > double(group.maxCandidatesPerCell) ||
             std::max(std::max(std::abs(col0), std::abs(col1)), std::max(std::abs(row0), std::abs(row1))) > 1e12)
-            return Status(Status::ConfigurationError, "Row request exceeds 2,000,000 candidate slots");
+            return Status(Status::ConfigurationError, "Row request exceeds candidate work limit");
+        OE_RETURN_STATUS_ON_ERROR(consumePlacementWork(
+            std::uint64_t((col1-col0+1.0)*(row1-row0+1.0)), progress));
         const auto patternID = zone == 0u ? region.id : hash64(region.id ^ hash64(zone));
         for (std::int64_t row = std::int64_t(row0); row <= std::int64_t(row1); ++row)
         for (std::int64_t col = std::int64_t(col0); col <= std::int64_t(col1); ++col)
@@ -621,6 +636,10 @@ Status MixedPlacementStrategy::generate(const TileKey& key, const ScatterGroup& 
     std::vector<ScatterPlacement> result, candidates;
     OE_RETURN_STATUS_ON_ERROR(NaturalPlacementStrategy().generate(key, group, seed, field, result, progress));
     if (!group.enabled || group.density == 0.0) return Status::NoError;
+    if (field.regions().empty()) { output.swap(result); return Status::NoError; }
+    PlacementSelection<ScatterPlacement> selected(group.maxPerCell);
+    for (const auto& placement : result) selected.add(placement);
+    result.clear();
     std::size_t candidateCount = 0u;
     for (const auto& region : field.regions())
     {
@@ -630,9 +649,10 @@ Status MixedPlacementStrategy::generate(const TileKey& key, const ScatterGroup& 
             return Status(Status::ConfigurationError, "Unregistered placement strategy: " + region.strategy);
         OE_RETURN_STATUS_ON_ERROR(algorithm->second->validate(region.parameters));
         OE_RETURN_STATUS_ON_ERROR(algorithm->second->generate(key, group, seed, region, candidates, progress));
+        OE_RETURN_STATUS_ON_ERROR(consumePlacementWork(candidates.size(), progress));
         candidateCount += candidates.size();
-        if (candidateCount > 2000000u)
-            return Status(Status::ConfigurationError, "Region request exceeds 2,000,000 candidates");
+        if (candidateCount > group.maxCandidatesPerCell)
+            return Status(Status::ConfigurationError, "Region request exceeds candidate work limit");
         for (const auto& p : candidates)
         {
             if (progress && progress->isCanceled()) return Status(Status::ResourceUnavailable, "Placement canceled");
@@ -642,14 +662,11 @@ Status MixedPlacementStrategy::generate(const TileKey& key, const ScatterGroup& 
             if (!owns(key.getExtent(), p.point)) continue;
             const auto value = field.sample(p.point);
             if (value.excluded || value.pattern != region.id || coverageRank(p.id) >= value.density) continue;
-            if (result.size() >= group.maxPerCell)
-                return Status(Status::ConfigurationError, "Region placement exceeds population instance limit");
-            result.push_back(p);
+            if (retainPlacement(p, group.placementRetention)) selected.add(p);
         }
     }
     if (progress && progress->isCanceled()) return Status(Status::ResourceUnavailable, "Placement canceled");
-    output.swap(result);
-    return Status::NoError;
+    return selected.finish(output, progress, "source cell");
 }
 
 Status PlacementFeatureProvider::queryFiltered(const TileKey& key, double buffer,
@@ -675,7 +692,61 @@ Status PlacementFeatureProvider::queryFiltered(const TileKey& key, double buffer
     return Status::NoError;
 }
 
-MapFeatureProvider::MapFeatureProvider(const std::vector<FeatureInput>& inputs) : _inputs(inputs) { }
+MapFeatureProvider::MapFeatureProvider(const std::vector<FeatureInput>& inputs, bool frozen) :
+    _inputs(inputs), _frozen(frozen)
+{
+    for (const auto& input : _inputs)
+        _revisions.push_back(input.provider ? input.provider->revision() :
+            input.features.getLayer() ? std::uint64_t(input.features.getLayer()->getRevision()) : 0);
+}
+
+std::uint64_t MapFeatureProvider::revision() const
+{
+    std::uint64_t value = 0;
+    for (unsigned i = 0; i < _inputs.size(); ++i)
+    {
+        const auto& input = _inputs[i];
+        const auto revision = _frozen ? _revisions[i] : input.provider ? input.provider->revision() :
+            input.features.getLayer() ? std::uint64_t(input.features.getLayer()->getRevision()) : 0;
+        value = hash64(value ^ hash64(revision + i));
+    }
+    return value;
+}
+
+std::shared_ptr<const PlacementFeatureProvider> MapFeatureProvider::snapshot() const
+{
+    auto inputs = _inputs;
+    for (auto& input : inputs) if (input.provider)
+    {
+        auto captured = input.provider->snapshot();
+        if (captured) input.provider = captured;
+    }
+    return std::make_shared<MapFeatureProvider>(inputs, true);
+}
+
+void MapFeatureProvider::changesSince(const PlacementFeatureProvider* previous, std::vector<GeoExtent>& output) const
+{
+    const auto* prior = dynamic_cast<const MapFeatureProvider*>(previous);
+    if (!prior || prior->_inputs.size() != _inputs.size())
+    { PlacementFeatureProvider::changesSince(previous, output); return; }
+    for (unsigned i = 0; i < _inputs.size(); ++i)
+    {
+        const auto& input = _inputs[i];
+        const auto& old = prior->_inputs[i];
+        if (input.provider)
+        {
+            if (input.provider->revision() != prior->_revisions[i])
+                input.provider->changesSince(old.provider.get(), output);
+        }
+        else if (input.features.getLayer() &&
+            std::uint64_t(input.features.getLayer()->getRevision()) != prior->_revisions[i])
+        {
+            const auto extent = input.features.getLayer()->getExtent();
+            if (extent.isValid()) output.push_back(extent);
+            else PlacementFeatureProvider::changesSince(previous, output);
+        }
+    }
+}
 
 Status MapFeatureProvider::query(const TileKey& key, double buffer, std::vector<PlacementFeature>& output,
     ProgressCallback* progress) const
@@ -695,6 +766,15 @@ Status MapFeatureProvider::queryFiltered(const TileKey& key, double buffer, cons
     extent.expand(Distance(2.0*buffer, Units::METERS), Distance(2.0*buffer, Units::METERS));
     for (const auto& input : _inputs)
     {
+        if (input.provider)
+        {
+            std::vector<PlacementFeature> records;
+            OE_RETURN_STATUS_ON_ERROR(input.provider->queryFiltered(key, buffer, filter, records, progress));
+            if (records.size() > 100000u - result.size())
+                return Status(Status::ResourceUnavailable, "Coverage query exceeds 100,000 features");
+            result.insert(result.end(), records.begin(), records.end());
+            continue;
+        }
         auto* source = input.features.getLayer();
         if (!source || !source->isOpen() || !source->getFeatureProfile())
             return Status(Status::ResourceUnavailable, "Feature source is unavailable: " + input.name);
@@ -771,32 +851,34 @@ Status NaturalPlacementStrategy::generate(const TileKey& key, const ScatterGroup
     const PlacementField& field, std::vector<ScatterPlacement>& output, ProgressCallback* progress) const
 {
     output.clear();
-    std::vector<ScatterPlacement> candidates, result;
+    OE_RETURN_STATUS_ON_ERROR(group.validate());
+    std::vector<ScatterPlacement> candidates;
+    PlacementSelection<ScatterPlacement> result(group.maxPerCell);
     UniformScatterSource scatter;
     if (field.hasDensity())
     {
-        OE_RETURN_STATUS_ON_ERROR(scatter.generate(key, group, seed, candidates, progress));
+        OE_RETURN_STATUS_ON_ERROR(scatter.generateCandidates(key, group, seed, candidates, progress));
     }
     if (!group.enabled || group.density == 0.0) return Status::NoError;
+    if (candidates.size() + field.points().size() > group.maxCandidatesPerCell)
+        return Status(Status::ConfigurationError, "Natural placement exceeds candidate work limit");
     for (std::size_t i=0; i<candidates.size(); ++i)
     {
         if ((i & 255u) == 0u && progress && progress->isCanceled())
             return Status(Status::ResourceUnavailable, "Placement canceled");
         const auto value = field.sample(candidates[i].point);
         if (!value.excluded && value.pattern == 0u && coverageRank(candidates[i].id) < value.density)
-            result.push_back(candidates[i]);
+            if (retainPlacement(candidates[i], group.placementRetention)) result.add(candidates[i]);
     }
+    OE_RETURN_STATUS_ON_ERROR(consumePlacementWork(field.points().size(), progress));
     for (const auto& point : field.points())
     {
         if (progress && progress->isCanceled()) return Status(Status::ResourceUnavailable, "Placement canceled");
-        if (!owns(key.getExtent(), point.point) || field.sample(point.point).excluded) continue;
-        if (result.size() >= group.maxPerCell)
-            return Status(Status::ConfigurationError, "Explicit points exceed population instance limit");
-        result.push_back(point);
+        if (!owns(key.getExtent(), point.point) || field.sampleExplicit(point.point).excluded) continue;
+        if (retainPlacement(point, group.placementRetention)) result.add(point);
     }
     if (progress && progress->isCanceled()) return Status(Status::ResourceUnavailable, "Placement canceled");
-    output.swap(result);
-    return Status::NoError;
+    return result.finish(output, progress, "source cell");
 }
 
 FeatureScatterSource::FeatureScatterSource(std::shared_ptr<const PlacementFeatureProvider> provider,
@@ -804,6 +886,18 @@ FeatureScatterSource::FeatureScatterSource(std::shared_ptr<const PlacementFeatur
     _provider(std::move(provider)), _strategy(std::move(strategy)), _rules(rules)
 {
     if (!_strategy) _strategy = std::make_shared<MixedPlacementStrategy>();
+}
+
+std::shared_ptr<const ScatterSource> FeatureScatterSource::snapshot() const
+{
+    auto captured = _provider ? _provider->snapshot() : nullptr;
+    return std::make_shared<FeatureScatterSource>(captured ? captured : _provider, _rules, _strategy);
+}
+
+void FeatureScatterSource::changesSince(const ScatterSource* previous, std::vector<GeoExtent>& output) const
+{
+    auto prior = dynamic_cast<const FeatureScatterSource*>(previous);
+    if (_provider) _provider->changesSince(prior ? prior->_provider.get() : nullptr, output);
 }
 
 Status FeatureScatterSource::generate(const TileKey& key, const ScatterGroup& group, unsigned seed,
@@ -822,6 +916,8 @@ Status FeatureScatterSource::generateImpl(const TileKey& key, const ScatterGroup
     std::vector<ScatterPlacement>& output, ProgressCallback* progress) const
 {
     output.clear();
+    osg::ref_ptr<PlacementWorkProgress> budget = new PlacementWorkProgress(progress, group.maxWorkPerRequest);
+    progress = budget.get();
     OE_RETURN_STATUS_ON_ERROR(group.validate());
     const unsigned firstLevel = group.canopy ? group.renderCellLevel-(group.canopyFar ? 2u : 1u) : group.renderCellLevel;
     if (!_provider || !key.valid() || (batch && (key.getLOD() < firstLevel || key.getLOD() > group.renderCellLevel)))
@@ -829,7 +925,8 @@ Status FeatureScatterSource::generateImpl(const TileKey& key, const ScatterGroup
     if (!group.enabled || group.density == 0.0) return Status::NoError;
     std::shared_ptr<const PlacementField> field;
     OE_RETURN_STATUS_ON_ERROR(queryField(key, group, seed, field, progress));
-    std::vector<ScatterPlacement> result, cell;
+    PlacementSelection<ScatterPlacement> result(batch ? group.maxPerBatch : group.maxPerCell);
+    std::vector<ScatterPlacement> cell;
     const unsigned side = batch ? 1u << (group.cellLevel-key.getLOD()) : 1u;
     for (unsigned y=0; y<side; ++y)
     for (unsigned x=0; x<side; ++x)
@@ -838,12 +935,13 @@ Status FeatureScatterSource::generateImpl(const TileKey& key, const ScatterGroup
         const TileKey sourceKey = batch ? TileKey(group.cellLevel, key.getTileX()*side+x,
             key.getTileY()*side+y, key.getProfile()) : key;
         OE_RETURN_STATUS_ON_ERROR(_strategy->generate(sourceKey, group, seed, *field, cell, progress));
-        if (cell.size() > group.maxPerCell || cell.size() > group.maxPerBatch-result.size())
-            return Status(Status::ConfigurationError, "Feature scatter exceeds population instance limits");
-        result.insert(result.end(), cell.begin(), cell.end());
+        OE_RETURN_STATUS_ON_ERROR(consumePlacementWork(cell.size(), progress));
+        if (cell.size() > group.maxCandidatesPerCell)
+            return Status(Status::ConfigurationError, "Placement strategy exceeds candidate work limit");
+        OE_RETURN_STATUS_ON_ERROR(limitPlacements(cell, group.maxPerCell, group.placementRetention, progress, "source cell"));
+        for (const auto& placement : cell) result.add(placement);
     }
-    output.swap(result);
-    return Status::NoError;
+    return result.finish(output, progress, batch ? "render batch" : "source cell");
 }
 
 Status FeatureScatterSource::queryField(const TileKey& key, const ScatterGroup& group, unsigned seed,
@@ -875,7 +973,9 @@ Status FeatureScatterSource::queryFieldBuffered(const TileKey& key, const Scatte
             if (rule.matches(input, group, feature)) return true;
         return false;
     };
-    OE_RETURN_STATUS_ON_ERROR(_provider->queryFiltered(key, buffer+footprintBuffer, filter, features, progress));
+    auto provider = _provider->snapshot();
+    if (!provider) provider = _provider;
+    OE_RETURN_STATUS_ON_ERROR(provider->queryFiltered(key, buffer+footprintBuffer, filter, features, progress));
     auto field = std::make_shared<VectorField>(key,footprintBuffer);
     OE_RETURN_STATUS_ON_ERROR(field->compile(features, _rules, group, seed, progress));
     output = std::move(field);

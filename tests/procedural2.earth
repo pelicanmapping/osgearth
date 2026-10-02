@@ -37,7 +37,7 @@
         <groups>
             <!-- Tree batching is coarser for 12km residency. Density LOD never changes placement IDs or positions. -->
             <group name="trees" asset="trees" density="850" cell_level="16" render_cell_level="13"
-                max_range="12000" lod_pixels="32" min_pixels="0.75">
+                max_range="12000" lod_pixels="32">
                 <models><model>broadleaf</model><model>conifer</model></models>
             </group>
             <group name="shrubs" asset="shrubs" density="4500" cell_level="18" render_cell_level="16"

@@ -108,7 +108,7 @@ int importVegetationAsset(osg::ArgumentParser& args)
         Procedural2::ScatterGroup group;
         group.models = {"import-check"};
         auto individual = catalog.acquire(group, "import-check");
-        auto aggregate = catalog.acquireCanopy(group, 8u, 0u);
+        auto aggregate = catalog.acquireStand(group, "import-check");
         auto residency = catalog.residency();
         if (!individual || !aggregate || residency.failedLoads || residency.budgetDenials)
         {

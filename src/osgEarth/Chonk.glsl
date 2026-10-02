@@ -63,6 +63,7 @@ layout(location = 7) in uint color_is_linear;
 #define NT_DEFAULT 0
 #define NT_ZAXIS 1
 #define NT_HEMISPHERE 2 
+#define NT_BAKED 4
 
 // stage global
 mat3 xform3;
@@ -112,6 +113,9 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
     oe_material1_tex = chonkMaterials[material_index].material1;
     oe_material2_tex = chonkMaterials[material_index].material2;
 
+    // Color and camera-depth passes need the same frame for view-dependent impostor coverage.
+    oe_position_view = (gl_ModelViewMatrix * vertex).xyz;
+
 #if defined(OE_IS_SHADOW_CAMERA) || defined(OE_IS_DEPTH_CAMERA)
     oe_fade = 1.0;
     return;
@@ -125,9 +129,6 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
         oe_position_vec = gl_NormalMatrix *
             ((xform3 * position.xyz) / chonkInstances[i].radius);
     }
-
-    // FS needs this to make a TBN
-    oe_position_view = (gl_ModelViewMatrix * vertex).xyz;
 
     // disable/ignore normal maps as directed:
     oe_normal_tex = 0;
@@ -152,10 +153,14 @@ void oe_chonk_default_vertex_model(inout vec4 vertex)
 #pragma import_defines(OE_IS_SHADOW_CAMERA)
 #pragma import_defines(OE_IS_DEPTH_CAMERA)
 #pragma import_defines(OE_USE_ALPHA_TO_COVERAGE)
+#pragma import_defines(OE_CHONK_ALPHA_TO_COVERAGE)
 #pragma import_defines(OE_GL_RG_COMPRESSED_NORMALS)
 #pragma import_defines(OE_GPUCULL_DEBUG)
 #pragma import_defines(OE_CHONK_SINGLE_SIDED)
 #pragma import_defines(OE_CHONK_OPAQUE)
+#pragma import_defines(OE_CHONK_DITHER_FADE)
+#pragma import_defines(OE_CHONK_BAKED_CROWN)
+#pragma import_defines(OE_CHONK_COVERAGE)
 
 struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;
 #pragma include PBRMaterial.glsl
@@ -179,11 +184,17 @@ flat in uint oe_color_is_linear;
 #define NT_DEFAULT 0
 #define NT_ZAXIS 1
 #define NT_HEMISPHERE 2 
+#define NT_BAKED 4
 
 const float oe_normal_attenuation = 0.65;
 
 uniform float oe_alpha_discard_threshold = 0.5;
 uniform float oe_shadow_alpha_discard_threshold = 0.5;
+
+#ifdef OE_CHONK_COVERAGE
+// Nested page/representation intervals encode an alpha weight, independent of texture mip compensation.
+uniform vec2 oe_chonk_coverage = vec2(0.0,1.0);
+#endif
 
 // make a TBN from normal, vertex position, and texture uv
 // https://gamedev.stackexchange.com/a/86543
@@ -207,11 +218,55 @@ mat3 make_tbn(vec3 N, vec3 p, vec2 uv)
     return mat3(T * invmax, B * invmax, N);
 }
 
+#ifdef OE_CHONK_BAKED_CROWN
+// A parallel camera has one eye direction; using its eye position would bend normals across an orthographic view.
+vec3 oe_chonk_crown_view()
+{
+    return gl_ProjectionMatrix[3][3] != 0.0 ? vec3(0,0,1) : normalize(-oe_position_view);
+}
+
+// Transport a captured foliage-normal distribution without adding a new specular lobe or changing its detail.
+vec3 oe_chonk_crown_normal(vec3 normal, vec3 capture, vec3 view)
+{
+    vec3 axis = cross(capture, view);
+    return normal + cross(axis, normal) + cross(axis, cross(axis, normal)) /
+        max(1.0 + dot(capture, view), 1e-4);
+}
+#endif
+
 void oe_chonk_default_fragment(inout vec4 color)
 {
-    // When simulating normals, we invert the texture coordinates
-    // for backfacing geometry
-    if (!gl_FrontFacing && oe_normal_technique != NT_DEFAULT)
+    float coverage = 1.0;
+    #ifdef OE_CHONK_COVERAGE
+    coverage = clamp(oe_chonk_coverage.y - oe_chonk_coverage.x, 0.0, 1.0);
+    #endif
+    // Baked cards carry independent front/back captures, including normals and cutout silhouettes.
+    if (oe_normal_technique == NT_BAKED && !gl_FrontFacing)
+        oe_tex_uv.t -= 0.5;
+
+    #if defined(OE_CHONK_BAKED_CROWN) && !defined(OE_IS_SHADOW_CAMERA)
+    mat3 crownFrame;
+    vec3 crownView;
+    float crownCoverage = 1.0;
+    if (oe_normal_technique == NT_BAKED)
+    {
+        // Derive the planar frame in view space even in depth-only programs without a normal-transform stage.
+        vec3 cardNormal = normalize(cross(dFdx(oe_position_view), dFdy(oe_position_view))) *
+            (gl_FrontFacing ? 1.0 : -1.0);
+        crownFrame = make_tbn(cardNormal, oe_position_view, oe_tex_uv);
+        crownFrame[0] = normalize(crownFrame[0]);
+        crownFrame[1] = normalize(crownFrame[1]);
+        crownView = oe_chonk_crown_view();
+        // Keep the best-facing card at full coverage, suppressing edge-on slices through its crown.
+        // Relative rather than absolute facing avoids holes between the horizontal and upright views.
+        vec3 facing = abs(transpose(crownFrame) * crownView);
+        crownCoverage = smoothstep(0.45, 0.95, facing.z / max(max(facing.x, facing.y), facing.z));
+    }
+    #endif
+
+    // Legacy simulated normals mirror full-texture cards. Authored volume normals
+    // retain their atlas coordinates: mirroring U would sample a different view.
+    if (!gl_FrontFacing && (oe_normal_technique == NT_ZAXIS || oe_normal_technique == NT_HEMISPHERE))
     {
         oe_tex_uv.s = 1.0 - oe_tex_uv.s;
     }
@@ -230,10 +285,26 @@ void oe_chonk_default_fragment(inout vec4 color)
                         12.92 * c, lessThanEqual(c, vec3(0.0031308)));
     }
 
+    // Recover foliage coverage lost to mip filtering in every pass. Shadow maps often minify leaf textures
+    // more than the color view; testing their uncorrected alpha can erase the entire crown, leaving only trunks.
+    // Keep this before silhouette cutouts and opacity ramps; a zero per-draw coefficient leaves alpha unchanged.
+    if (oe_albedo_tex > 0UL)
+    {
+        vec2 miplevel = textureQueryLod(sampler2D(oe_albedo_tex), oe_tex_uv);
+        color.a *= (1.0 + miplevel.x * oe_alpha_cutoff);
+    }
+
 #if defined(OE_IS_SHADOW_CAMERA) || defined(OE_IS_DEPTH_CAMERA)
+
+    #if defined(OE_CHONK_BAKED_CROWN) && !defined(OE_IS_SHADOW_CAMERA)
+    // A camera depth pass must not leave invisible edge-on sheets in front of visible geometry.
+    color.a *= crownCoverage;
+    #endif
 
     // for shadowing cameras, just do a simple step discard.
     color.a = step(oe_shadow_alpha_discard_threshold, color.a * oe_fade);
+    // Single-sample shadow/depth passes select the dominant representation without thinning its leaf silhouette.
+    color.a *= step(0.5, coverage);
   #ifndef OE_CHONK_OPAQUE // opaque, unfaded instances never fail it; omitting keeps early-Z
     if (color.a < 1.0)
         discard;
@@ -253,18 +324,25 @@ void oe_chonk_default_fragment(inout vec4 color)
 
 #else // normal rendering path:
 
-    // Adjust the alpha based on the calculated mipmap level.
-    // Looks better and actually helps performance a bit as well.
-    // https://bgolus.medium.com/anti-aliased-alpha-test-the-esoteric-alpha-to-coverage-8b177335ae4f
-    // https://tinyurl.com/fhu4zdxz
-    if (oe_albedo_tex > 0UL)
+    #ifdef OE_CHONK_BAKED_CROWN
+    if (oe_normal_technique == NT_BAKED)
     {
-        vec2 miplevel = textureQueryLod(sampler2D(oe_albedo_tex), oe_tex_uv);
-        color.a *= (1.0 + miplevel.x * oe_alpha_cutoff);
+        // Apply after mip compensation so distance cannot bring an edge-on card back into view.
+        color.a = clamp(color.a, 0.0, 1.0) * crownCoverage;
     }
-    color.a *= oe_fade;
-
-  #ifndef OE_USE_ALPHA_TO_COVERAGE
+    #endif
+    #ifdef OE_CHONK_COVERAGE
+    // Saturate mip compensation before any opacity ramp, otherwise high mips can cancel a transition's fade.
+    color.a = clamp(color.a, 0.0, 1.0) * coverage;
+    #endif
+  #if defined(OE_USE_ALPHA_TO_COVERAGE) || defined(OE_CHONK_ALPHA_TO_COVERAGE)
+    // Requested MSAA does not guarantee that this camera/FBO has multisample storage.
+    // Keep cutouts functional in single-sample render targets instead of drawing solid foliage cards.
+    if (gl_NumSamples > 1)
+        color.a *= oe_fade;
+    else
+  #endif
+    {
 
     // When A2C is not available, we force the alpha to 0 or 1 and then
     // discard the invisible fragments.    
@@ -274,7 +352,15 @@ void oe_chonk_default_fragment(inout vec4 color)
     // flickering artifacts.
     // (TODO: consider a cheap alpha-only pass that we can sample to prevent overdraw
     // and discard in the expensive shader)
-    color.a = step(oe_alpha_discard_threshold, color.a);
+    #ifdef OE_CHONK_DITHER_FADE
+    // Screen-door coverage separates LOD/distance fade from the asset's alpha test; no blended draw ordering needed.
+    const int bayer[16] = int[16](0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5);
+    ivec2 pixel = ivec2(gl_FragCoord.xy) & 3;
+    float threshold = (float(bayer[pixel.y*4 + pixel.x]) + 0.5) / 16.0;
+    color.a = step(oe_alpha_discard_threshold, color.a) * step(threshold, oe_fade);
+    #else
+    color.a = step(oe_alpha_discard_threshold, color.a * oe_fade);
+    #endif
     #ifndef OE_CHONK_OPAQUE
     // The culler routes only opaque, unfaded instances to the OE_CHONK_OPAQUE lists. Just
     // compiling a discard makes the GPU test depth after shading once depth writes are on.
@@ -282,7 +368,7 @@ void oe_chonk_default_fragment(inout vec4 color)
         discard;
     #endif
 
-  #endif // !OE_USE_ALPHA_TO_COVERAGE
+    } // single-sample alpha test
 
 #endif // !OE_GPUCULL_DEBUG
 
@@ -321,17 +407,35 @@ void oe_chonk_default_fragment(inout vec4 color)
         }
     }
 
-    //pixel_normal = vec3(0, 0, 1); // testing
+    mat3 TBN;
+    #ifdef OE_CHONK_BAKED_CROWN
+    if (oe_normal_technique == NT_BAKED) TBN = crownFrame;
+    else
+    #endif
+        TBN = make_tbn(normalize(normal_view), oe_position_view, oe_tex_uv);
 
-
-    mat3 TBN = make_tbn(
-        normalize(normal_view),
-        oe_position_view,
-        oe_tex_uv);
+    if (oe_normal_technique == NT_BAKED)
+    {
+        // Bake coordinates are an orthonormal card frame, independent of atlas aspect or instance scale.
+        // Derivative cotangents reverse on a back face; the stored frame and its normal must not.
+        float facing = gl_FrontFacing ? 1.0 : -1.0;
+        TBN[0] = normalize(TBN[0]) * facing;
+        TBN[1] = normalize(TBN[1]) * facing;
+    }
 
     // Without a normal map, preserve the geometric normal even if UVs
     // are missing or degenerate.
     vp_Normal = oe_normal_tex > 0 ? TBN * pixel_normal : normalize(normal_view);
+
+    #ifdef OE_CHONK_BAKED_CROWN
+    if (oe_normal_technique == NT_BAKED)
+    {
+        // The capture is a view of a foliage volume, not a lit sheet. Rotate its normal distribution
+        // from the capture axis toward the actual eye, as a rounded crown would present a new surface.
+        vec3 capture = TBN[2] * (gl_FrontFacing ? 1.0 : -1.0);
+        vp_Normal = oe_chonk_crown_normal(vp_Normal, capture, crownView);
+    }
+    #endif
 
     if (oe_normal_technique == NT_ZAXIS)
     {
@@ -344,7 +448,8 @@ void oe_chonk_default_fragment(inout vec4 color)
     if (oe_pbr_tex > 0 || oe_occlusion_tex > 0 || oe_pbr_layoutAndFactors.x != OE_PBR_LAYOUT_DRAM)
     {
         // apply PBR maps:
-        vec4 texel = oe_pbr_tex > 0 ? texture(sampler2D(oe_pbr_tex), oe_tex_uv) : vec4(1);
+        vec4 texel = oe_pbr_tex > 0 ? texture(sampler2D(oe_pbr_tex), oe_tex_uv) :
+            oe_pbr_default(oe_pbr_layoutAndFactors.x);
         float ao = oe_occlusion_tex > 0 ? texture(sampler2D(oe_occlusion_tex), oe_tex_uv).r : -1.0;
         texel = oe_pbr_decode(texel, oe_pbr_layoutAndFactors, ao);
 

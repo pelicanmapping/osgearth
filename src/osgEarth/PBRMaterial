@@ -20,8 +20,11 @@ namespace osgEarth
     class OSGEARTH_EXPORT PBRMaterial
     {
     public:
-        // RM uses glTF's G/B channels without reading AO from R.
-        enum Layout { DRAM = 0, ORM = 1, RM = 2 };
+        //! Channel packing of the linear (non-sRGB) PBR data texture.
+        //! RM uses glTF's G/B channels without reading AO from R.
+        //! VRV's MTL_GLS_AO stores metallic, glossiness (1-roughness), AO in RGB;
+        //! it has no displacement and ignores alpha. Factors apply after decoding.
+        enum Layout { DRAM = 0, ORM = 1, RM = 2, MTL_GLS_AO = 3 };
 
         PBRMaterial() = default;
         PBRMaterial(const PBRMaterial& rhs) = default;
@@ -47,6 +50,8 @@ namespace osgEarth
         OE_PROPERTY(float, metallicFactor, 1.0f);
         OE_PROPERTY(float, occlusionStrength, 1.0f);
         //! A packed input takes precedence over separate scalar rasters;
+        //! e.g. <material layout="mtl_gls_ao" packed="surface_MTL_GLS_AO.dds"/>.
+        //! Packed images retain their original channels, compression, and mipmaps;
         //! aoImage/ao may supply an independent occlusion texture in this case.
         OE_OPTION(URI, packed);
         OE_OPTION(URI, color);
@@ -71,9 +76,10 @@ namespace osgEarth
             conf.get("height", displacement());
             conf.get("opacity", opacity());
             conf.get("packed", packed());
-            const auto packing = conf.value("layout");
+            const auto packing = Strings::toLower(conf.value("layout"));
             if (packing == "orm") layout() = ORM;
             else if (packing == "rm") layout() = RM;
+            else if (packing == "mtl_gls_ao" || packing == "vrv") layout() = MTL_GLS_AO;
             conf.get("roughness_factor", roughnessFactor());
             conf.get("metallic_factor", metallicFactor());
             conf.get("occlusion_strength", occlusionStrength());
@@ -91,7 +97,9 @@ namespace osgEarth
             conf.set("displacement", displacement());
             conf.set("opacity", opacity());
             conf.set("packed", packed());
-            if (layout() != DRAM) conf.set("layout", layout() == ORM ? "orm" : "rm");
+            if (layout() == ORM) conf.set("layout", "orm");
+            else if (layout() == RM) conf.set("layout", "rm");
+            else if (layout() == MTL_GLS_AO) conf.set("layout", "mtl_gls_ao");
             if (roughnessFactor() != 1.0f) conf.set("roughness_factor", roughnessFactor());
             if (metallicFactor() != 1.0f) conf.set("metallic_factor", metallicFactor());
             if (occlusionStrength() != 1.0f) conf.set("occlusion_strength", occlusionStrength());

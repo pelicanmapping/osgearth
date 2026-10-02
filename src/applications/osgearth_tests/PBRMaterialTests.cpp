@@ -19,10 +19,11 @@ namespace osgEarth { namespace Tests { extern std::string executablePath; } }
 
 namespace
 {
-    osg::ref_ptr<osg::Image> image(const osg::Vec4& color)
+    // Create a constant linear texture; RGB exercises packed formats without an alpha channel.
+    osg::ref_ptr<osg::Image> image(const osg::Vec4& color, GLenum format = GL_RGBA)
     {
         osg::ref_ptr<osg::Image> result = new osg::Image();
-        result->allocateImage(2, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+        result->allocateImage(2, 2, 1, format, GL_UNSIGNED_BYTE);
         for (unsigned y = 0; y < 2; ++y)
             for (unsigned x = 0; x < 2; ++x) result->setColor(color, x, y);
         return result;
@@ -316,6 +317,161 @@ TEST_CASE("PBR material rendering comparison", "[.pbr-render-worker]")
             for (unsigned c = 0; c < 3; ++c)
                 REQUIRE(std::abs((packed[c]) - (ordinary[c])) <= (3/255.0f));
             REQUIRE(glGetError() == GL_NO_ERROR);
+        }
+    }
+}
+
+
+// Verify public configuration names, round trips, and packed-image ownership without repacking.
+TEST_CASE("VRV PBR configuration preserves packing and supplied images", "[pbr][vrv]")
+{
+    for (const auto& name : { "mtl_gls_ao", "MTL_GLS_AO", "vrv", "VRV" })
+    {
+        Config config("material");
+        config.set("layout", name);
+        config.set("packed", "surface_MTL_GLS_AO.dds");
+        config.set("roughness_factor", 0.5f);
+        config.set("metallic_factor", 0.25f);
+        config.set("occlusion_strength", 0.75f);
+        PBRMaterial source(config);
+        REQUIRE(source.layout() == PBRMaterial::MTL_GLS_AO);
+        REQUIRE_FALSE(source.isSimple());
+        REQUIRE(source.getConfig().value("layout") == "mtl_gls_ao");
+        PBRMaterial restored(source.getConfig());
+        REQUIRE(restored.layout() == source.layout());
+        REQUIRE(restored.packed()->base() == source.packed()->base());
+        REQUIRE(restored.roughnessFactor() == source.roughnessFactor());
+        REQUIRE(restored.metallicFactor() == source.metallicFactor());
+        REQUIRE(restored.occlusionStrength() == source.occlusionStrength());
+
+        // A compressed image with two extra mip levels must reach the GPU unchanged.
+        source.packedImage = new osg::Image();
+        source.packedImage->setImage(4, 4, 1, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT,
+            GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, GL_UNSIGNED_BYTE, new unsigned char[48](), osg::Image::USE_NEW_DELETE);
+        source.packedImage->setMipmapLevels(osg::Image::MipmapDataType{ 16, 32 });
+        source.aoImage = image(osg::Vec4(.2f, .4f, .6f, 1));
+        source.roughness() = URI("unused-missing-roughness.png");
+        source.metal() = URI("unused-missing-metal.png");
+        source.displacement() = URI("unused-missing-height.png");
+        PBRTexture loaded;
+        REQUIRE(loaded.load(source).isOK());
+        REQUIRE(loaded.pbr->getImage(0) == source.packedImage);
+        REQUIRE(loaded.pbr->getImage(0)->isCompressed());
+        REQUIRE(loaded.pbr->getImage(0)->getNumMipmapLevels() == 3);
+        REQUIRE(loaded.occlusion->getImage(0) == source.aoImage);
+        REQUIRE(loaded.layoutAndFactors == osg::Vec4(PBRMaterial::MTL_GLS_AO, .5f, .75f, .25f));
+    }
+    for (const auto layout : { PBRMaterial::DRAM, PBRMaterial::ORM, PBRMaterial::RM })
+    {
+        PBRMaterial source;
+        source.layout() = layout;
+        REQUIRE(PBRMaterial(source.getConfig()).layout() == layout);
+    }
+}
+
+// Run all three rendering paths in a fresh process to isolate shared GL object lifetimes.
+TEST_CASE("VRV and existing PBR layouts render consistently", "[pbr][vrv][gpu]")
+{
+    const auto& executable = osgEarth::Tests::executablePath;
+#ifdef _WIN32
+    const std::string command = "\"\"" + executable + "\" \"[.pbr-vrv-worker]\"\"";
+#else
+    std::string quoted = "'";
+    for (char c : executable) quoted += c == '\'' ? "'\\''" : std::string(1, c);
+    const std::string command = quoted + "' '[.pbr-vrv-worker]'";
+#endif
+    REQUIRE(std::system(command.c_str()) == 0);
+}
+
+// Read back decoded material values, including gloss inversion, missing maps, and separate AO.
+TEST_CASE("Packed PBR GPU channel decoding", "[.pbr-vrv-worker]")
+{
+    ChonkTest::Renderer renderer;
+    REQUIRE(renderer.initialize());
+    renderer.viewer.getCamera()->setViewMatrixAsLookAt(osg::Vec3d(0,0,5), osg::Vec3d(), osg::Vec3d(0,1,0));
+    auto* rootVP = VirtualProgram::getOrCreate(renderer.root->getOrCreateStateSet());
+    Util::Shaders shaders;
+    shaders.load(rootVP, shaders.PBR);
+    const std::string declarations =
+        "struct OE_PBR { float displacement, roughness, ao, metal; } oe_pbr;\n";
+
+    struct Sample
+    {
+        PBRMaterial::Layout layout;
+        osg::Vec4 packed;
+        osg::Vec4 expected; // decoded DRAM before factors
+        bool hasMap = true;
+        bool separateAO = false;
+        bool rgb = false;
+    };
+    // Asymmetric, exactly representable UNORM values expose accidental channel swaps.
+    const float a = 51/255.0f, b = 102/255.0f, c = 204/255.0f;
+    const std::vector<Sample> samples = {
+        { PBRMaterial::MTL_GLS_AO, osg::Vec4(a,b,c,1), osg::Vec4(0,1-b,c,a), true, false, true },
+        { PBRMaterial::MTL_GLS_AO, osg::Vec4(a,0,c,0), osg::Vec4(0,1,c,a) },
+        { PBRMaterial::MTL_GLS_AO, osg::Vec4(a,1,c,0), osg::Vec4(0,0,c,a) },
+        { PBRMaterial::MTL_GLS_AO, osg::Vec4(a,b,c,1), osg::Vec4(0,1-b,a,a), true, true },
+        { PBRMaterial::MTL_GLS_AO, osg::Vec4(), osg::Vec4(0,1,1,1), false },
+        { PBRMaterial::MTL_GLS_AO, osg::Vec4(), osg::Vec4(0,1,a,1), false, true },
+        { PBRMaterial::ORM, osg::Vec4(a,b,c,1), osg::Vec4(0,b,a,c) },
+        { PBRMaterial::RM, osg::Vec4(a,b,c,1), osg::Vec4(0,b,1,c) },
+        { PBRMaterial::DRAM, osg::Vec4(a,b,c,a), osg::Vec4(a,b,c,a) },
+        { PBRMaterial::ORM, osg::Vec4(), osg::Vec4(0,1,1,1), false },
+        { PBRMaterial::RM, osg::Vec4(), osg::Vec4(0,1,1,1), false }
+    };
+    unsigned sampleIndex = 0;
+    for (const auto& sample : samples)
+    {
+        INFO("Sample: " << sampleIndex++);
+        PBRMaterial description;
+        description.layout() = sample.layout;
+        description.roughnessFactor() = .5f;
+        description.metallicFactor() = .25f;
+        description.occlusionStrength() = .75f;
+        if (sample.hasMap) description.packedImage = image(sample.packed, sample.rgb ? GL_RGB : GL_RGBA);
+        if (sample.separateAO) description.aoImage = image(osg::Vec4(a,1,1,1));
+        osg::ref_ptr<PBRTexture> texture = new PBRTexture();
+        REQUIRE(texture->load(description).isOK());
+        // Alpha in a packed map (including zero) must never become surface opacity.
+        osg::ref_ptr<osg::Geometry> generated = ChonkTest::mesh();
+        generated->getOrCreateStateSet()->setTextureAttributeAndModes(0, texture);
+        ShaderGenerator().run(generated);
+        osg::ref_ptr<osg::Geometry> standard = ChonkTest::mesh();
+        texture->install(standard->getOrCreateStateSet());
+        PBRTexture::installProgram(standard->getOrCreateStateSet());
+        std::vector<osg::ref_ptr<osg::Node>> paths = { standard, generated };
+        if (Capabilities::get().supportsNVGL())
+        {
+            auto chonk = renderer.factory->getOrCreateChonk(standard);
+            REQUIRE(chonk);
+            REQUIRE(chonk->_materials.front()->layoutAndFactors == texture->layoutAndFactors);
+            osg::ref_ptr<ChonkDrawable> drawable = new ChonkDrawable();
+            drawable->add(chonk, osg::Matrixf());
+            paths.emplace_back(drawable);
+        }
+        const osg::Vec4 expected(sample.expected.g()*.5f, 1+.75f*(sample.expected.b()-1),
+            sample.expected.a()*.25f, 1);
+        for (unsigned path = 0; path < paths.size(); ++path)
+        {
+            INFO("Rendering path (standard/generated/Chonk): " << path);
+            renderer.setScene(paths[path]);
+            for (unsigned mode = 0; mode < 2; ++mode)
+            {
+                rootVP->setFunction("pbr_vrv_values", declarations +
+                    "void pbr_vrv_values(inout vec4 color) { " + (mode == 0 ?
+                    "color = vec4(oe_pbr.roughness, oe_pbr.ao, oe_pbr.metal, 1);" :
+                    "color = vec4(oe_pbr.displacement, color.a, 0, 1);") + " }",
+                    VirtualProgram::LOCATION_FRAGMENT_LIGHTING);
+                renderer.frame(); renderer.frame();
+                const auto actual = renderer.pixels()->getColor(128,128);
+                const auto target = mode == 0 ? expected : osg::Vec4(sample.expected.r(),1,0,1);
+                for (unsigned channel = 0; channel < 3; ++channel)
+                {
+                    INFO("Mode: " << mode << ", channel: " << channel);
+                    REQUIRE(std::abs(actual[channel] - target[channel]) <= 3/255.0f);
+                }
+                REQUIRE(glGetError() == GL_NO_ERROR);
+            }
         }
     }
 }

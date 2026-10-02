@@ -23,6 +23,9 @@ namespace osgEarth { namespace Util
         _sources[ChonkCulling] = @Chonk.Culling.glsl@;
 
         // Chonk occlusion-culling depth pyramid
+        ChonkScreenSize = "Chonk.ScreenSize.glsl";
+        _sources[ChonkScreenSize] = @Chonk.ScreenSize.glsl@;
+
         ChonkHiZ = "Chonk.HiZ.glsl";
         _sources[ChonkHiZ] = @Chonk.HiZ.glsl@;
 

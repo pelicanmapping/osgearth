@@ -2066,6 +2066,70 @@ namespace
 {
     using ICO = osgUtil::IncrementalCompileOperation;
 
+    // OSG 3.6 geometry compilation binds new EBOs before binding its own VAO.
+    // This can overwrite the last rendered VAO's EBO without updating that
+    // drawable's VertexArrayState cache. Preserve the actual GL attachment,
+    // since State::getCurrentVertexArrayState() usually points to the global
+    // VAS after Drawable::draw returns, rather than the still-bound VAO.
+    struct ScopedCompileVertexArrayBinding
+    {
+        osg::State& _state;
+        osg::GLExtensions* _ext;
+        GLint _vao = 0;
+        GLint _ebo = 0;
+
+        //! Snapshot the render VAO's EBO on its owning, current GL context.
+        explicit ScopedCompileVertexArrayBinding(osg::State& state) :
+            _state(state),
+            _ext(state.get<osg::GLExtensions>())
+        {
+            constexpr GLenum vertexArrayBinding = 0x85B5; // GL_VERTEX_ARRAY_BINDING
+            glGetIntegerv(vertexArrayBinding, &_vao);
+            if (_vao != 0)
+                glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING_ARB, &_ebo);
+        }
+
+        //! Restore the attachment even if compilation throws; do not rebind deleted objects.
+        ~ScopedCompileVertexArrayBinding()
+        {
+            if (_vao != 0 && _ext->glIsVertexArray(_vao))
+            {
+                // Bind unconditionally: custom compile callbacks can bypass OSG's cache.
+                _ext->glBindVertexArray(_vao);
+                _state.setCurrentVertexArrayObject(_vao);
+                _ext->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER_ARB,
+                    _ebo != 0 && _ext->glIsBuffer(_ebo) ? _ebo : 0);
+            }
+            else
+            {
+                _ext->glBindVertexArray(0);
+                _state.setCurrentVertexArrayObject(0);
+            }
+
+            // Raw buffer uploads also bypass the current VAS's binding cache.
+            _state.getCurrentVertexArrayState()->resetBufferObjectPointers();
+        }
+    };
+
+    struct VertexArraySafeICO : public ICO
+    {
+        //! Run normal ICO scheduling with the render VAO's EBO protected per invocation.
+        void operator()(osg::GraphicsContext* context) override
+        {
+            osg::State* state = context->getState();
+            osg::GLExtensions* ext = state->get<osg::GLExtensions>();
+            if (ext->glBindVertexArray && ext->glIsVertexArray && ext->glIsBuffer)
+            {
+                ScopedCompileVertexArrayBinding restore(*state);
+                ICO::operator()(context);
+            }
+            else
+            {
+                ICO::operator()(context);
+            }
+        }
+    };
+
     struct ICOCallback : public ICO::CompileCompletedCallback
     {
         jobs::promise<osg::ref_ptr<osg::Node>> _promise;
@@ -2089,6 +2153,12 @@ namespace
     };
 
     static osg::ref_ptr<osg::DummyObject> s_icoMarker = new osg::DummyObject();
+}
+
+osgUtil::IncrementalCompileOperation*
+GLUtils::createIncrementalCompileOperation()
+{
+    return new VertexArraySafeICO();
 }
 
 std::atomic_int GLObjectsCompiler::_jobsActive;

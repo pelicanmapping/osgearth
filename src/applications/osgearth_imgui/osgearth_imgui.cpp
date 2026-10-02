@@ -5,6 +5,7 @@
 #include <osgEarthImGui/ImGuiApp>
 #include <osgEarth/EarthManipulator>
 #include <osgEarth/ExampleResources>
+#include <osgEarth/GLUtils>
 #include <osgViewer/Viewer>
 #include <osgGA/TrackballManipulator>
 
@@ -74,8 +75,16 @@ main(int argc, char** argv)
 
     osgEarth::initialize(arguments);
 
+    // Handle ICO here so OSG's argument parser does not install its unprotected implementation.
+    bool useICO = arguments.read("--ico");
+
     // Set up the viewer and input handler:
     osgViewer::Viewer viewer(arguments);
+    if (useICO)
+    {
+        viewer.setIncrementalCompileOperation(GLUtils::createIncrementalCompileOperation());
+        OE_NOTICE << LC << "ICO vertex-array/index-buffer protection enabled" << std::endl;
+    }
     viewer.setThreadingModel(viewer.SingleThreaded);
     viewer.setCameraManipulator(new EarthManipulator(arguments));
 

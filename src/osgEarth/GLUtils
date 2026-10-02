@@ -27,6 +27,7 @@
 
 namespace osgUtil {
     class StateToCompile;
+    class IncrementalCompileOperation;
 }
 
 #define OE_GL_ZONE osgEarth::ScopedGLDebugGroup __oe_glscope(typeid(*this).name())
@@ -39,6 +40,10 @@ namespace osgEarth
 {
     struct OSGEARTH_EXPORT GLUtils
     {
+        //! Creates an ICO that preserves the previously bound VAO's index buffer during compilation.
+        //! Install on a viewer before realizing it; the viewer takes ownership.
+        static osgUtil::IncrementalCompileOperation* createIncrementalCompileOperation();
+
         //! Sets any default uniforms required by the implementation
         static void setGlobalDefaults(osg::StateSet* stateSet);
 

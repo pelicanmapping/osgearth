@@ -7,6 +7,13 @@
 | OSGEARTH_TERRAIN_CONCURRENCY | Number of threads to use for terrain tile loading. | `4` |
 
 ### Debugging
+
+Set `OSGEARTH_TEXTURE_ARENA_WARN_GPU_WORK=1` before starting the application to warn whenever
+a TextureArena texture compile requires GPU compression or mipmap generation. Warnings include
+the texture name, source URI/filename when available, and allocated width x height x depth
+(or layer count for arrays). Any set value enables this diagnostic;
+the setting is read once on the first image upload. Disabled by default.
+
 | Variable | Description | Default |
 | -------- | ----------- | ------- |
 | OSGEARTH_NOTIFY_LEVEL | Verbosity of console output. Options are `DEBUG`, `INFO`, `NOTICE`, and `FATAL`. `INFO` is usually sufficient for most debugging purposes. | `NOTICE` |

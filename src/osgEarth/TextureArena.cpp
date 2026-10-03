@@ -14,6 +14,7 @@
 #include <osg/Texture2D>
 #include <osg/Texture3D>
 #include <osg/Texture2DArray>
+#include <cstdlib>
 
 // osg 3.6:
 #ifndef GL_TEXTURE_2D_ARRAY
@@ -398,6 +399,42 @@ Texture::compileGLObjects(osg::State& state) const
 
         if (image)
         {
+            // Read once; leave format queries and name lookup out of the normal upload path.
+            static const bool warnGPUWork = std::getenv("OSGEARTH_TEXTURE_ARENA_WARN_GPU_WORK") != nullptr;
+            if (warnGPUWork)
+            {
+                // Inspect the allocated storage to cover explicit compressed internal formats too.
+                GLint compressedStorage = GL_FALSE;
+                glGetTexLevelParameteriv(target(), 0, GL_TEXTURE_COMPRESSED_ARB, &compressedStorage);
+                bool gpuCompression = false;
+                if (compressedStorage == GL_TRUE)
+                {
+                    for (unsigned i = 0; i < imageCount; ++i)
+                        gpuCompression = gpuCompression || !osgTexture()->getImage(i)->isCompressed();
+                }
+                const bool gpuMipmaps = numMipLevelsInMemory < numMipLevelsToAllocate;
+                if (gpuCompression || gpuMipmaps)
+                {
+                    std::string label = name();
+                    if (label.empty()) label = osgTexture()->getName();
+                    if (label.empty()) label = image->getFileName();
+                    if (label.empty()) label = image->getName();
+                    if (label.empty() && uri().isSet()) label = uri()->full();
+                    if (label.empty()) label = "<unnamed>";
+
+                    std::string source = uri().isSet() ? uri()->full() : std::string();
+                    for (unsigned i = 0; source.empty() && i < imageCount; ++i)
+                        source = osgTexture()->getImage(i)->getFileName();
+
+                    OE_WARN << LC << "Compiling texture '" << label << "' ("
+                        << widthToAllocate << "x" << heightToAllocate << "x" << depthToAllocate << ") requires GPU "
+                        << (gpuCompression ? "compression" : "")
+                        << (gpuCompression && gpuMipmaps ? " and " : "")
+                        << (gpuMipmaps ? "mipmap generation" : "")
+                        << (source.empty() ? "" : " source='" + source + "'") << std::endl;
+                }
+            }
+
             // Blit our image to the GPU
             for (unsigned imageIndex = 0; imageIndex < imageCount; ++imageIndex)
             {

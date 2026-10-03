@@ -128,6 +128,7 @@ namespace
 }
 
 CesiumCreditsNode::CesiumCreditsNode(osg::View* view, CesiumUtility::CreditSystem* creditSystem)
+    : _lastCreditsCount(0)
 {
     setNumChildrenRequiringUpdateTraversal(1);
 
@@ -147,84 +148,87 @@ CesiumCreditsNode::CesiumCreditsNode(osg::View* view, CesiumUtility::CreditSyste
     addChild(_camera);
 }
 
-void CesiumCreditsNode::nextFrame()
-{
-    _creditSystem->startNextFrame();
-}
-
 void CesiumCreditsNode::updateCredits()
 {
     std::vector< ParsedCredit > parsedCredits;
 
     auto creditSystem = _creditSystem;
-    auto credits = creditSystem->getCreditsToShowThisFrame();
-    for (auto& credit : credits)
-    {
-        if (creditSystem->shouldBeShownOnScreen(credit))
-        {
-            auto html = creditSystem->getHtml(credit);
-            parseCredit(html, parsedCredits);            
-        }
-    }
+    auto credits = _creditSystem->getSnapshot();
 
-    _camera->removeChildren(0, _camera->getNumChildren());
+    auto creditsToShowThisFrame = credits.currentCredits;
 
-    osg::Geode* geode = new osg::Geode();
-    _camera->addChild(geode);
+    auto updated = creditsToShowThisFrame.size() != _lastCreditsCount || credits.removedCredits.size() > 0;
 
-    float margin = 4.0f;
-    osg::Vec3 position(5, 5, 0);
-    for (unsigned int i = 0; i < parsedCredits.size(); ++i)
-    {
-        auto& c = parsedCredits[i];
-        if (!c.text.empty())
-        {
-            osgText::Text* text = new  osgText::Text;
-            text->setFont(osgEarth::Registry::instance()->getDefaultFont());
-            text->setPosition(position);
-            text->setText(c.text);
-            geode->addDrawable(text);
-            position.x() += (text->getBoundingBox().xMax() - text->getBoundingBox().xMin()) + margin;
-        }
+    if (updated) {
+        _lastCreditsCount = creditsToShowThisFrame.size();
 
-        if (!c.image.empty())
-        {
-            osg::Texture2D* texture = getOrCreateTexture(c.image);
-            if (texture)
+        for (auto& credit : creditsToShowThisFrame) {
+            if (creditSystem->shouldBeShownOnScreen(credit))
             {
-                osg::Geometry* geometry = new osg::Geometry;
-                osg::Vec3Array* verts = new osg::Vec3Array;
-                geometry->setVertexArray(verts);
-                verts->push_back(osg::Vec3(0, 0, 0));
-                verts->push_back(osg::Vec3(texture->getImage()->s(), 0, 0));
-                verts->push_back(osg::Vec3(texture->getImage()->s(), texture->getImage()->t(), 0));
-                verts->push_back(osg::Vec3(0, texture->getImage()->t(), 0));
+                auto html = creditSystem->getHtml(credit);
+                parseCredit(html, parsedCredits);
+            }
+        }
+        _camera->removeChildren(0, _camera->getNumChildren());
 
-                osg::Vec2Array* texCoords = new osg::Vec2Array;
-                geometry->setTexCoordArray(0, texCoords);
-                texCoords->push_back(osg::Vec2(0, 0));
-                texCoords->push_back(osg::Vec2(1, 0));
-                texCoords->push_back(osg::Vec2(1, 1));
-                texCoords->push_back(osg::Vec2(0, 1));
+        osg::Geode* geode = new osg::Geode();
+        _camera->addChild(geode);
 
-                osg::Vec4Array* colors = new osg::Vec4Array;
-                colors->push_back(osg::Vec4(1, 1, 1, 1));
-                geometry->setColorArray(colors, osg::Array::BIND_OVERALL);
+        float margin = 4.0f;
+        osg::Vec3 position(5, 5, 0);
+        for (unsigned int i = 0; i < parsedCredits.size(); ++i)
+        {
+            auto& c = parsedCredits[i];
+            if (!c.text.empty())
+            {
+                osgText::Text* text = new  osgText::Text;
+                text->setFont(osgEarth::Registry::instance()->getDefaultFont());
+                text->setPosition(position);
+                text->setText(c.text);
+                geode->addDrawable(text);
+                position.x() += (text->getBoundingBox().xMax() - text->getBoundingBox().xMin()) + margin;
+            }
 
-                geometry->getOrCreateStateSet()->setTextureAttributeAndModes(0, texture, osg::StateAttribute::ON);
-                osg::DrawElementsUByte* de = new osg::DrawElementsUByte(GL_TRIANGLES);
-                de->push_back(0); de->push_back(1); de->push_back(2);
-                de->push_back(0); de->push_back(2); de->push_back(3);
+            if (!c.image.empty())
+            {
+                osg::Texture2D* texture = getOrCreateTexture(c.image);
+                if (texture)
+                {
+                    osg::Geometry* geometry = new osg::Geometry;
+                    osg::Vec3Array* verts = new osg::Vec3Array;
+                    geometry->setVertexArray(verts);
+                    verts->push_back(osg::Vec3(0, 0, 0));
+                    verts->push_back(osg::Vec3(texture->getImage()->s(), 0, 0));
+                    verts->push_back(osg::Vec3(texture->getImage()->s(), texture->getImage()->t(), 0));
+                    verts->push_back(osg::Vec3(0, texture->getImage()->t(), 0));
 
-                geometry->addPrimitiveSet(de);
+                    osg::Vec2Array* texCoords = new osg::Vec2Array;
+                    geometry->setTexCoordArray(0, texCoords);
+                    texCoords->push_back(osg::Vec2(0, 0));
+                    texCoords->push_back(osg::Vec2(1, 0));
+                    texCoords->push_back(osg::Vec2(1, 1));
+                    texCoords->push_back(osg::Vec2(0, 1));
 
-                osgEarth::Registry::shaderGenerator().run(geometry);
-                geode->addDrawable(geometry);
+                    osg::Vec4Array* colors = new osg::Vec4Array;
+                    colors->push_back(osg::Vec4(1, 1, 1, 1));
+                    geometry->setColorArray(colors, osg::Array::BIND_OVERALL);
 
-                position.x() += texture->getImage()->s() + margin;
+                    geometry->getOrCreateStateSet()->setTextureAttributeAndModes(0, texture, osg::StateAttribute::ON);
+                    osg::DrawElementsUByte* de = new osg::DrawElementsUByte(GL_TRIANGLES);
+                    de->push_back(0); de->push_back(1); de->push_back(2);
+                    de->push_back(0); de->push_back(2); de->push_back(3);
+
+                    geometry->addPrimitiveSet(de);
+
+                    osgEarth::Registry::shaderGenerator().run(geometry);
+                    geode->addDrawable(geometry);
+
+                    position.x() += texture->getImage()->s() + margin;
+                }
             }
         }
     }
+
 }
 
 osg::Texture2D* CesiumCreditsNode::getOrCreateTexture(const std::string& url)
@@ -254,8 +258,6 @@ void CesiumCreditsNode::traverse(osg::NodeVisitor& nv)
     {
         // Get the credits from the previous frame.
         updateCredits();
-        // Tell Cesium to start collecting new credits
-        nextFrame();
         auto vp = _view->getCamera()->getViewport();
         if (vp)
         {

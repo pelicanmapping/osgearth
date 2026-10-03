@@ -16,6 +16,7 @@ set(TARGET_SRC
     ImageUtilsTests.cpp
     PathTests.cpp
     PBRMaterialTests.cpp
+    MaterialTexturePreparationTests.cpp
     SkyNode2Tests.cpp
     CloudLayerTests.cpp
     CloudFilteringTests.cpp

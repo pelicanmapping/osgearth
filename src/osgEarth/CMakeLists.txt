@@ -358,6 +358,7 @@ SET(TARGET_H
     PagedNode
     PatchLayer
     PBRMaterial
+    MaterialTexturePreparation
     PhongLightingEffect
     Picker
     PlaceNode
@@ -724,6 +725,7 @@ set(TARGET_SRC
     PagedNode.cpp
     PatchLayer.cpp
     PBRMaterial.cpp
+    MaterialTexturePreparation.cpp
     PhongLightingEffect.cpp
     PlaceNode.cpp
     PMTiles.cpp

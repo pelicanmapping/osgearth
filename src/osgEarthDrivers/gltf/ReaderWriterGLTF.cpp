@@ -83,6 +83,7 @@ public:
         supportsOption("gltfSkipImagery", "Do not load textures");
         supportsOption("gltfSkipPBRTextures", "Load base color textures only");
         supportsOption("gltfSkipNormals", "Do not generate missing normals");
+        supportsOption("gltfPrepareTextures", "CPU-compress material textures and build mipmaps before caching");
         supportsOption("gltfForceReload", "Bypass the shared material cache");
         supportsOption("gltfDisableExternalAssetInstancing", "Create one ExternalNode per external asset reference");
     }

@@ -86,6 +86,7 @@
 #include <osgEarth/InstancedExternalNode>
 #include <osgEarth/Notify>
 #include <osgEarth/PBRMaterial>
+#include <osgEarth/MaterialTexturePreparation>
 #include <osgEarth/Registry>
 #include <osgEarth/ShaderGenerator>
 #include <osgEarth/ShaderUtils>
@@ -130,6 +131,7 @@ public:
         bool skipPBRTextures = false;
         bool skipNormals = false;
         bool forceReload = false;
+        bool prepareTextures = false;
         bool instanceExternalAssets = true;
 
         static Flags parse(const osgDB::Options* options)
@@ -147,6 +149,7 @@ public:
                 else if (token == "gltfSkipPBRTextures") flags.skipPBRTextures = true;
                 else if (token == "gltfSkipNormals") flags.skipNormals = true;
                 else if (token == "gltfForceReload") flags.forceReload = true;
+                else if (token == "gltfPrepareTextures") flags.prepareTextures = true;
                 else if (token == "gltfDisableExternalAssetInstancing") flags.instanceExternalAssets = false;
             }
             return flags;
@@ -1406,6 +1409,20 @@ public:
             return bound;
         }
 
+        //! Prepare before cache publication; synchronize duplicate image work across material cache misses.
+        //! Keep OSG's ordinary upload path consistent with TextureArena's sRGB storage.
+        static osg::ref_ptr<osgEarth::PBRTexture> prepareMaterial(osgEarth::PBRTexture* material)
+        {
+            static osgEarth::MaterialTexturePreparation preparation;
+            auto result = preparation.prepare(material);
+            auto* color = result.valid() ? dynamic_cast<osg::Texture2D*>(result->albedo.get()) : nullptr;
+            if (color && color != material->albedo.get() && color->getImage() && color->getImage()->isCompressed() &&
+                (color->getInternalFormat() == GL_COMPRESSED_SRGB_S3TC_DXT1_EXT ||
+                 color->getInternalFormat() == GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT))
+                color->setSubloadCallback(new CompressedSRGBUpload());
+            return result;
+        }
+
         //! A white material for untextured primitives; the shared program always samples an albedo.
         osgEarth::PBRTexture* defaultMaterial()
         {
@@ -1420,6 +1437,7 @@ public:
                 _defaultMaterial->normal = nullptr;
                 _defaultMaterial->pbr = nullptr;
                 configureTexture(_defaultMaterial->albedo.get(), nullptr, true);
+                if (_flags.prepareTextures) _defaultMaterial = prepareMaterial(_defaultMaterial);
             }
             return _defaultMaterial.get();
         }
@@ -1464,7 +1482,7 @@ public:
         {
             std::ostringstream key;
             key.precision(9);
-            key << "gltf-pbr-v2:" << !_flags.skipPBRTextures << ':' << _basisRequired << ':';
+            key << "gltf-pbr-v3:" << _flags.prepareTextures << ':' << !_flags.skipPBRTextures << ':' << _basisRequired << ':';
             if (_options) key << _options->getPluginStringData("BASIS_FORMAT");
             const cgltf_pbr_metallic_roughness& pbr = material.pbr_metallic_roughness;
             const cgltf_texture* textures[] = {
@@ -1514,6 +1532,8 @@ public:
             if (!result.valid())
             {
                 result = buildPBRTexture(material);
+                if (result.valid() && _flags.prepareTextures)
+                    result = prepareMaterial(result);
                 if (result.valid() && shared)
                 {
                     std::lock_guard<std::mutex> lock(_textureCache->mutex());

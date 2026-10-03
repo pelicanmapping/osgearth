@@ -140,8 +140,9 @@ namespace
         bool isDXT1 = (format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT);
         bool isDXT5 = (format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT);
         bool isBC5 = (format == (int)GL_COMPRESSED_RED_GREEN_RGTC2_EXT);
+        bool isBC4 = (format == (int)GL_COMPRESSED_RED_RGTC1_EXT);
 
-        if (isDXT1) blockSize = 8;
+        if (isDXT1 || isBC4) blockSize = 8;
         else blockSize = 16;
 
         int srcBytesPerPixel = isBC5 ? 2 : 4; // RG8 for BC5, RGBA for DXT
@@ -173,7 +174,14 @@ namespace
                         const unsigned char* row = in + (y + by) * srcStride + x * 4;
                         memcpy(block + by * 16, row, 16);
                     }
-                    stb_compress_dxt_block(dst, block, isDXT5 ? 1 : 0, mode);
+                    if (isBC4)
+                    {
+                        unsigned char red[16];
+                        for (unsigned i = 0; i < 16; ++i) red[i] = block[i * 4];
+                        stb_compress_bc4_block(dst, red);
+                    }
+                    else
+                        stb_compress_dxt_block(dst, block, isDXT5 ? 1 : 0, mode);
                 }
 
                 dst += blockSize;
@@ -201,7 +209,7 @@ public:
         if (input.isCompressed())
             return;
 
-        if (!ImageUtils::isPowerOfTwo(&input))
+        if (resizeToPowerOfTwo && !ImageUtils::isPowerOfTwo(&input))
         {
             unsigned int s = osg::Image::computeNearestPowerOfTwo(input.s());
             unsigned int t = osg::Image::computeNearestPowerOfTwo(input.t());
@@ -225,6 +233,10 @@ public:
         case osg::Texture::USE_RGTC2_COMPRESSION:
             compressedPixelFormat = GL_COMPRESSED_RED_GREEN_RGTC2_EXT;
             minLevelSize = 16;
+            break;
+        case osg::Texture::USE_RGTC1_COMPRESSION:
+            compressedPixelFormat = GL_COMPRESSED_RED_RGTC1_EXT;
+            minLevelSize = 8;
             break;
         default:
             OSG_WARN << "STB DXT: Unhandled compressed format " << compressedFormat << std::endl;
@@ -286,7 +298,8 @@ public:
 
                 // Allocate max possible size for this level
                 int maxOutputBytes = ((level_s + 3) / 4) * ((level_t + 3) / 4) *
-                    (compressedPixelFormat == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT ? 8 : 16);
+                    (compressedPixelFormat == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT ||
+                     compressedPixelFormat == GL_COMPRESSED_RED_RGTC1_EXT ? 8 : 16);
 
                 unsigned char* compressedLevelDataPtr = new unsigned char[maxOutputBytes];
                 memset(compressedLevelDataPtr, 0, maxOutputBytes);
@@ -335,7 +348,8 @@ public:
         else
         {
             int numBlocks = ((sourceImage->s() + 3) / 4) * ((sourceImage->t() + 3) / 4);
-            int blockSize = (compressedPixelFormat == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
+            int blockSize = (compressedPixelFormat == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT ||
+                compressedPixelFormat == GL_COMPRESSED_RED_RGTC1_EXT) ? 8 : 16;
             int maxOutputBytes = numBlocks * blockSize;
 
             unsigned char* out = new unsigned char[maxOutputBytes];

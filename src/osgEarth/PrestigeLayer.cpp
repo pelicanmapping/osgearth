@@ -427,6 +427,7 @@ void PrestigeLayer::addedToMap(const Map* map)
 {
     _readOptions = Registry::instance()->cloneOrCreateOptions(getReadOptions());
     _readOptions->setObjectCacheHint(osgDB::Options::CACHE_IMAGES);
+    _readOptions->setOptionString(_readOptions->getOptionString() + " gltfPrepareTextures");
     super::addedToMap(map);
     // Keep the factory alive with paged cells, and share prototypes/textures
     // across independent detail loads. TiledModelLayer owns the arena's update.

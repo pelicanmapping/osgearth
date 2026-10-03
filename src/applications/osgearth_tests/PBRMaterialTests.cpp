@@ -109,6 +109,25 @@ namespace
     }
 }
 
+// Preparation must participate in the loader cache key and publish a reusable prepared material.
+TEST_CASE("glTF prepares material textures before sharing them", "[pbr][materialprepare]")
+{
+    GLTFFixture fixture;
+    auto plain = fixture.load();
+    auto ready = fixture.load("gltfPrepareTextures");
+    auto shared = fixture.load("gltfPrepareTextures");
+    REQUIRE_FALSE(material(plain.front())->albedo->getImage(0)->isCompressed());
+    REQUIRE(material(ready.front())->albedo->getImage(0)->isCompressed());
+    CHECK(material(ready.front())->albedo->getImage(0)->getNumMipmapLevels() == 2);
+    CHECK(material(ready.front()) == material(shared.front()));
+    CHECK(material(plain.front()) != material(ready.front()));
+    // Different factors prevent material sharing, but should still reuse the prepared image.
+    fixture.json["materials"][0u]["pbrMetallicRoughness"]["roughnessFactor"] = 0.7;
+    auto different = fixture.load("gltfPrepareTextures");
+    CHECK(material(different.front()) != material(ready.front()));
+    CHECK(material(different.front())->albedo->getImage(0) == material(ready.front())->albedo->getImage(0));
+}
+
 TEST_CASE("PBR materials prefer supplied images and produce valid defaults", "[pbr]")
 {
     PBRMaterial description;

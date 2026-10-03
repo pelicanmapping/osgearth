@@ -4,6 +4,7 @@ set(TARGET_SRC
     main.cpp
     ChonkBenchmarks.cpp
     ChonkMaterialBenchmarks.cpp
+    MaterialTexturePreparationBenchmarks.cpp
     VirtualProgramBenchmarks.cpp
     VirtualProgramProfileBenchmarks.cpp
     CacheBenchmarks.cpp)

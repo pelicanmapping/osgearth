@@ -1,0 +1,32 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarth/Common>
+#include <osgEarth/PBRMaterial>
+#include <memory>
+
+namespace osgEarth
+{
+    class ProgressCallback;
+
+    //! CPU texture preparation shared by model-loading threads; no GL context required.
+    class OSGEARTH_EXPORT MaterialTexturePreparation
+    {
+    public:
+        //! Retain up to cacheBytes of prepared images across tile unloads (256 MiB by default).
+        explicit MaterialTexturePreparation(std::size_t cacheBytes = 256u * 1024u * 1024u);
+        //! Release the cache; images retained by loaded nodes remain valid.
+        ~MaterialTexturePreparation();
+
+        //! Return a private material with prepared textures, preserving source textures/images.
+        //! Thread-safe for immutable input. Unsupported/dynamic/already compressed textures pass through.
+        //! Returns null on cancellation or null input; unavailable compressors leave textures unchanged.
+        osg::ref_ptr<PBRTexture> prepare(PBRTexture* material, ProgressCallback* progress = nullptr);
+
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> _impl;
+    };
+}

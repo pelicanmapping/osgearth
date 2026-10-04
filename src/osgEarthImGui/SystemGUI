@@ -12,6 +12,7 @@
 #include <osgEarth/Registry>
 #include <osgEarth/Capabilities>
 #include <osgEarth/FeatureNode>
+#include <osgUtil/IncrementalCompileOperation>
 #include <chrono>
 #include <list>
 #include <vector>
@@ -66,6 +67,121 @@ namespace osgEarth
         float _dpr = 1.0f;
         float _fontScale = 1.0f;
         bool _first = true;
+
+        //! Editable snapshot; native ICO setters are applied together between frames.
+        struct ICOSettings
+        {
+            int maxObjects = 20;
+            float minimumMS = 1.0f;
+            float targetFPS = 100.0f;
+            float spareRatio = 0.5f;
+            float flushRatio = 0.5f;
+
+            //! Capture the running ICO, including overrides supplied through OSG environment variables.
+            void read(const osgUtil::IncrementalCompileOperation& ico)
+            {
+                maxObjects = static_cast<int>(ico.getMaximumNumOfObjectsToCompilePerFrame());
+                minimumMS = static_cast<float>(1000.0 * ico.getMinimumTimeAvailableForGLCompileAndDeletePerFrame());
+                targetFPS = static_cast<float>(ico.getTargetFrameRate());
+                spareRatio = static_cast<float>(ico.getConservativeTimeRatio());
+                flushRatio = static_cast<float>(ico.getFlushTimeRatio());
+            }
+
+            //! Apply valid slider values with all of the owning viewer's graphics threads stopped.
+            void apply(osgUtil::IncrementalCompileOperation& ico) const
+            {
+                ico.setMaximumNumOfObjectsToCompilePerFrame(static_cast<unsigned>(maxObjects));
+                ico.setMinimumTimeAvailableForGLCompileAndDeletePerFrame(minimumMS * 0.001);
+                ico.setTargetFrameRate(targetFPS);
+                ico.setConservativeTimeRatio(spareRatio);
+                ico.setFlushTimeRatio(flushRatio);
+            }
+        };
+        osg::observer_ptr<osgUtil::IncrementalCompileOperation> _ico;
+        ICOSettings _icoSettings, _icoInitialSettings;
+
+        //! Edit the current view's ICO without replacing it or changing its VAO protection.
+        //! Changes are session-only; opening this panel preserves the running configuration.
+        void drawICO(osg::RenderInfo& ri)
+        {
+            if (!ImGui::CollapsingHeader("Incremental compile (ICO)", ImGuiTreeNodeFlags_DefaultOpen))
+                return;
+
+            auto* currentView = view(ri);
+            auto* viewer = currentView ? currentView->getViewerBase() : nullptr;
+            auto* pager = currentView ? currentView->getDatabasePager() : nullptr;
+            osg::ref_ptr<osgUtil::IncrementalCompileOperation> ico =
+                pager ? pager->getIncrementalCompileOperation() : nullptr;
+            if (!ico || !viewer)
+            {
+                _ico = nullptr;
+                ImGui::TextDisabled("ICO is disabled. Use --ico to enable it");
+                return;
+            }
+            if (_ico.get() != ico.get())
+            {
+                _ico = ico;
+                _icoSettings.read(*ico);
+                _icoInitialSettings = _icoSettings;
+            }
+
+            bool changed = false;
+            const auto clamp = ImGuiSliderFlags_AlwaysClamp;
+            if (ImGuiLTable::Begin("ICO settings"))
+            {
+                changed |= ImGuiLTable::SliderInt("Max objects / frame", &_icoSettings.maxObjects, 1, 100, "%d", clamp);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Lower values spread compilation across more frames.\n"
+                    "One drawable counts as one object, even if it uploads several buffers.");
+                changed |= ImGuiLTable::SliderFloat("Minimum time (ms)", &_icoSettings.minimumMS,
+                    0.01f, 10.0f, "%.2f ms", clamp | ImGuiSliderFlags_Logarithmic);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Minimum time reserved for compilation and deletion, even on a busy frame.\n"
+                    "This is a floor, not a maximum. Lower it to reduce work on busy frames.");
+                changed |= ImGuiLTable::SliderFloat("Spare time fraction", &_icoSettings.spareRatio,
+                    0.1f, 1.0f, "%.2f", clamp);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Fraction of time left in the target frame that ICO may use. Lower values favor smoother frames.");
+                changed |= ImGuiLTable::SliderFloat("Target frame rate", &_icoSettings.targetFPS,
+                    1.0f, 360.0f, "%.0f fps", clamp);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Used to estimate spare time; this does not limit the viewer's frame rate.\n"
+                    "A higher target leaves less time for ICO work.");
+                changed |= ImGuiLTable::SliderFloat("Deletion time fraction", &_icoSettings.flushRatio,
+                    0.1f, 0.9f, "%.2f", clamp);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Share of ICO time reserved for deleting GL objects. Unused deletion time can go to compilation.");
+                ImGuiLTable::End();
+            }
+            if (ImGui::Button("Low frame impact"))
+            {
+                _icoSettings.maxObjects = 1;
+                _icoSettings.minimumMS = 0.1f;
+                _icoSettings.spareRatio = 0.1f;
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Restore initial settings"))
+            {
+                _icoSettings = _icoInitialSettings;
+                changed = true;
+            }
+            ImGui::TextWrapped("Soft limits: an individual upload cannot be interrupted. Lower limits can slow paging.");
+
+            if (changed)
+            {
+                const auto settings = _icoSettings;
+                // ICO's native settings are not atomic. Quiesce threaded rendering before changing them;
+                // never stop a graphics thread from inside its own GUI draw callback.
+                viewer->addUpdateOperation(new OneTimer([viewer, ico, settings]()
+                {
+                    const bool threaded = viewer->areThreadsRunning();
+                    if (threaded) viewer->stopThreading();
+                    settings.apply(*ico);
+                    if (threaded) viewer->startThreading();
+                }));
+            }
+        }
 
     public:
         SystemGUI() : ImGuiPanel("System"),
@@ -187,7 +303,6 @@ namespace osgEarth
                     ImGuiLTable::Text("Canceled:", "%s", std::to_string(jobs::get_metrics()->total_canceled()).c_str());
                     ImGuiLTable::End();
                 }
-
                 ImGui::Separator();
 
                 if (ImGuiLTable::Begin("FontScale"))
@@ -250,6 +365,9 @@ namespace osgEarth
                             [&](osg::GraphicsContext*) { return manualDPR; });
                     }
                 }
+
+                ImGui::Separator();
+                drawICO(ri);
 
                 ImGui::Separator();
                 static bool s_showPagingManagerStats = false;

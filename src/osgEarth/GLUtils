@@ -116,7 +116,6 @@ namespace osgEarth
         virtual void operator()(osg::Object*);
         void setSyncToVBlank(bool);
         optional<bool> _vsync;
-        optional<bool> _gldebug;
         std::vector<osg::ref_ptr<osg::Operation>> _moreOperations;
         void add(osg::Operation* op) { _moreOperations.push_back(op); }
     };

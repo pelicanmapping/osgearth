@@ -514,6 +514,11 @@ GL3RealizeOperation::operator()(osg::Object* object)
         state->setModeValidity(GL_LINE_STIPPLE, false);
         state->setModeValidity(GL_LINE_SMOOTH, false);
 #endif
+
+        if (!GLUtils::isGLDebuggingEnabled())
+        {
+            state->setCheckForGLErrors(osg::State::NEVER_CHECK_GL_ERRORS);
+        }
     }
 
     CustomRealizeOperation::operator()(object);

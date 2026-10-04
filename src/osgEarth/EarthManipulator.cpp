@@ -720,7 +720,7 @@ EarthManipulator::reinitialize()
     _dy = 0.0;
     _throw_dx = 0.0;
     _throw_dy = 0.0;
-    _continuous = false;
+    resetContinuousMotion();
     _task = new Task();
     _last_action = ACTION_NULL;
     _srs = 0L;
@@ -908,10 +908,12 @@ EarthManipulator::getRotation(const osg::Vec3d& point) const
     osg::Vec3d up = side ^ lookVector;
     up.normalize();
 
-    //We want a very slight offset
-    double offset = 1e-6;
-
-    return osg::Matrixd::lookAt( point - (lookVector * offset), point, up);
+    // Build the orientation from direction vectors at the origin. Subtracting
+    // Earth-scale positions only a micrometer apart quantizes the look direction.
+    osg::Matrixd result = osg::Matrixd::lookAt(osg::Vec3d(), lookVector, up);
+    // Preserve the original eye translation independently of the orientation.
+    result.preMultTranslate(-(point - lookVector * 1e-6));
+    return result;
 }
 
 osg::Quat
@@ -1507,6 +1509,15 @@ EarthManipulator::getUsage(osg::ApplicationUsage& usage) const
 }
 
 void
+EarthManipulator::resetContinuousMotion()
+{
+    _continuous = false;
+    _continuous_dx = 0.0;
+    _continuous_dy = 0.0;
+    _last_continuous_action_time = 0.0;
+}
+
+void
 EarthManipulator::resetMouse( osgGA::GUIActionAdapter& aa, bool flushEventStack )
 {
     if (flushEventStack)
@@ -1514,7 +1525,7 @@ EarthManipulator::resetMouse( osgGA::GUIActionAdapter& aa, bool flushEventStack 
 
     aa.requestContinuousUpdate( false );
     _thrown = false;
-    _continuous = false;
+    resetContinuousMotion();
     _single_axis_x = 1.0;
     _single_axis_y = 1.0;
     _lastPointOnEarth.set(0.0, 0.0, 0.0);
@@ -1794,7 +1805,7 @@ EarthManipulator::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapt
                 if ( _continuous )
                 {
                     // bail out of continuous mode if necessary:
-                    _continuous = false;
+                    resetContinuousMotion();
                     aa.requestContinuousUpdate( false );
                 }
                 else
@@ -1832,7 +1843,7 @@ EarthManipulator::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapt
 
             case osgGA::GUIEventAdapter::DOUBLECLICK:
                 // bail out of continuous mode if necessary:
-                _continuous = false;
+                resetContinuousMotion();
                 _pushed = false;
                 addMouseEvent( ea );
                 if (_mouse_down_event)
@@ -1855,13 +1866,18 @@ EarthManipulator::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapt
                     {
                         action = _settings->getAction( ea.getEventType(), ea.getButtonMask(), ea.getModKeyMask() );
                         addMouseEvent( ea );
-                        bool wasContinuous = _continuous;
-                        _continuous = action.getBoolOption(OPTION_CONTINUOUS, false);
+                        const bool continuous = action.getBoolOption(OPTION_CONTINUOUS, false);
+                        if (continuous != _continuous || (continuous && action._type != _last_action._type))
+                        {
+                            // Events can stop/restart a gesture before the next FRAME.
+                            // Start its velocity and clock before accumulating the first delta.
+                            resetContinuousMotion();
+                            _continuous = continuous;
+                            if (_continuous)
+                                _last_continuous_action_time = _time_s_now;
+                        }
                         if ( handleMouseAction( action, aa.asView() ) )
                             aa.requestRedraw();
-
-                        if ( _continuous && !wasContinuous )
-                            _last_continuous_action_time = _time_s_now;
 
                         aa.requestContinuousUpdate(_continuous);
                         _thrown = false;
@@ -2599,8 +2615,8 @@ EarthManipulator::rotate( double dx, double dy )
     double oldPitch;
     getEulerAngles( _rotation, 0L, &oldPitch );
 
-    if ( dy + oldPitch > maxp || dy + oldPitch < minp )
-        dy = 0;
+    // Apply the remaining angle to the limit instead of discarding an overshooting step.
+    dy = osg::clampBetween(oldPitch + dy, minp, maxp) - oldPitch;
 
     osg::Matrix rotation_matrix;
     rotation_matrix.makeRotate(_rotation);

@@ -759,6 +759,9 @@ namespace osgEarth { namespace Util
         // resets the mouse event stack and pushes the provided event.
         void resetMouse( osgGA::GUIActionAdapter& aa, bool flushEventStack=true);
 
+        //! Clear continuous gesture velocity and timing immediately, without waiting for a FRAME event.
+        void resetContinuousMotion();
+
         // Reset the internal event stack.
         void flushMouseEventStack();
 

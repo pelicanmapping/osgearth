@@ -119,6 +119,10 @@ namespace osgEarth
         Texture(osg::Texture*);
         bool needsCompile_no_lock(const osg::State&) const;
 
+        //! Conservative source upload size including all image mip levels; locks the texture.
+        //! Render-target allocations have no source bytes and return zero.
+        std::size_t estimateUploadBytes() const;
+
         // The ICO can compile a shared texture while an arena renders it.
         // Protect GL object creation, residency, and release as one operation.
         mutable std::mutex _glMutex;
@@ -146,6 +150,34 @@ namespace osgEarth
 
         //! Construct an empty arena.
         TextureArena();
+
+        //! Soft limits for each render-time upload batch; zero disables the corresponding limit.
+        //! At least one pending texture can be attempted, even when it exceeds the byte/time limit.
+        struct UploadBudget
+        {
+            double milliseconds = 2.0;
+            std::size_t bytes = 8u * 1024u * 1024u;
+            unsigned textures = 16u;
+        };
+
+        //! Last processed batch in this GL share group, plus the current unique pending count.
+        struct UploadStats
+        {
+            unsigned attempted = 0u;
+            unsigned compiled = 0u;
+            std::size_t bytes = 0u; // conservative source bytes, including failed attempts
+            std::size_t pending = 0u;
+            double milliseconds = 0.0; // batch CPU time, excluding table uploads and residency sweep
+        };
+
+        //! Set per-arena, per-frame render upload limits. Thread-safe; invalid times become unlimited.
+        //! Repeated passes/shared contexts do not receive another batch in the same frame.
+        //! Without a FrameStamp, each apply gets a batch. Explicit compileGLObjects bypasses these limits.
+        void setUploadBudget(const UploadBudget& budget);
+        //! Thread-safe snapshot of the configured upload limits.
+        UploadBudget getUploadBudget() const;
+        //! Thread-safe snapshot of upload progress for state's GL share group.
+        UploadStats getUploadStats(const osg::State& state) const;
 
         //! Material table sharing this arena's texture lifetime and GL handles.
         MaterialArena* getMaterialArena() const;
@@ -177,7 +209,7 @@ namespace osgEarth
         //! to allocate on the GPU.
         void setMaxTextureSize(unsigned pixels);
 
-        //! Adds a texture to the arena. On next apply() GL handles will allocate.
+        //! Adds a texture to the arena. Subsequent budgeted apply() calls allocate its GL handle.
         //! You only need to call this once for each texture.
         //! Returns the index of the texture handle
         int add(
@@ -220,14 +252,25 @@ namespace osgEarth
 
         void releaseGLObjects(osg::State*, bool force) const;
 
+        //! Apply arena state with optional upload limits; owns the arena lock throughout the batch.
+        void applyInternal(osg::State&, bool budgeted) const;
+
         // GL objects that can be shared across contexts
         struct GLObjects : public BindlessShareableGLObjects
         {
             bool _inUse = false;
             bool _handleBufferDirty = true;
-            int _lastAppliedFrame = -1;
+            unsigned _lastAppliedFrame = 0u;
+            bool _hasAppliedFrame = false;
 
             std::queue<int> _toCompile;
+            std::unordered_set<int> _queued;
+            UploadStats _uploadStats;
+
+            //! Enqueue a slot at most once; caller must hold the arena mutex.
+            void queueCompile(int index) { if (_queued.insert(index).second) _toCompile.push(index); }
+            //! Reset pending work and membership together; caller must hold the arena mutex.
+            void clearCompileQueue() { _toCompile = std::queue<int>(); _queued.clear(); }
             TextureVector _toRemove;
             GLBuffer::Ptr _handleBuffer;
             std::vector<GLuint64> _handles;
@@ -243,6 +286,7 @@ namespace osgEarth
         mutable std::unordered_set<unsigned> _dynamicTextures;
 
         bool _autoRelease = false;
+        UploadBudget _uploadBudget;
         unsigned _bindingPoint = 1u;
         bool _useUBO = false;
         mutable int _releasePtr = 0;

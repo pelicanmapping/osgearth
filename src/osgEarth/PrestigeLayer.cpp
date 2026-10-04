@@ -607,7 +607,7 @@ osg::ref_ptr<osg::Node> PrestigeLayer::createTileImplementation(
                     lod1Pager->setRefinePolicy(REFINE_REPLACE);
                     lod1Pager->setLODMethod(LODMethod::CAMERA_DISTANCE);
                     lod1Pager->setMaxRange(lod0Range);
-                    lod1Pager->setPreCompileGLObjects(false);
+                    //lod1Pager->setPreCompileGLObjects(false);
                     setBounds(lod1Pager, pagingBounds);
 
                     lod1Pager->setLoadFunction(

@@ -15,6 +15,9 @@
 #include <osg/Texture3D>
 #include <osg/Texture2DArray>
 #include <cstdlib>
+#include <chrono>
+#include <cmath>
+#include <limits>
 
 // osg 3.6:
 #ifndef GL_TEXTURE_2D_ARRAY
@@ -189,6 +192,21 @@ Texture::needsCompile_no_lock(const osg::State& state) const
         return true;
 
     return (hasImageData && osgTexture()->getImage(0)->getModifiedCount() != gc._imageModCount);
+}
+
+std::size_t
+Texture::estimateUploadBytes() const
+{
+    std::lock_guard<std::mutex> lock(_glMutex);
+    std::size_t result = 0;
+    if (osgTexture().valid())
+        for (unsigned i = 0; i < osgTexture()->getNumImages(); ++i)
+            if (auto* image = osgTexture()->getImage(i))
+            {
+                const auto size = image->getTotalSizeInBytesIncludingMipmaps();
+                result += std::min<std::size_t>(size, std::numeric_limits<std::size_t>::max() - result);
+            }
+    return result;
 }
 
 bool
@@ -666,6 +684,32 @@ TextureArena::TextureArena() : _materials(new MaterialArena())
         [this](osg::NodeVisitor& nv) { this->update(nv); }));
 }
 
+void
+TextureArena::setUploadBudget(const UploadBudget& budget)
+{
+    std::lock_guard<std::mutex> lock(_m);
+    _uploadBudget = budget;
+    if (!std::isfinite(_uploadBudget.milliseconds) || _uploadBudget.milliseconds < 0.0)
+        _uploadBudget.milliseconds = 0.0;
+}
+
+TextureArena::UploadBudget
+TextureArena::getUploadBudget() const
+{
+    std::lock_guard<std::mutex> lock(_m);
+    return _uploadBudget;
+}
+
+TextureArena::UploadStats
+TextureArena::getUploadStats(const osg::State& state) const
+{
+    std::lock_guard<std::mutex> lock(_m);
+    const auto& gc = GLObjects::get(_globjects, state);
+    auto result = gc._uploadStats;
+    result.pending = gc._toCompile.size();
+    return result;
+}
+
 TextureArena::~TextureArena()
 {
     releaseGLObjects(nullptr);
@@ -769,7 +813,7 @@ TextureArena::add(Texture::Ptr tex, const osgDB::Options* readOptions)
             {
                 if (_globjects[i]._inUse)
                 {
-                    _globjects[i]._toCompile.push(existingIndex);
+                    _globjects[i].queueCompile(existingIndex);
                 }
             }
             tex->dormant() = false;
@@ -882,7 +926,7 @@ TextureArena::add(Texture::Ptr tex, const osgDB::Options* readOptions)
     {
         if (_globjects[i]._inUse)
         {
-            _globjects[i]._toCompile.push(index);
+            _globjects[i].queueCompile(index);
         }
     }
 
@@ -1008,6 +1052,12 @@ TextureArena::flush()
 void
 TextureArena::apply(osg::State& state) const
 {
+    applyInternal(state, true);
+}
+
+void
+TextureArena::applyInternal(osg::State& state, bool budgeted) const
+{
     std::lock_guard<std::mutex> lock(_m);
 
     if (_textures.empty())
@@ -1025,12 +1075,11 @@ TextureArena::apply(osg::State& state) const
     {
         gc._inUse = true;
 
-        while (!gc._toCompile.empty())
-            gc._toCompile.pop();
+        gc.clearCompileQueue();
 
         for (unsigned i = 0; i < _textures.size(); ++i) {
             if (_textures[i])
-                gc._toCompile.push(i);
+                gc.queueCompile(i);
         }
     }
 
@@ -1043,7 +1092,7 @@ TextureArena::apply(osg::State& state) const
             auto tex = _textures[i];
             if (tex && !tex->dormant() && tex->needsCompile(state))
             {
-                gc._toCompile.push(i);
+                gc.queueCompile(i);
             }
         }
     }
@@ -1081,15 +1130,12 @@ TextureArena::apply(osg::State& state) const
         gc._handleBufferDirty = true;
     }
 
-#if !defined(OSGEARTH_SINGLE_GL_CONTEXT)
-
-    // only apply once per frame per state.
-    // (This is disabled in single-context mode so that it always runs)
-
-    if (state.getFrameStamp() && (gc._lastAppliedFrame != state.getFrameStamp()->getFrameNumber()))
-
-#endif
+    // Limit all render passes, including single-context builds, to one batch per frame/share group.
+    // Explicit precompilation must finish its batch even if rendering already used this frame's budget.
+    if (!budgeted || !state.getFrameStamp() || !gc._hasAppliedFrame ||
+        gc._lastAppliedFrame != state.getFrameStamp()->getFrameNumber())
     {
+        gc._uploadStats = UploadStats();
         // If we are going to compile any textures, we need to save and restore
         // the OSG texture state...
         if (!gc._toCompile.empty())
@@ -1100,42 +1146,53 @@ TextureArena::apply(osg::State& state) const
             auto savedActiveOsgTexture = state.getLastAppliedTextureAttribute(
                 state.getActiveTextureUnit(), osg::StateAttribute::TEXTURE);
 
-            unsigned num_compiled = 0;
+            const auto start = std::chrono::steady_clock::now();
+            auto& stats = gc._uploadStats;
 
-            // A failed compile stays queued for the next frame. Process only
-            // this batch so a persistent failure cannot spin in this draw.
+            // Bound retries to the batch that existed on entry. Failed attempts go to its tail.
             const auto numToCompile = gc._toCompile.size();
-            std::unordered_set<int> attempted;
-            attempted.reserve(numToCompile);
             for (std::size_t i = 0; i < numToCompile; ++i)
             {
-                int ptr = gc._toCompile.front();
-                gc._toCompile.pop();
-                // Dynamic updates can enqueue a texture that is already
-                // waiting for a retry. Compile it at most once per batch.
-                if (!attempted.insert(ptr).second)
-                    continue;
+                if (budgeted && i > 0 && _uploadBudget.milliseconds > 0.0 &&
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() >=
+                        _uploadBudget.milliseconds)
+                    break;
+
+                const int ptr = gc._toCompile.front();
                 auto tex = _textures[ptr];
-                if (tex && tex->dormant())
-                    continue;
-                if (tex)
+                const bool needsCompile = tex && !tex->dormant() && tex->needsCompile(state);
+                const std::size_t bytes = needsCompile ? tex->estimateUploadBytes() : 0u;
+                if (budgeted && needsCompile && stats.attempted > 0 &&
+                    ((_uploadBudget.textures > 0 && stats.attempted >= _uploadBudget.textures) ||
+                     (_uploadBudget.bytes > 0 && bytes > _uploadBudget.bytes - std::min(stats.bytes, _uploadBudget.bytes))))
+                    break;
+
+                gc._toCompile.pop();
+                gc._queued.erase(ptr);
+                if (tex && tex->dormant()) continue;
+                if (needsCompile)
                 {
+                    ++stats.attempted;
+                    stats.bytes += std::min(bytes, std::numeric_limits<std::size_t>::max() - stats.bytes);
                     if (tex->compileGLObjects(state))
                     {
-                        ++num_compiled;
+                        ++stats.compiled;
                         OE_DEVEL << "Compiled on demand = " << tex->name() << " " << (std::uintptr_t)tex.get() << std::endl;
                     }
-                    if (tex->needsCompile(state))
-                        gc._toCompile.push(ptr);
+                    if (tex->needsCompile(state)) gc.queueCompile(ptr);
                 }
 
                 auto gltex = tex ? tex->getGLObject(state) : GLTexture::Ptr();
-
-                GLuint64 handle = gltex ? gltex->handle(state) : 0ULL;
-                unsigned index = _useUBO ? ptr * 2 : ptr; // hack for std140 vec4 alignment
-                gc._handles[index] = handle;
-                gc._handleBufferDirty = true;
+                const GLuint64 handle = gltex ? gltex->handle(state) : 0ULL;
+                const unsigned index = _useUBO ? ptr * 2 : ptr; // std140 vec4 alignment
+                if (gc._handles[index] != handle)
+                {
+                    gc._handles[index] = handle;
+                    gc._handleBufferDirty = true;
+                }
             }
+            stats.milliseconds =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 
             // reinstate the old bound texture
             if (savedActiveOsgTexture)
@@ -1144,9 +1201,10 @@ TextureArena::apply(osg::State& state) const
             }
         }
 
-        if (state.getFrameStamp())
+        if (budgeted && state.getFrameStamp())
         {
             gc._lastAppliedFrame = state.getFrameStamp()->getFrameNumber();
+            gc._hasAppliedFrame = true;
         }
     }
 
@@ -1218,7 +1276,7 @@ TextureArena::notifyOfTextureRelease(osg::State* state) const
 void
 TextureArena::compileGLObjects(osg::State& state) const
 {
-    apply(state);
+    applyInternal(state, false);
 }
 
 void
@@ -1260,15 +1318,14 @@ TextureArena::releaseGLObjects(osg::State* state, bool force) const
         gc._handleBuffer = nullptr;
         gc._handles.resize(0);
 
-        while (!gc._toCompile.empty())
-            gc._toCompile.pop();
+        gc.clearCompileQueue();
 
         for (unsigned i = 0; i < _textures.size(); ++i)
         {
             if (_textures[i])
             {
                 _textures[i]->releaseGLObjects(state, force);
-                gc._toCompile.push(i);
+                gc.queueCompile(i);
             }
         }
     }
@@ -1288,14 +1345,13 @@ TextureArena::releaseGLObjects(osg::State* state, bool force) const
                 gc._handleBuffer = nullptr;
                 gc._handles.resize(0);
 
-                while (!gc._toCompile.empty())
-                    gc._toCompile.pop();
+                gc.clearCompileQueue();
 
                 for (unsigned i = 0; i < _textures.size(); ++i)
                 {
                     if (_textures[i])
                     {
-                        gc._toCompile.push(i);
+                        gc.queueCompile(i);
                     }
                 }
             }

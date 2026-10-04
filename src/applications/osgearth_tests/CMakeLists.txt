@@ -28,6 +28,7 @@ set(TARGET_SRC
     StringUtilsTests.cpp
     ThreadingTests.cpp
     TextureArenaTests.cpp
+    TextureArenaUploadTests.cpp
     VirtualProgramTests.cpp)
 
 add_osgearth_app(

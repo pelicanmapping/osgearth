@@ -1,26 +1,26 @@
-# SkyNode2
+# Prestige Sky
 
-`SkyNode2` is a core-library Earth sky and metallic/roughness lighting implementation.
+`osgEarthPrestige::SkyNode` is the Prestige nodekit's Earth sky and metallic/roughness lighting implementation.
 It does not load the SimpleSky or Bruneton drivers. It uses one material lighting
 path at every quality level, including the atmosphere-free preset.
 
 ```cpp
-#include <osgEarth/SkyNode2>
+#include <osgEarthPrestige/SkyNode>
 
-osgEarth::SkyNode2::Options options;
-options.preset = osgEarth::SkyNode2::BALANCED;
-osg::ref_ptr<osgEarth::SkyNode2> sky = new osgEarth::SkyNode2(options);
+osgEarthPrestige::SkyNode::Options options;
+options.preset = osgEarthPrestige::SkyNode::BALANCED;
+osg::ref_ptr<osgEarthPrestige::SkyNode> sky = new osgEarthPrestige::SkyNode(options);
 sky->addChild(mapNode);
 sky->attach(viewer);
 viewer->setSceneData(sky);
 ```
 
-In an earth file, add `<sky2><preset>balanced</preset></sky2>`. Example applications
-also accept `--sky2`, optionally with `--sky-low` (flat) or `--sky-high` (high).
+Build with `OSGEARTH_BUILD_PRESTIGE_NODEKIT=ON`. In an earth file, add `<prestige:sky><preset>balanced</preset></prestige:sky>`. Example applications
+also accept `--prestige-sky`, optionally with `--sky-low` (flat) or `--sky-high` (high).
 This command-line selection replaces sky extensions already present in the earth file.
-`SkyNode::create("sky2")` constructs the core implementation directly. Existing
+`osgEarth::SkyNode::create("prestige:sky")` loads the nodekit through the extension registry. Existing
 explicit legacy sky selections keep working. Remove the old sky when adopting
-SkyNode2; nesting two atmospheric lighting implementations is unsupported.
+Prestige Sky; nesting two atmospheric lighting implementations is unsupported.
 
 ## Quality and costs
 
@@ -81,7 +81,7 @@ materials, terrain, and Chonk. The sun occupies the OSG light index supplied to
 point and spot lights with distance/cone attenuation. Install
 `GenerateGL3LightingUniforms` on application light sources as usual. The sun uses
 the existing `oe_shadow_visibility` interface, so a ShadowCaster can use
-`sky->getSunLight()`. SkyNode2 does not automatically allocate shadow maps.
+`sky->getSunLight()`. Prestige Sky does not automatically allocate shadow maps.
 See [Sun shadows](shadows.md) for installation, quality controls, and texture-unit reservation.
 
 `sunIntensity` sets incident solar irradiance in the model's relative radiometric
@@ -91,10 +91,10 @@ indirect sky lighting (default 1); zero skips its reads. `ambient` is a minimum
 night fill, default 0.033. Set it
 to zero for a physically dark night. `setExposure`, `setSunIntensity`,
 `setEnvironmentIntensity`, and `setAmbientIntensity` are runtime controls.
-EnvironmentGUI recognizes SkyNode2 and exposes these settings and solar color,
+EnvironmentGUI recognizes Prestige Sky and exposes these settings and solar color,
 alongside the existing time, shadow, and celestial visibility controls. Opening
 the panel preserves the scene's lighting settings; edits run during update.
-The panel's Install button also creates SkyNode2. Quality is selected at construction.
+The panel's Install button also creates Sky. Quality is selected at construction.
 All setters and scene-graph changes belong on
 the update thread, with normal OSG update/cull synchronization.
 
@@ -122,7 +122,10 @@ primary supported projection.
 
 ## Approximation boundaries
 
-Optional [procedural volumetric clouds](clouds.md) attach through `setCloudLayer` or a nested `<clouds>` block.
+Optional procedural volumetric clouds use `osgEarthPrestige::CloudLayer` from `<osgEarthPrestige/CloudLayer>`.
+Attach them through `setCloudLayer` or a nested `<clouds>` block inside `<prestige:sky>`.
+Cloud settings, rendering, and shaders all belong to osgEarthPrestige. The shared `osgEarth::WindLayer`
+remains in core and can supply wind to clouds and other consumers.
 Cloud-free rendering remains the default. The base renderer has no local reflection captures,
 screen-space ambient occlusion, terrain-aware indirect occlusion, or automatic
 exposure. Ambient occlusion comes from materials, and terrain shadows come from
@@ -137,6 +140,4 @@ The atmosphere architecture is informed by Sébastien Hillaire's
 [A Scalable and Production Ready Sky and Atmosphere Rendering Technique](https://sebh.github.io/publications/egsr2020.pdf).
 The implementation is new; it does not wrap or copy the old osgEarth sky shaders.
 Material shading uses the standard GGX/Smith/Schlick model and a split-sum environment
-approximation. Validation and measured timings are recorded in
-`tests/sky2-performance.md`, `tests/sky2-descent-validation.md`,
-`tests/sky2-horizon-validation.md`, and `tests/sky2-lighting-performance.md`.
+approximation.

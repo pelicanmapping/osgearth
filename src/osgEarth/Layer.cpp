@@ -11,6 +11,8 @@
 #include <osgEarth/NetworkMonitor>
 #include <osg/StateSet>
 #include <osgDB/Registry>
+#include <map>
+#include <mutex>
 
 using namespace osgEarth;
 
@@ -495,6 +497,33 @@ struct Holder : public osg::Object {
     T value;
 };
 
+namespace
+{
+    struct LayerFactories
+    {
+        std::mutex mutex;
+        std::map<std::string, Layer::Factory> factories;
+    };
+
+    //! Constructs the shared registry on first use, including registration during module initialization.
+    LayerFactories& layerFactories()
+    {
+        static LayerFactories registry;
+        return registry;
+    }
+}
+
+bool
+Layer::registerFactory(const std::string& name, Factory factory)
+{
+    if (name.empty() || !factory)
+        return false;
+
+    auto& registry = layerFactories();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    return registry.factories.emplace(toLower(name), factory).second;
+}
+
 osg::ref_ptr<Layer>
 Layer::create(const ConfigOptions& options)
 {
@@ -510,6 +539,24 @@ Layer::create(const ConfigOptions& options)
         // fail silently
         OE_DEBUG << "[Layer] ILLEGAL- Layer::create requires a valid driver name" << std::endl;
         return nullptr;
+    }
+
+    Factory factory = nullptr;
+    {
+        auto& registry = layerFactories();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        auto i = registry.factories.find(toLower(name));
+        if (i != registry.factories.end())
+            factory = i->second;
+    }
+
+    if (factory)
+    {
+        // Constructors can create other layers, so invoke the factory after releasing the registry lock.
+        auto result = factory(options);
+        if (result.valid() && result->getName().empty())
+            result->setName("osgearth_layer_" + name);
+        return result;
     }
 
     // convey the configuration options:

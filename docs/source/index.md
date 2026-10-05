@@ -21,7 +21,7 @@ Let's get started!
 * [Using an Earth File](earthfile.md)
 * [Working with Data](data.md)
 * [Layer Reference](layers.md)
-* [SkyNode2 Lighting and Atmosphere](sky2.md)
+* [Prestige Sky Lighting and Atmosphere](prestige-sky.md)
 * [Procedural Volumetric Clouds](clouds.md)
 * [Sun Shadows](shadows.md)
 * [Chonk Multi-view Rendering](chonk-multiview.md)

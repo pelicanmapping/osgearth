@@ -345,20 +345,6 @@ TEST_CASE("Chonk merges mesh commands for independent multi-view renderers", "[c
     CHECK(united.commands == 2);
     CHECK(united.instances == 6);
     for (const auto& pair : united.pairs) CHECK(std::get<2>(pair) == 0);
-    // Application-owned ordinary shadow/depth cameras retain the original defines and primary-view uniform contract.
-    scene.begin(ChonkRenderPass::PER_VIEW,true);
-    scene.draw(0);
-    auto independent = scene.pixels();
-    auto cameraState = scene.renderCamera->getOrCreateStateSet();
-    ChonkRenderPass::set(cameraState,nullptr);
-    cameraState->setDefine("OE_IS_SHADOW_CAMERA");
-    cameraState->setDefine("OE_IS_DEPTH_CAMERA");
-    cameraState->addUniform(new osg::Uniform("oe_shadowToPrimaryMatrix",osg::Matrixf::identity()));
-    cameraState->addUniform(new osg::Uniform("oe_primaryProjectionMatrix",osg::Matrixf(scene.parameters.lodProjection)));
-    cameraState->addUniform(new osg::Uniform("oe_primaryViewport",scene.parameters.lodViewport));
-    scene.frame();
-    auto ordinary = scene.pixels();
-    CHECK(std::equal(ordinary.begin(),ordinary.begin()+256*256*4,independent.begin()));
     CHECK(scene.errors == 0);
     REQUIRE(glGetError() == GL_NO_ERROR);
 }

@@ -374,6 +374,13 @@ namespace osgEarth
         //! Creates a layer from serialized data - internal use
         static osg::ref_ptr<Layer> create(const ConfigOptions& options);
 
+        using Factory = osg::ref_ptr<Layer> (*)(const ConfigOptions&);
+
+        //! Registers a factory without an OSG plugin. Names are case-insensitive and may contain colons.
+        //! Thread-safe; returns false for empty names, null factories, or an already registered name.
+        //! The factory's code must remain loaded while layers can be created. Direct factories precede plugins.
+        static bool registerFactory(const std::string& name, Factory factory);
+
         //! Creates a layer from serialized data and attempt to cast it
         //! to a specific type
         template<class T>
@@ -554,6 +561,19 @@ namespace osgEarth
         return options()._internal().value(key, fallback);
     }
 
+
+//! Registers a factory under a string name, e.g. ("prestige:prestige", osgEarthPrestige::PrestigeLayer).
+//! The containing module must already be loaded; this does not create a plugin or static-link anchor.
+#define REGISTER_OSGEARTH_LAYER_FACTORY(NAME, CLASS) \
+    OE_REGISTER_OSGEARTH_LAYER_FACTORY(NAME, CLASS, __LINE__)
+
+// Expand the line number before forming a private identifier independent of the name and class.
+#define OE_REGISTER_OSGEARTH_LAYER_FACTORY(NAME, CLASS, LINE) \
+    OE_REGISTER_OSGEARTH_LAYER_FACTORY_IMPL(NAME, CLASS, LINE)
+#define OE_REGISTER_OSGEARTH_LAYER_FACTORY_IMPL(NAME, CLASS, LINE) \
+    static const bool oe_layer_factory_##LINE = osgEarth::Layer::registerFactory( \
+        NAME, [](const osgEarth::ConfigOptions& options) -> osg::ref_ptr<osgEarth::Layer> { \
+            return new CLASS(options); });
 
 #define REGISTER_OSGEARTH_LAYER(NAME,CLASS) \
     extern "C" void osgdb_osgearth_##NAME(void) {} \

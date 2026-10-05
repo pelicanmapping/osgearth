@@ -85,6 +85,12 @@ namespace osgEarth
          */
         static Extension* create(const std::string& name, const ConfigOptions& options);
 
+        using Factory = Extension* (*)(const ConfigOptions&);
+
+        //! Registers a case-insensitive name without plugin symbols; the factory returns a new extension.
+        //! Thread-safe; rejects empty names, null factories and duplicates. The module must remain loaded.
+        static bool registerFactory(const std::string& name, Factory factory);
+
         /**
          * Fetch configuration options from a plugin loader
          */
@@ -126,5 +132,15 @@ namespace osgEarth
 #define REGISTER_OSGEARTH_EXTENSION(PLUGINNAME, CLASS) \
     extern "C" void osgdb_##PLUGINNAME(void) {} \
     static osgEarth::RegisterPluginLoader< osgEarth::PluginLoader<CLASS, osgEarth::Extension> > g_proxy_##CLASS_##PLUGINNAME( #PLUGINNAME );
+
+//! Registers a string key such as "prestige:sky" without emitting an OSG plugin symbol.
+#define REGISTER_OSGEARTH_EXTENSION_FACTORY(NAME, CLASS) \
+    OE_REGISTER_OSGEARTH_EXTENSION_FACTORY(NAME, CLASS, __LINE__)
+// Expand the line number before forming a private registration identifier.
+#define OE_REGISTER_OSGEARTH_EXTENSION_FACTORY(NAME, CLASS, LINE) \
+    OE_REGISTER_OSGEARTH_EXTENSION_FACTORY_IMPL(NAME, CLASS, LINE)
+#define OE_REGISTER_OSGEARTH_EXTENSION_FACTORY_IMPL(NAME, CLASS, LINE) \
+    static const bool oe_extension_factory_##LINE = osgEarth::Extension::registerFactory( \
+        NAME, [](const osgEarth::ConfigOptions& options) -> osgEarth::Extension* { return new CLASS(options); });
 
 #endif

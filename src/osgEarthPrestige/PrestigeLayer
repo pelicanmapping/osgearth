@@ -4,21 +4,23 @@
  */
 #pragma once
 
-#include <osgEarth/Common>
+#include <osgEarthPrestige/Export>
 #include <osgEarth/TiledModelLayer>
 #include <osgEarth/URI>
 
-namespace osgEarth
+namespace osgEarthPrestige
 {
+    using namespace osgEarth;
+
     /**
      * Loads the tiled model hierarchy exported by Prestige.
      */
-    class OSGEARTH_EXPORT PrestigeLayer : public TiledModelLayer
+    class OSGEARTHPRESTIGE_EXPORT PrestigeLayer : public TiledModelLayer
     {
     public: // serialization
-        struct OSGEARTH_EXPORT Options : public TiledModelLayer::Options
+        struct OSGEARTHPRESTIGE_EXPORT Options : public TiledModelLayer::Options
         {
-            META_LayerOptions(osgEarth, Options, TiledModelLayer::Options);
+            META_LayerOptions(osgEarthPrestige, Options, TiledModelLayer::Options);
 
             OE_OPTION(URI, url);
             OE_OPTION(bool, invertY, false);
@@ -36,7 +38,7 @@ namespace osgEarth
         };
 
     public:
-        META_Layer(osgEarth, PrestigeLayer, Options, TiledModelLayer, Prestige);
+        META_Layer(osgEarthPrestige, PrestigeLayer, Options, TiledModelLayer, prestige:prestige);
 
         //! Base directory containing the Prestige model files.
         void setURL(const URI& value);

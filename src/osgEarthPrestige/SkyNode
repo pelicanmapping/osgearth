@@ -4,11 +4,13 @@
  */
 #pragma once
 
+#include <osgEarthPrestige/Export>
 #include <osgEarth/Sky>
 #include <memory>
 
-namespace osgEarth
+namespace osgEarthPrestige
 {
+    using namespace osgEarth;
     class CloudLayer;
     /**
      * Unified Earth atmosphere and metallic/roughness lighting. Add the map beneath
@@ -16,14 +18,14 @@ namespace osgEarth
      * Construct and change settings on the update thread, before concurrent cull/draw.
      * Camera-specific resources are isolated; no camera is retained by this node.
      */
-    class OSGEARTH_EXPORT SkyNode2 : public SkyNode
+    class OSGEARTHPRESTIGE_EXPORT SkyNode : public osgEarth::SkyNode
     {
     public:
         enum Quality { FLAT, BALANCED, HIGH };
 
-        struct OSGEARTH_EXPORT Options : public SkyOptions
+        struct OSGEARTHPRESTIGE_EXPORT Options : public SkyOptions
         {
-            SkyNode2::Quality preset = BALANCED;
+            SkyNode::Quality preset = BALANCED;
             float exposure = 1.0f;
             float sunIntensity = 10.0f;
             float environmentIntensity = 1.0f;
@@ -31,19 +33,19 @@ namespace osgEarth
             bool toneMapping = true;
             Config clouds; // Optional <clouds> configuration; absent means no cloud resources.
 
-            //! Reads sky2 configuration; invalid scalar settings are sanitized by the node.
+            //! Reads prestige:sky configuration; invalid scalar settings are sanitized by the node.
             explicit Options(const ConfigOptions& = ConfigOptions());
-            //! Serializes all SkyNode2 settings and inherited date/coordinate-system options.
+            //! Serializes all SkyNode settings and inherited date/coordinate-system options.
             Config getConfig() const override;
         };
 
         //! Creates a self-contained sky. FLAT retains PBR and celestial bodies, without atmosphere LUTs.
-        explicit SkyNode2(const Options& = Options());
+        explicit SkyNode(const Options& = Options());
         //! Returns the effective settings; read on the update thread or while traversal is stopped.
         const Options& getOptions() const;
         //! Returns the directional sun light; its diffuse RGB scales the physical solar irradiance.
         osg::Light* getSunLight() const override;
-        using SkyNode::attach;
+        using osgEarth::SkyNode::attach;
         //! Exposes the sun to the view and disables its headlight; lightNum must be in [0,7].
         void attach(osg::View*, int lightNum) override;
         //! Changes exposure in linear space; negative and non-finite values are ignored.
@@ -67,7 +69,7 @@ namespace osgEarth
 
     protected:
         //! Releases owned lookup resources and terrain texture-unit reservations.
-        ~SkyNode2() override;
+        ~SkyNode() override;
         //! Invalidates cached celestial coordinates after replacing the ephemeris.
         void onSetEphemeris() override;
         //! Defers global date changes until the next update traversal.
@@ -78,7 +80,7 @@ namespace osgEarth
     private:
         struct Impl;
         std::unique_ptr<Impl> _impl;
-        SkyNode2(const SkyNode2&) = delete;
-        SkyNode2& operator=(const SkyNode2&) = delete;
+        SkyNode(const SkyNode&) = delete;
+        SkyNode& operator=(const SkyNode&) = delete;
     };
 }

@@ -149,7 +149,9 @@
 #include <osgEarth/GeometryRasterizer>
 #include <osgEarth/GeometryUtils>
 #include <osgEarth/GraticuleLabelingEngine>
-#include <osgEarth/GrimeLayer>
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+#include <osgEarthPrestige/GrimeLayer>
+#endif
 #include <osgEarth/HTM>
 #include <osgEarth/HTTPClient>
 #include <osgEarth/HeightFieldUtils>

@@ -1,4 +1,54 @@
-# Prestige texture preparation
+# Prestige nodekit
+
+Build with `OSGEARTH_BUILD_PRESTIGE_NODEKIT=ON` to enable `osgEarthPrestige`.
+The Windows `configure.bat` workflow enables it alongside `osgEarthProcedural`.
+C++ callers include `<osgEarthPrestige/PrestigeLayer>`, use
+`osgEarthPrestige::PrestigeLayer`, and link the `osgEarth::osgEarthPrestige`
+CMake package target. `OSGEARTH_HAVE_PRESTIGE_NODEKIT` in `osgEarth/BuildConfig`
+indicates that the nodekit was enabled.
+
+When loading a `.earth` file, add the nodekit to the map's library list before
+using the `<prestige:prestige>` layer configuration:
+
+```xml
+<map>
+    <libraries>osgEarthPrestige</libraries>
+    <!-- Existing Prestige layers go here. -->
+</map>
+```
+
+The namespaced layer uses direct factory registration:
+
+```cpp
+REGISTER_OSGEARTH_LAYER_FACTORY("prestige:prestige", osgEarthPrestige::PrestigeLayer);
+```
+
+This macro accepts a string name and registers a factory used by `Layer::create`,
+without generating plugin symbols or asking OSG to load a plugin. Load the nodekit
+first, either by linking it or through the map's `<libraries>` list. For static
+libraries, the object file containing the registration must be linked explicitly;
+this macro does not provide a `USE_OSGEARTH_LAYER` anchor. Factory names are
+case-insensitive; duplicate registrations leave the first factory in place.
+The original `REGISTER_OSGEARTH_LAYER` macro remains available for plugin loading.
+
+## Grime
+
+`GrimeLayer` is part of this nodekit. Include `<osgEarthPrestige/GrimeLayer>` and
+use `osgEarthPrestige::GrimeLayer`. Its shader is packaged with `osgEarthPrestige`.
+The ImGui layer panel exposes its controls when the nodekit is enabled.
+
+Load `osgEarthPrestige` in the map's `<libraries>` list, then configure the effect
+with `<prestige:grime>`. For example,
+to apply weathering to a tiled model layer named `Buildings`:
+
+```xml
+<prestige:grime name="Building weathering">
+    <model>Buildings</model>
+    <amount>0.5</amount>
+</prestige:grime>
+```
+
+## Texture preparation
 
 Prestige enables the glTF reader option `gltfPrepareTextures`. The reader prepares
 material textures on the loading thread, before publishing the material to its

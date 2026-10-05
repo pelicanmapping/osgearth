@@ -7,8 +7,10 @@
 #include <osgEarthImGui/ImGuiPanel>
 #include <osgEarth/Ephemeris>
 #include <osgEarth/Sky>
-#include <osgEarth/SkyNode2>
-#include <osgEarth/CloudLayer>
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+#include <osgEarthPrestige/SkyNode>
+#include <osgEarthPrestige/CloudLayer>
+#endif
 #include <osgEarth/ShaderLoader>
 #include <osgEarth/Shadowing>
 #include <osgEarth/VirtualProgram>
@@ -232,14 +234,15 @@ namespace osgEarth
                 if (!findNode(_skyNode, ri))
                 {
                     ImGui::Text("No Sky installed.");
-                    if (ImGui::Button("Install SkyNode2") && view(ri) && view(ri)->getViewerBase())
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+                    if (ImGui::Button("Install Prestige sky") && view(ri) && view(ri)->getViewerBase())
                     {
                         osg::ref_ptr<MapNode> map = _mapNode.get();
                         osg::ref_ptr<osgViewer::View> targetView = view(ri);
                         targetView->getViewerBase()->addUpdateOperation(new OneTimer([map, targetView]()
                         {
                             if (findTopMostNodeOfType<SkyNode>(targetView->getSceneData())) return;
-                            osg::ref_ptr<SkyNode2> sky = new SkyNode2;
+                            osg::ref_ptr<osgEarthPrestige::SkyNode> sky = new osgEarthPrestige::SkyNode;
                             if (map->getMapSRS()->isProjected())
                                 sky->setReferencePoint(map->getMap()->getProfile()->getExtent().getCentroid());
                             if (targetView->getSceneData() == map.get())
@@ -252,6 +255,7 @@ namespace osgEarth
                             sky->attach(targetView.get());
                         }));
                     }
+#endif
                     ImGui::End();
                     return;
                 }
@@ -263,13 +267,20 @@ namespace osgEarth
                     _skyNode->addUpdateCallback(_timeCycle.get());
                 }
 
-                auto sky2 = dynamic_cast<SkyNode2*>(_skyNode.get());
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+                auto prestigeSky = dynamic_cast<osgEarthPrestige::SkyNode*>(_skyNode.get());
+                const bool isPrestigeSky = prestigeSky != nullptr;
+#else
+                const bool isPrestigeSky = false;
+#endif
                 // Resolve the active provider each draw so map edits and explicit cloud providers use the same control.
                 std::vector<osg::ref_ptr<WindLayer>> winds;
                 _mapNode->getMap()->getLayers(winds);
                 _windLayer = winds.empty() ? nullptr : winds.front().get();
-                if (sky2 && sky2->getCloudLayer() && sky2->getCloudLayer()->getWindLayer())
-                    _windLayer = sky2->getCloudLayer()->getWindLayer();
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+                if (prestigeSky && prestigeSky->getCloudLayer() && prestigeSky->getCloudLayer()->getWindLayer())
+                    _windLayer = prestigeSky->getCloudLayer()->getWindLayer();
+#endif
                 if (_first)
                 {
                     findNode(_shadowCaster, ri);
@@ -281,20 +292,24 @@ namespace osgEarth
                     // Preserve the scene's selected date/time when opening the
                     // panel; simulation time also drives time-series layers.
                     changeSky(ri,[](SkyNode& sky) { sky.setSimulationTimeTracksDateTime(true); });
-                    if (sky2)
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+                    if (prestigeSky)
                     {
                         // Opening this panel must not overwrite an earth file's physical lighting settings.
-                        const auto& options = sky2->getOptions();
+                        const auto& options = prestigeSky->getOptions();
                         _exposure = options.exposure;
                         _sun_intensity = options.sunIntensity;
                         _environment_strength = options.environmentIntensity;
                         _ambient = options.ambient().get();
                     }
+#endif
                 }
 
-                if (sky2)
-                    ImGui::Text("SkyNode2 / %s", sky2->getOptions().preset == SkyNode2::FLAT ? "Flat" :
-                        sky2->getOptions().preset == SkyNode2::HIGH ? "High" : "Balanced");
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+                if (prestigeSky)
+                    ImGui::Text("Prestige sky / %s", prestigeSky->getOptions().preset == osgEarthPrestige::SkyNode::FLAT ? "Flat" :
+                        prestigeSky->getOptions().preset == osgEarthPrestige::SkyNode::HIGH ? "High" : "Balanced");
+#endif
 
                 bool lighting = _skyNode->getLighting();
                 if (ImGui::Checkbox("Lighting", &lighting))
@@ -381,19 +396,20 @@ namespace osgEarth
                         dirtySettings();
                     }
 
-                    if (sky2)
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+                    if (prestigeSky)
                     {
                         ImGuiLTable::Section("Lighting:");
                         if (ImGuiLTable::SliderFloat("Exposure", &_exposure, 0.01f, 16.0f,
                             "%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
                         {
                             float value = _exposure;
-                            changeSky(ri,[value](SkyNode& sky) { static_cast<SkyNode2&>(sky).setExposure(value); });
+                            changeSky(ri,[value](SkyNode& sky) { static_cast<osgEarthPrestige::SkyNode&>(sky).setExposure(value); });
                         }
                         if (ImGuiLTable::SliderFloat("Sun intensity", &_sun_intensity, 0.0f, 40.0f))
                         {
                             float value = _sun_intensity;
-                            changeSky(ri,[value](SkyNode& sky) { static_cast<SkyNode2&>(sky).setSunIntensity(value); });
+                            changeSky(ri,[value](SkyNode& sky) { static_cast<osgEarthPrestige::SkyNode&>(sky).setSunIntensity(value); });
                         }
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Solar irradiance drives both atmospheric scattering and direct sunlight.");
@@ -401,27 +417,27 @@ namespace osgEarth
                         {
                             float value = _environment_strength;
                             changeSky(ri,[value](SkyNode& sky)
-                                { static_cast<SkyNode2&>(sky).setEnvironmentIntensity(value); });
+                                { static_cast<osgEarthPrestige::SkyNode&>(sky).setEnvironmentIntensity(value); });
                         }
                         if (ImGuiLTable::SliderFloat("Night fill", &_ambient, 0.0f, 1.0f))
                         {
                             float value = _ambient;
-                            changeSky(ri,[value](SkyNode& sky) { static_cast<SkyNode2&>(sky).setAmbientIntensity(value); });
+                            changeSky(ri,[value](SkyNode& sky) { static_cast<osgEarthPrestige::SkyNode&>(sky).setAmbientIntensity(value); });
                         }
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Minimum diffuse fill. Set to zero for a physically dark night.");
-                        auto color = sky2->getSunLight()->getDiffuse();
+                        auto color = prestigeSky->getSunLight()->getDiffuse();
                         if (ImGuiLTable::ColorEdit3("Sun color", &color[0], ImGuiColorEditFlags_Float))
                             changeSky(ri,[color](SkyNode& sky) { sky.getSunLight()->setDiffuse(color); });
                         ImGuiLTable::Section("Procedural clouds:");
-                        auto cloud = sky2->getCloudLayer();
+                        auto cloud = prestigeSky->getCloudLayer();
                         bool cloudEnabled = cloud && cloud->getOptions().enabled;
                         if (ImGuiLTable::Checkbox("Clouds", &cloudEnabled))
                         {
                             changeSky(ri,[cloudEnabled](SkyNode& sky)
                             {
-                                auto& host = static_cast<SkyNode2&>(sky);
-                                if (!host.getCloudLayer()) host.setCloudLayer(new CloudLayer);
+                                auto& host = static_cast<osgEarthPrestige::SkyNode&>(sky);
+                                if (!host.getCloudLayer()) host.setCloudLayer(new osgEarthPrestige::CloudLayer);
                                 auto options = host.getCloudLayer()->getOptions();
                                 options.enabled = cloudEnabled;
                                 host.getCloudLayer()->setOptions(options);
@@ -432,7 +448,7 @@ namespace osgEarth
                             auto controls = cloud->getOptions();
                             int quality = int(controls.quality);
                             bool changed = ImGuiLTable::SliderInt("Cloud quality", &quality, 0, 2);
-                            controls.quality = static_cast<CloudLayer::Quality>(quality);
+                            controls.quality = static_cast<osgEarthPrestige::CloudLayer::Quality>(quality);
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("0: Low  1: Balanced  2: High");
                             changed |= ImGuiLTable::SliderFloat("Coverage", &controls.coverage, 0.0f, 1.0f);
                             changed |= ImGuiLTable::SliderFloat("Cloud density", &controls.density, 0.0f, 5.0f);
@@ -481,7 +497,7 @@ namespace osgEarth
                             {
                                 int rayQuality = int(controls.rayQuality);
                                 changed |= ImGuiLTable::SliderInt("Ray quality", &rayQuality, 0, 2);
-                                controls.rayQuality = static_cast<CloudLayer::Quality>(rayQuality);
+                                controls.rayQuality = static_cast<osgEarthPrestige::CloudLayer::Quality>(rayQuality);
                                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("0: Low  1: Balanced  2: High");
                                 changed |= ImGuiLTable::SliderFloat("Ray strength", &controls.rayStrength, 0.0f, 1.0f);
                                 changed |= ImGuiLTable::SliderFloat("Ray intensity", &controls.rayIntensity, 0.0f, 8.0f);
@@ -497,12 +513,14 @@ namespace osgEarth
                             if (changed)
                                 changeSky(ri,[controls](SkyNode& sky)
                                 {
-                                    auto layer = static_cast<SkyNode2&>(sky).getCloudLayer();
+                                    auto layer = static_cast<osgEarthPrestige::SkyNode&>(sky).getCloudLayer();
                                     if (layer) layer->setOptions(controls);
                                 });
                         }
                     }
-                    else if (lighting)
+                    else
+#endif
+                    if (lighting)
                     {
                         auto skyStateSet = _skyNode->getOrCreateStateSet();
                         auto environmentStrength = skyStateSet->getUniform("oe_sky_iblStrength");
@@ -646,7 +664,7 @@ namespace osgEarth
                                 changeShadows(ri,[blend](ShadowCaster& c) { c.setCascadeBlend(blend); });
                         }
 
-                        if (!sky2)
+                        if (!isPrestigeSky)
                         {
                             if (ImGuiLTable::SliderFloat("Haze cutoff", &_haze_cutoff, 0.0f, 0.2f))
                                 dirtySettings();

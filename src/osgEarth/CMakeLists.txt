@@ -86,22 +86,12 @@ set(TARGET_GLSL
     FrustumGridComputer.glsl
     GPUClamping.glsl
     GPUClamping.lib.glsl
-    GrimeLayer.glsl
     HexTiling.glsl
     Instancing.glsl
     LineDrawable.glsl
     MetadataNode.glsl
     WireLines.glsl
     PhongLighting.glsl
-    SkyNode2.Common.glsl
-    CloudLayer.Common.glsl
-    CloudLayer.Density.glsl
-    CloudLayer.Compute.glsl
-    CloudLayer.Rays.glsl
-    CloudLayer.Light.glsl
-    SkyNode2.Lighting.glsl
-    SkyNode2.LUT.glsl
-    SkyNode2.Background.glsl
     PointDrawable.glsl
     Text.glsl
     Text_legacy.glsl
@@ -275,7 +265,6 @@ SET(TARGET_H
     GLSLChunker
     GLUtils
     GraticuleLabelingEngine
-    GrimeLayer
     HeightFieldUtils
     Horizon
     HorizonClipPlane
@@ -370,7 +359,6 @@ SET(TARGET_H
     PolygonizeLines
     PolygonSymbol
     PowerlineLayer
-    PrestigeLayer
     PrimitiveIntersector
     Profile
     Progress
@@ -417,8 +405,6 @@ SET(TARGET_H
     SimplifyFilter
     Skins
     Sky
-    SkyNode2
-    CloudLayer
     SkyView
     SpatialReference
     StarData
@@ -651,7 +637,6 @@ set(TARGET_SRC
     GLSLChunker.cpp
     GLUtils.cpp
     GraticuleLabelingEngine.cpp
-    GrimeLayer.cpp
     HeightFieldUtils.cpp
     Horizon.cpp
     HorizonClipPlane.cpp
@@ -734,7 +719,6 @@ set(TARGET_SRC
     PolygonizeLines.cpp
     PolygonSymbol.cpp
     PowerlineLayer.cpp
-    PrestigeLayer.cpp
     PrimitiveIntersector.cpp
     Profile.cpp
     Progress.cpp
@@ -773,8 +757,6 @@ set(TARGET_SRC
     SimplifyFilter.cpp
     Skins.cpp
     Sky.cpp
-    SkyNode2.cpp
-    CloudLayer.cpp
     SkyView.cpp
     SpatialReference.cpp
     StateSetCache.cpp

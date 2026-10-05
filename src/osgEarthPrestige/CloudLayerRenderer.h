@@ -3,19 +3,20 @@
  * MIT License
  */
 #pragma once
-#include <osgEarth/CloudLayer>
+#include <osgEarthPrestige/CloudLayer>
 #include <osgEarth/TerrainResources>
 #include <osg/StateSet>
 #include <osg/Uniform>
 #include <osgUtil/CullVisitor>
 #include <memory>
 
-namespace osgEarth
+namespace osgEarthPrestige
 {
+    using namespace osgEarth;
     /** Internal adapter boundary. The host supplies physical lighting GLSL and camera coordinates;
      * the cloud renderer never modifies the host's camera, framebuffer, exposure, or scene graph.
      */
-    class CloudLayerRenderer : public osg::Referenced
+    class OSGEARTHPRESTIGE_EXPORT CloudLayerRenderer : public osg::Referenced
     {
     public:
         struct Frame

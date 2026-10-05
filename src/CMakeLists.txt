@@ -23,6 +23,11 @@ if(OSGEARTH_BUILD_PROCEDURAL_NODEKIT)
     list(APPEND OSGEARTH_COMPONENTS osgEarthProcedural)
 endif()
 
+if(OSGEARTH_BUILD_PRESTIGE_NODEKIT)
+    add_subdirectory(osgEarthPrestige)
+    list(APPEND OSGEARTH_COMPONENTS osgEarthPrestige)
+endif()
+
 if(OSGEARTH_BUILD_CESIUM_NODEKIT)
     add_subdirectory(osgEarthCesium)
     list(APPEND OSGEARTH_COMPONENTS osgEarthCesium)

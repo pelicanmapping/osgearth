@@ -2,14 +2,14 @@
  * Copyright 2026 Pelican Mapping
  * MIT License
  */
-#include "GrimeLayer"
-#include "GeoData"
-#include "Map"
-#include "MapCallback"
-#include "Shaders"
-#include "TerrainEngineNode"
-#include "TerrainResources"
-#include "VirtualProgram"
+#include <osgEarthPrestige/GrimeLayer>
+#include <osgEarth/GeoData>
+#include <osgEarth/Map>
+#include <osgEarth/MapCallback>
+#include <osgEarthPrestige/PrestigeShaders>
+#include <osgEarth/TerrainEngineNode>
+#include <osgEarth/TerrainResources>
+#include <osgEarth/VirtualProgram>
 #include <osg/Texture3D>
 #include <osgUtil/CullVisitor>
 #include <atomic>
@@ -20,7 +20,9 @@
 using namespace osgEarth;
 using namespace osgEarth::Util;
 
-REGISTER_OSGEARTH_LAYER(Grime, GrimeLayer);
+namespace osgEarthPrestige
+{
+REGISTER_OSGEARTH_LAYER_FACTORY("prestige:grime", GrimeLayer);
 
 namespace
 {
@@ -607,7 +609,7 @@ void GrimeLayer::refresh()
     callback->state->setTextureAttribute(reservation->unit(), _impl->texture);
     callback->state->addUniform(new osg::Uniform("oe_grime_volume", reservation->unit()));
     callback->state->addUniform(new osg::Uniform("oe_grime_tint", options().tint().get()));
-    Shaders shaders;
+    PrestigeShaders shaders;
     shaders.load(VirtualProgram::getOrCreate(callback->state), shaders.GrimeLayer);
     _impl->callback = callback;
     _impl->reservation = reservation;
@@ -615,3 +617,5 @@ void GrimeLayer::refresh()
     _impl->attachedModel = model;
     _impl->node->addCullCallback(callback);
 }
+
+} // namespace osgEarthPrestige

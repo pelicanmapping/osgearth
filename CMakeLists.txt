@@ -107,6 +107,9 @@ mark_as_advanced(OSGEARTH_BUILD_BENCHMARKS)
 option(OSGEARTH_BUILD_PROCEDURAL_NODEKIT "Build the procedural terrain nodekit (osgEarthProcedural)" OFF)
 mark_as_advanced(OSGEARTH_BUILD_PROCEDURAL_NODEKIT)
 
+option(OSGEARTH_BUILD_PRESTIGE_NODEKIT "Build the Prestige nodekit (osgEarthPrestige)" OFF)
+mark_as_advanced(OSGEARTH_BUILD_PRESTIGE_NODEKIT)
+
 option(OSGEARTH_BUILD_LEGACY_SPLAT_NODEKIT "Build the legacy procedural nodekit (osgEarthSplat)" OFF)
 mark_as_advanced(OSGEARTH_BUILD_LEGACY_SPLAT_NODEKIT)
 

@@ -15,7 +15,6 @@
 #include <osgEarth/FeatureModelLayer>
 #include <osgEarth/TiledFeatureModelLayer>
 #include <osgEarth/ModelLayer>
-#include <osgEarth/GrimeLayer>
 #include <osgEarth/TerrainConstraintLayer>
 #include <osgEarth/NodeUtils>
 #include <osgEarth/TerrainEngineNode>
@@ -49,6 +48,10 @@
 
 #ifdef OSGEARTH_HAVE_MBTILES
 #include <osgEarth/MBTiles>
+#endif
+
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+#include <osgEarthPrestige/GrimeLayer>
 #endif
 
 #ifdef OSGEARTH_HAVE_PROCEDURAL_NODEKIT
@@ -861,7 +864,8 @@ namespace osgEarth
                             }
                         }
 
-                        auto grimeLayer = dynamic_cast<osgEarth::GrimeLayer*>(layer);
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+                        auto grimeLayer = dynamic_cast<osgEarthPrestige::GrimeLayer*>(layer);
                         if (grimeLayer)
                         {
                             ImGuiLTable::Section("GrimeLayer");
@@ -943,6 +947,8 @@ namespace osgEarth
                             if (ImGui::IsItemHovered())
                                 ImGui::SetTooltip("Fraction of color staining retained on smooth surfaces. Does not change their roughness. Requires material roughness data to distinguish glass.");
                         }
+
+#endif
 
 #ifdef OSGEARTH_HAVE_CESIUM_NODEKIT
                         auto cesiumNativeLayer = dynamic_cast<osgEarth::Cesium::CesiumNative3DTilesLayer*>(layer);

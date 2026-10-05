@@ -2,9 +2,9 @@
  * Copyright 2026 Pelican Mapping
  * MIT License
  */
-#include <osgEarth/CloudLayer>
+#include <osgEarthPrestige/CloudLayer>
 #include <osgEarth/Capabilities>
-#include <osgEarth/Shaders>
+#include <osgEarthPrestige/PrestigeShaders>
 #include <osgEarth/CameraUtils>
 #include <osgEarth/WindLayer>
 #include "CloudLayerRenderer.h"
@@ -21,6 +21,9 @@
 #include <cstdint>
 
 using namespace osgEarth;
+
+namespace osgEarthPrestige
+{
 
 CloudLayer::~CloudLayer() = default;
 void CloudLayer::setWindLayer(WindLayer* layer) { _windLayer = layer; ++_revision; }
@@ -324,7 +327,7 @@ struct CloudLayerRenderer::Impl
         disabledState->addUniform(new osg::Uniform("oe_cloud_shadowMap",shadowUnit.unit()));
         disabledState->addUniform(new osg::Uniform("oe_cloud_raysEnabled",false));
         disabledState->addUniform(new osg::Uniform("oe_cloud_raysVolume",volumeUnit.unit()));
-        Shaders shaders;
+        PrestigeShaders shaders;
         for (unsigned i=0; i<2; ++i)
         {
             std::string source = "#version 430\n#define OE_CLOUD_LAYER\n";
@@ -491,7 +494,7 @@ struct CloudLayerRenderer::Impl
                 OE_WARN << "[CloudLayer] Atmospheric rays require one additional texture unit\n";
                 return false;
             }
-            Shaders shaders;
+            PrestigeShaders shaders;
             for (unsigned i=0; i<2; ++i)
             {
                 std::string source = "#version 430\n#define OE_CLOUD_LAYER\n";
@@ -721,3 +724,5 @@ void CloudLayerRenderer::resizeGLObjectBuffers(unsigned size)
         if (slot.environmentRaysPass) slot.environmentRaysPass->resizeGLObjectBuffers(size);
     }
 }
+
+} // namespace osgEarthPrestige

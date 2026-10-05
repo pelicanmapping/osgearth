@@ -4,6 +4,9 @@
  */
 #include <osgEarth/Extension>
 #include <osgEarth/Registry>
+#include <cctype>
+#include <map>
+#include <mutex>
 
 using namespace osgEarth;
 
@@ -24,6 +27,40 @@ Extension::getConfigOptions() const
     return _defaultOptions;
 }
 
+namespace
+{
+    struct ExtensionFactories
+    {
+        std::mutex mutex;
+        std::map<std::string, Extension::Factory> factories;
+    };
+
+    //! Initializes the shared registry safely, including during nodekit loading.
+    ExtensionFactories& extensionFactories()
+    {
+        static ExtensionFactories registry;
+        return registry;
+    }
+
+    //! Copies a factory under the lock so callers can load modules or construct extensions without holding it.
+    Extension::Factory findExtensionFactory(const std::string& name)
+    {
+        auto& registry = extensionFactories();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        auto i = registry.factories.find(toLower(name));
+        return i == registry.factories.end() ? nullptr : i->second;
+    }
+}
+
+bool
+Extension::registerFactory(const std::string& name, Factory factory)
+{
+    if (name.empty() || !factory) return false;
+    auto& registry = extensionFactories();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    return registry.factories.emplace(toLower(name), factory).second;
+}
+
 Extension*
 Extension::create(const std::string& name, const ConfigOptions& options)
 {
@@ -31,6 +68,26 @@ Extension::create(const std::string& name, const ConfigOptions& options)
     {
         OE_WARN << LC << "ILLEGAL- Extension::create requires a plugin name" << std::endl;
         return 0L;
+    }
+
+    auto factory = findExtensionFactory(name);
+    const auto separator = name.find(':');
+    if (!factory && separator != std::string::npos && separator > 0)
+    {
+        // A namespace identifies an optional nodekit, not a dependency of the core library.
+        std::string nodekit = name.substr(0, separator);
+        nodekit[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(nodekit[0])));
+        auto* registry = osgDB::Registry::instance();
+        registry->loadLibrary(registry->createLibraryNameForNodeKit("osgEarth" + nodekit));
+        factory = findExtensionFactory(name);
+    }
+    if (factory)
+    {
+        auto* extension = factory(options);
+        if (!extension) return nullptr;
+        extension->_defaultOptions = options;
+        if (extension->getName().empty()) extension->setName(name);
+        return extension;
     }
 
     // convey the configuration options:

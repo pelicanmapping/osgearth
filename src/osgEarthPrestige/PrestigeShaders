@@ -1,0 +1,19 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarthPrestige/Export>
+#include <osgEarth/ShaderLoader>
+
+namespace osgEarthPrestige
+{
+    struct OSGEARTHPRESTIGE_EXPORT PrestigeShaders : public osgEarth::Util::ShaderPackage
+    {
+        //! Populate the nodekit's shader sources for loading without external shader files.
+        PrestigeShaders();
+
+        std::string GrimeLayer;
+    };
+}

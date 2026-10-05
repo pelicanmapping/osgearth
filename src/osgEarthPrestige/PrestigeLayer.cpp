@@ -2,7 +2,7 @@
  * Copyright 2026 Pelican Mapping
  * MIT License
  */
-#include <osgEarth/PrestigeLayer>
+#include <osgEarthPrestige/PrestigeLayer>
 #include <osgEarth/Map>
 #include <osgEarth/JsonUtils>
 #include <osgEarth/LineDrawable>
@@ -20,9 +20,10 @@
 #include <vector>
 
 using namespace osgEarth;
+using namespace osgEarthPrestige;
 using namespace osgEarth::Util;
 
-REGISTER_OSGEARTH_LAYER(Prestige, PrestigeLayer);
+REGISTER_OSGEARTH_LAYER_FACTORY("prestige:prestige", PrestigeLayer);
 
 namespace
 {

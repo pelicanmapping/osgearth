@@ -1,7 +1,7 @@
 # Sun shadows
 
 `osgEarth::Util::ShadowCaster` provides stable cascaded shadow maps for a distant sun.
-It works with SkyNode2 and the existing lighting shaders. Run an example with
+It works with Prestige Sky and the existing lighting shaders. Run an example with
 `--shadows`, or use **Install shadows** in EnvironmentGUI after installing a sky.
 The panel's **Details / Shadows** controls cover distance, cascade count, resolution,
 filtering, softness, sunlight visibility, bias, caster reach, and cascade blending.

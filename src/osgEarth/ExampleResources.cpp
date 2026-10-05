@@ -47,7 +47,7 @@ MapNodeHelper::usage() const
 {
     return Stringify()
         << "  --sky                         : add a default sky model\n"
-        << "  --sky2                        : replace sky with core SkyNode2 (--sky-low / --sky-high)\n"
+        << "  --prestige-sky                 : replace sky with Prestige sky (--sky-low / --sky-high)\n"
         << "  --ortho                       : use an orthographic camera\n"
         << "  --shadows                     : activates model layer shadows\n"
         << "  --path [file]                 : load and playback an animation path\n"
@@ -302,23 +302,23 @@ MapNodeHelper::parse(MapNode* mapNode, osg::ArgumentParser& args, osgViewer::Vie
         logDepth.install( view->getCamera() );
     }
 
-    // Explicit core or legacy sky selection:
+    // Explicit sky selection through the extension registry:
     if (mapNode)
     {
-        bool sky2 = args.read("--sky2");
+        bool prestigeSky = args.read("--prestige-sky");
         SkyOptions::Quality sky_quality = SkyOptions::parseQuality(args);
-        if (sky2 && sky_quality == SkyOptions::QUALITY_UNSET) sky_quality = SkyOptions::QUALITY_DEFAULT;
+        if (prestigeSky && sky_quality == SkyOptions::QUALITY_UNSET) sky_quality = SkyOptions::QUALITY_DEFAULT;
 
         if (sky_quality != SkyOptions::QUALITY_UNSET && mapNode->open())
         {
-            if (sky2)
+            if (prestigeSky)
             {
                 // A command-line replacement also supersedes sky extensions from the earth file.
                 auto extensions = mapNode->getExtensions();
                 for (auto& extension : extensions)
                     if (extension->as<SkyNodeFactory>()) mapNode->removeExtension(extension.get());
             }
-            std::string ext = sky2 ? "sky2" : mapNode->getMapSRS()->isGeographic() ? "sky_simple" : "sky_gl";
+            std::string ext = prestigeSky ? "prestige:sky" : mapNode->getMapSRS()->isGeographic() ? "sky_simple" : "sky_gl";
             SkyOptions options;
             options.quality() = sky_quality;
             mapNode->addExtension(Extension::create(ext, options));

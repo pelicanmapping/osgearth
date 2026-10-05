@@ -11,7 +11,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace osgEarth { namespace Sky2Atmosphere
+namespace osgEarthPrestige { namespace SkyAtmosphere
 {
     constexpr double radius = 6360.0; // kilometers, ellipsoid-scaled Earth coordinates
     constexpr double top = 6460.0;

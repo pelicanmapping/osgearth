@@ -99,7 +99,8 @@ namespace
         {
             const std::string& name = i->key();
 
-            if ( isReservedWord(name) )
+            // Namespaced extensions load their nodekits through Extension::create.
+            if ( isReservedWord(name) || name.find(':') != std::string::npos )
                 continue;
 
             if (!name.empty())

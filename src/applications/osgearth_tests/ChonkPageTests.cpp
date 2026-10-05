@@ -518,7 +518,7 @@ TEST_CASE("Chonk singleton bypass reevaluates ordinary asset reloads", "[chonk][
     REQUIRE(reloaded.chonks == 0);
 }
 
-// Exercise the same mixed converter as Prestige, rather than calling Ripper
+// Exercise the mixed scene converter, rather than calling Ripper
 // directly. Unknown uniforms, blending, and dynamic branches remain ordinary.
 TEST_CASE("Chonk scene conversion packs ordinary PBR geometry and retains fallback state", "[chonk][chonk-pages]")
 {
@@ -626,36 +626,4 @@ TEST_CASE("Chonk scene rendering worker", "[.chonk-scene-worker]")
     renderer.setScene(converted); renderer.frame(); renderer.frame();
     REQUIRE(ChonkTest::differentPixels(*reference, *renderer.pixels()) <= 30);
     REQUIRE(glGetError() == GL_NO_ERROR);
-}
-
-// Optional real-data regression: detail cells pack ordinary draws, while low-LOD
-// singleton tiles retain their original graph. Compare without mutating inputs.
-TEST_CASE("Prestige model conversion selects useful batches", "[.prestige-unique]")
-{
-    const char* path = std::getenv("OSGEARTH_PRESTIGE_TEST_TILE");
-    REQUIRE(path != nullptr);
-    auto source = osgDB::readRefNodeFile(path);
-    REQUIRE(source);
-    osg::ref_ptr<TextureArena> arena = new TextureArena();
-    auto factory = std::make_shared<ChonkFactory>(arena);
-    auto old = ChonkFactory::convertExternalInstances(source, factory);
-    auto packed = ChonkFactory::convertScene(source, factory);
-    ChonkTest::DrawCounts before, after;
-    old->accept(before); packed->accept(after);
-    std::cout << "Prestige ordinary drawables: " << before.ordinary << " -> " << after.ordinary
-        << "; Chonk drawables: " << before.chonks << " -> " << after.chonks
-        << "; mesh batches: " << before.batches << " -> " << after.batches << std::endl;
-    REQUIRE(before.ordinary > 0);
-    if (before.ordinaryDraws == 1 && before.chonks == 0)
-    {
-        REQUIRE(after.ordinary == 1);
-        REQUIRE(after.chonks == 0);
-        REQUIRE(packed == source);
-    }
-    else
-    {
-        REQUIRE(after.ordinary < before.ordinary);
-        REQUIRE(after.chonks > 0);
-    }
-    REQUIRE(packed->getBound().valid());
 }

@@ -3,21 +3,24 @@
  * MIT License
  */
 #pragma once
+#include <osgEarthPrestige/Export>
 #include <osgEarth/Config>
 #include <osg/Referenced>
 #include <osg/Vec3>
 
-namespace osgEarth
+namespace osgEarth { class WindLayer; }
+
+namespace osgEarthPrestige
 {
-    class WindLayer;
+    using namespace osgEarth;
     /** Procedural cloud settings, independent of scene graph and sky implementation.
      * Change settings on the update thread, before concurrent cull/draw. Renderers own per-view GPU resources.
      */
-    class OSGEARTH_EXPORT CloudLayer : public osg::Referenced
+    class OSGEARTHPRESTIGE_EXPORT CloudLayer : public osg::Referenced
     {
     public:
         enum Quality { LOW, BALANCED, HIGH };
-        struct OSGEARTH_EXPORT Options : public ConfigOptions
+        struct OSGEARTHPRESTIGE_EXPORT Options : public ConfigOptions
         {
             bool enabled = true;
             Quality quality = BALANCED;

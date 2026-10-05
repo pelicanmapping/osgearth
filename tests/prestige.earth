@@ -1,0 +1,270 @@
+<!-- Prestige prototype layer. -->
+<map name="Prestige prototype">
+  <libraries>osgEarthPrestige</libraries>
+
+  <XYZImage name="Google Imagery" open="true">
+    <url><![CDATA[ https://www.google.com/maps/vt?lyrs=s@189&gl=cn&x={x}&y={y}&z={z} ]]></url>
+    <texture_compression>cpu</texture_compression>
+  </XYZImage>
+
+  <TMSElevation name="ReadyMap 90m Elevation">
+    <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
+    <vdatum>egm96</vdatum>
+  </TMSElevation>
+
+  <prestige:prestige name="Prestige Buildings" enabled="true">
+    <url>D:/data/prestige/Prestige_ktx/models/prestige/</url>
+    <profile>spherical-mercator</profile>
+    <additive>false</additive>
+    <lod0_extension>gltf</lod0_extension>
+    <lod_method>screen_space</lod_method>
+    <min_level>14</min_level>
+    <max_level>14</max_level>
+    <!-- Distances are in meters. Tune these for the scale of your models. -->
+    <lod1_range>5000</lod1_range>
+    <lod0_range>250</lod0_range>
+    <skip_lod1>false</skip_lod1>
+    <split>true</split>
+    <!-- Set this to false to prevent going to the lod1 and lod 0 tiles -->
+    <subdivide>true</subdivide>
+    <!-- Set this to true if Prestige numbers tiles from the bottom up. -->
+    <invert_y>false</invert_y>
+  </prestige:prestige>
+
+  <prestige:grime name="Building weathering">
+    <opacity>0.5</opacity>
+    <model>Prestige Buildings</model>
+    <anchor>-71.06,42.36,0</anchor>
+    <seed>17</seed>
+    <volume_size>128</volume_size>
+    <amount>1.0</amount>
+    <tint>0.135,0.130,0.124</tint>
+    <macro_period>7.5</macro_period>
+    <streak_period>1.2,1.2,6.8</streak_period>
+    <!-- Start with smoother stains so the change shows on the matte building skins.
+          Tune these live in LayersGUI; roughen_only=true is useful for dry deposits. -->
+    <roughness>0.25</roughness>
+    <roughness_amount>0.8</roughness_amount>
+    <roughen_only>false</roughen_only>
+    <!-- Smooth materials keep their roughness and receive only 15% of the stain. -->
+    <smooth_threshold>0.2</smooth_threshold>
+    <smooth_feather>0.15</smooth_feather>
+    <smooth_amount>0.15</smooth_amount>
+  </prestige:grime>
+
+  <viewpoints home="0">
+    <viewpoint>
+      <heading>-103.549</heading>
+
+      <pitch>-2.64635</pitch>
+
+      <range>1355.49m</range>
+
+      <long>-79.99705874461937</long>
+
+      <lat>40.4399649662581</lat>
+
+      <height>220.3948163352907</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <viewpoint name="Close up slow lighting">
+      <heading>-101.832</heading>
+
+      <pitch>-27.7212</pitch>
+
+      <range>420.233m</range>
+
+      <long>-79.99701475181477</long>
+
+      <lat>40.4415901229514</lat>
+
+      <height>229.9541753996164</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <viewpoint>
+      <heading>85.4103</heading>
+
+      <pitch>-17.1384</pitch>
+
+      <range>458.446m</range>
+
+      <long>-80.001921917063</long>
+
+      <lat>40.43896668125812</lat>
+
+      <height>212.7220127834007</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <viewpoint name="NY Alley 16fps">
+      <heading>-146.496</heading>
+
+      <pitch>-3.25876</pitch>
+
+      <range>508.104m</range>
+
+      <long>-74.00522746701468</long>
+
+      <lat>40.72079543570025</lat>
+
+      <height>-24.25937988422811</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <viewpoint>
+      <heading>-145.759</heading>
+
+      <pitch>-9.86659</pitch>
+
+      <range>497.096m</range>
+
+      <long>-74.0015842568351</long>
+
+      <lat>40.7218394332723</lat>
+
+      <height>-17.72465609386563</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <viewpoint name="NY Overview" long="-73.9160" lat="40.7306" heading="0" pitch="-45"
+      range="15000" />
+
+    <viewpoint name="Lights">
+      <heading>-146.607</heading>
+
+      <pitch>-11.0749</pitch>
+
+      <range>234.365m</range>
+
+      <long>-73.90155606822194</long>
+
+      <lat>40.74111354732007</lat>
+
+      <height>-0.01096763461828232</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <viewpoint name="NY Street">
+      <heading>-160.428</heading>
+
+      <pitch>-1.02694</pitch>
+
+      <range>136.257m</range>
+
+      <long>-73.99329167621946</long>
+
+      <lat>40.70063517982269</lat>
+
+      <height>-11.27031195629388</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <viewpoint name="Statue of Liberty">
+      <heading>-22.9542</heading>
+
+      <pitch>-14.7417</pitch>
+
+      <range>2446.82m</range>
+
+      <long>-74.04695638860964</long>
+
+      <lat>40.69152983101623</lat>
+
+      <height>0.7996887546032667</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <!-- Prestige tile 14/4736/6193 (Churchtown, Lancaster County PA):
+             20 building=barn footprints; this cluster has six of them. -->
+    <viewpoint name="Lancaster County barns">
+      <heading>35</heading>
+
+      <pitch>-20</pitch>
+
+      <range>700m</range>
+
+      <long>-75.9300</long>
+
+      <lat>40.1607</lat>
+
+      <height>0</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <!-- Prestige tile 14/2795/6535 (Burbank / North Hollywood, Los
+             Angeles). Range frames the whole ~2 km tile; zoom in from there. -->
+    <viewpoint name="Burbank - tile 14/2795/6535">
+      <heading>0</heading>
+
+      <pitch>-35</pitch>
+
+      <range>3000m</range>
+
+      <long>-118.575439453125</long>
+
+      <lat>34.170907874055615</lat>
+
+      <height>0</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <viewpoint name="Brooklyn Bridge">
+      <heading>0.0000</heading>
+
+      <pitch>-22</pitch>
+
+      <range>504m</range>
+
+      <long>-73.996864</long>
+
+      <lat>40.706086</lat>
+
+      <height>0</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <viewpoint name="California Warehouses">
+      <heading>114.119</heading>
+
+      <pitch>-22.5458</pitch>
+
+      <range>1960.12m</range>
+
+      <long>-118.0652888974363</long>
+
+      <lat>33.89608877929378</lat>
+
+      <height>-8.262530222535133</height>
+
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <!-- BEGIN BUILDINGKIT DEMO -->
+    <viewpoint name="BuildingKit - Pittsburgh - Three rivers and downtown" long="-80.012"
+      lat="40.4415" height="220" heading="35" pitch="-40" range="5200" />
+
+    <viewpoint name="BuildingKit - Pittsburgh - Three Sisters bridges" long="-80.0018" lat="40.446"
+      height="225" heading="65" pitch="-35" range="1800" />
+
+    <viewpoint name="BuildingKit - Pittsburgh - Monongahela bridges" long="-79.9995" lat="40.432"
+      height="225" heading="20" pitch="-35" range="2400" />
+
+    <viewpoint name="BuildingKit - Pittsburgh small - Downtown and rivers" long="-80.002"
+      lat="40.446" height="225" heading="35" pitch="-40" range="3200" />
+
+    <!-- END BUILDINGKIT DEMO -->
+  </viewpoints>
+</map>

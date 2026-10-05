@@ -4,13 +4,16 @@
  */
 #pragma once
 
+#include <osgEarthPrestige/Export>
 #include <osgEarth/VisibleLayer>
 #include <osgEarth/TiledModelLayer>
 #include <osg/Image>
 #include <memory>
 
-namespace osgEarth
+namespace osgEarthPrestige
 {
+    using namespace osgEarth;
+
     /**
      * Adds generated, geographically anchored weathering to a model layer.
      * Configure options before opening. Attach/detach and setters belong on the
@@ -20,12 +23,12 @@ namespace osgEarth
      * Inherited setVisible toggles only the effect, preserving its texture and amount.
      * Inherited setOpacity scales grime strength without changing the target's alpha.
      */
-    class OSGEARTH_EXPORT GrimeLayer : public VisibleLayer
+    class OSGEARTHPRESTIGE_EXPORT GrimeLayer : public VisibleLayer
     {
     public:
-        struct OSGEARTH_EXPORT Options : public VisibleLayer::Options
+        struct OSGEARTHPRESTIGE_EXPORT Options : public VisibleLayer::Options
         {
-            META_LayerOptions(osgEarth, Options, VisibleLayer::Options);
+            META_LayerOptions(osgEarthPrestige, Options, VisibleLayer::Options);
             OE_OPTION(std::string, model);
             OE_OPTION(osg::Vec3d, anchor, osg::Vec3d(0, 0, 0));
             OE_OPTION(unsigned, seed, 17u);
@@ -50,7 +53,7 @@ namespace osgEarth
             void fromConfig(const Config& conf);
         };
 
-        META_Layer(osgEarth, GrimeLayer, Options, VisibleLayer, Grime);
+        META_Layer(osgEarthPrestige, GrimeLayer, Options, VisibleLayer, prestige:grime);
 
         //! Select an existing target without taking ownership; call before open.
         void setModelLayer(TiledModelLayer* layer);

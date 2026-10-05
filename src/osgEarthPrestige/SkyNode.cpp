@@ -2,11 +2,12 @@
  * Copyright 2026 Pelican Mapping
  * MIT License
  */
-#include <osgEarth/SkyNode2>
+#include <osgEarthPrestige/SkyNode>
 #include <osgEarth/Lighting>
 #include <osgEarth/MapNode>
 #include <osgEarth/NodeUtils>
 #include <osgEarth/Shaders>
+#include <osgEarthPrestige/PrestigeShaders>
 #include <osgEarth/ShaderGenerator>
 #include <osgEarth/CameraUtils>
 #include <osgEarth/StarData>
@@ -21,8 +22,8 @@
 #include <osg/Texture2D>
 #include <osgUtil/CullVisitor>
 #include <osgViewer/View>
-#include "SkyNode2Atmosphere.h"
-#include "CloudLayerRenderer.h"
+#include <osgEarthPrestige/SkyAtmosphere.h>
+#include <osgEarthPrestige/CloudLayerRenderer.h>
 #include <array>
 #include <atomic>
 #include <map>
@@ -31,15 +32,18 @@
 
 using namespace osgEarth;
 
+namespace osgEarthPrestige
+{
+
 namespace
 {
     // Private cameras use ordinary GL programs, independent of inherited material shaders.
     const char* triangleVertex = R"(
         #version 330
         in vec4 osg_Vertex;
-        out vec2 oe_s2_uv;
+        out vec2 oe_psky_uv;
         // Generates clip coordinates and smooth screen UVs from an oversized triangle.
-        void main() { gl_Position=vec4(osg_Vertex.xy,1.0,1.0); oe_s2_uv=osg_Vertex.xy*0.5+0.5; }
+        void main() { gl_Position=vec4(osg_Vertex.xy,1.0,1.0); oe_psky_uv=osg_Vertex.xy*0.5+0.5; }
     )";
 
     //! Returns a finite nonnegative option, or a documented fallback.
@@ -64,16 +68,16 @@ namespace
         return texture;
     }
 
-    //! Assembles a standalone GLSL 3.3 pass from the embedded core shader package.
+    //! Assembles a standalone GLSL 3.3 pass from the embedded shader packages.
     osg::ref_ptr<osg::Program> program(const std::string& defines, const std::string& file)
     {
-        Shaders shaders;
+        PrestigeShaders shaders;
         osg::ref_ptr<osg::Program> result = new osg::Program;
         result->setName(file+defines);
         result->addBindAttribLocation("osg_Vertex",0);
         result->addShader(new osg::Shader(osg::Shader::VERTEX,triangleVertex));
         result->addShader(new osg::Shader(osg::Shader::FRAGMENT,
-            "#version 330\n"+defines+shaders.context().at("SkyNode2.Common.glsl")+
+            "#version 330\n"+defines+shaders.context().at("Sky.Common.glsl")+
             shaders.context().at("CloudLayer.Common.glsl")+shaders.context().at(file)));
         return result;
     }
@@ -103,7 +107,7 @@ namespace
     osg::ref_ptr<osg::Camera> pass(osg::Texture2D* texture, osg::Program* shader, int order)
     {
         osg::ref_ptr<osg::Camera> camera = new osg::Camera;
-        camera->setName("SkyNode2 lookup");
+        camera->setName("SkyNode lookup");
         camera->setReferenceFrame(osg::Transform::ABSOLUTE_RF);
         camera->setViewMatrix(osg::Matrix::identity());
         camera->setProjectionMatrix(osg::Matrix::identity());
@@ -165,14 +169,14 @@ namespace
             auto result = target(256,96);
             result->setInternalFormat(GL_RGB32F_ARB);
             result->setSourceFormat(GL_RGB);
-            result->setImage(Sky2Atmosphere::createAtlas());
+            result->setImage(SkyAtmosphere::createAtlas());
             return result;
         }();
         return texture;
     }
 }
 
-struct SkyNode2::Impl
+struct SkyNode::Impl
 {
     Options options;
     osg::ref_ptr<LightGL3> light = new LightGL3(0);
@@ -230,7 +234,7 @@ struct SkyNode2::Impl
     }
 
     //! Reserves terrain units and compiles pass descriptions once after the child graph is installed.
-    void prepare(SkyNode2& owner)
+    void prepare(SkyNode& owner)
     {
         if (ready) return;
         auto mapNode = findTopMostNodeOfType<MapNode>(&owner);
@@ -244,9 +248,9 @@ struct SkyNode2::Impl
         {
             for (auto& unit : units)
             {
-                if (!resources->reserveTextureImageUnit(unit,"SkyNode2"))
+                if (!resources->reserveTextureImageUnit(unit,"SkyNode"))
                 {
-                    OE_WARN << "[SkyNode2] Four texture units unavailable; using atmosphere-free PBR\n";
+                    OE_WARN << "[SkyNode] Four texture units unavailable; using atmosphere-free PBR\n";
                     atmospheric = false;
                     for (auto& reserved : units) reserved.release();
                     break;
@@ -254,77 +258,77 @@ struct SkyNode2::Impl
             }
         }
         auto ss = owner.getOrCreateStateSet();
-        if (atmospheric) ss->setDefine("OE_SKY2_ATMOSPHERE");
+        if (atmospheric) ss->setDefine("OE_PRESTIGE_SKY_ATMOSPHERE");
         std::string defines;
-        if (options.toneMapping) defines += "#define OE_SKY2_TONEMAP\n";
-        if (options.outputSRGB) defines += "#define OE_SKY2_SRGB\n";
-        if (atmospheric) defines += "#define OE_SKY2_ATMOSPHERE\n";
-        backgroundProgram = program(defines,"SkyNode2.Background.glsl");
+        if (options.toneMapping) defines += "#define OE_PRESTIGE_SKY_TONEMAP\n";
+        if (options.outputSRGB) defines += "#define OE_PRESTIGE_SKY_SRGB\n";
+        if (atmospheric) defines += "#define OE_PRESTIGE_SKY_ATMOSPHERE\n";
+        backgroundProgram = program(defines,"Sky.Background.glsl");
         stars = starTexture();
         if (atmospheric)
         {
             atmosphere = atmosphereTexture();
             std::string samples = options.preset == HIGH ? "32" : "16";
-            defines += "#define OE_SKY2_SAMPLES "+samples+"\n#define OE_SKY2_FILTER_SAMPLES "+samples+"\n";
-            skyProgram = program(defines+"#define OE_SKY2_SKY_PASS\n","SkyNode2.LUT.glsl");
-            aerialProgram = program(defines+"#define OE_SKY2_AERIAL_PASS\n","SkyNode2.LUT.glsl");
-            environmentProgram = program(defines,"SkyNode2.LUT.glsl");
+            defines += "#define OE_PRESTIGE_SKY_SAMPLES "+samples+"\n#define OE_PRESTIGE_SKY_FILTER_SAMPLES "+samples+"\n";
+            skyProgram = program(defines+"#define OE_PRESTIGE_SKY_SKY_PASS\n","Sky.LUT.glsl");
+            aerialProgram = program(defines+"#define OE_PRESTIGE_SKY_AERIAL_PASS\n","Sky.LUT.glsl");
+            environmentProgram = program(defines,"Sky.LUT.glsl");
         }
         ready = true;
         configureClouds(owner);
     }
 
     //! Adapts clear-air lighting to the independent cloud renderer and updates only the two consuming programs.
-    void configureClouds(SkyNode2& owner)
+    void configureClouds(SkyNode& owner)
     {
         if (!ready) return;
         cloudRenderer = nullptr;
         if (clouds)
         {
-            Shaders shaders;
-            std::string adapter = atmospheric ? "#define OE_SKY2_ATMOSPHERE\n" : "";
-            adapter += shaders.context().at("SkyNode2.Common.glsl");
+            PrestigeShaders shaders;
+            std::string adapter = atmospheric ? "#define OE_PRESTIGE_SKY_ATMOSPHERE\n" : "";
+            adapter += shaders.context().at("Sky.Common.glsl");
             adapter += R"(
                 // Supplies cumulative clear air to the cloud transport integrator in the host's linear units.
                 void oe_cloud_air(vec3 direction, float distance, out vec3 S, out vec3 T)
                 {
                     S=vec3(0); T=vec3(1);
-                    #ifdef OE_SKY2_ATMOSPHERE
-                    if (oe_sky2_flags.x>0.5) oe_s2_aerial(direction,distance,S,T);
+                    #ifdef OE_PRESTIGE_SKY_ATMOSPHERE
+                    if (oe_prestige_sky_flags.x>0.5) oe_psky_aerial(direction,distance,S,T);
                     #endif
                 }
                 // Evaluates solar extinction at cloud altitude, including the planetary night shadow.
                 vec3 oe_cloud_sunlight(vec3 p)
                 {
-                    #ifdef OE_SKY2_ATMOSPHERE
-                    return oe_sky2_solarIrradiance*oe_s2_transmittance(p,oe_sky2_sun);
+                    #ifdef OE_PRESTIGE_SKY_ATMOSPHERE
+                    return oe_prestige_sky_solarIrradiance*oe_psky_transmittance(p,oe_prestige_sky_sun);
                     #else
-                    return oe_s2_occluded(length(p),dot(normalize(p),oe_sky2_sun)) ?
-                        vec3(0) : oe_sky2_solarIrradiance;
+                    return oe_psky_occluded(length(p),dot(normalize(p),oe_prestige_sky_sun)) ?
+                        vec3(0) : oe_prestige_sky_solarIrradiance;
                     #endif
                 }
                 // Uses only clear-air illumination; sampling the cloud-composited environment would create feedback.
                 vec3 oe_cloud_ambient(vec3 p)
                 {
-                    vec3 ambient=vec3(oe_sky2_settings.w);
-                    #ifdef OE_SKY2_ATMOSPHERE
-                    ambient+=oe_s2_sky(normalize(p))*oe_sky2_settings.z*0.5;
+                    vec3 ambient=vec3(oe_prestige_sky_settings.w);
+                    #ifdef OE_PRESTIGE_SKY_ATMOSPHERE
+                    ambient+=oe_psky_sky(normalize(p))*oe_prestige_sky_settings.z*0.5;
                     #endif
                     return ambient;
                 }
                 // Direct air scattering per scaled kilometer; cloud shadowing must not remove indirect sky light.
                 vec3 oe_cloud_airSource(vec3 p, vec3 direction)
                 {
-                    #ifdef OE_SKY2_ATMOSPHERE
+                    #ifdef OE_PRESTIGE_SKY_ATMOSPHERE
                     float r=length(p);
-                    if (oe_sky2_flags.x<0.5 || r<oe_s2_radius || r>oe_s2_top) return vec3(0);
+                    if (oe_prestige_sky_flags.x<0.5 || r<oe_psky_radius || r>oe_psky_top) return vec3(0);
                     vec3 extinction, rayleigh;
                     float mie;
-                    oe_s2_medium(r-oe_s2_radius,extinction,rayleigh,mie);
-                    float cosine=dot(direction,oe_sky2_sun), g=0.8;
-                    float phaseR=3.0*(1.0+cosine*cosine)/(16.0*oe_s2_pi);
-                    float phaseM=(1.0-g*g)/(4.0*oe_s2_pi*pow(max(0.01,1.0+g*g-2.0*g*cosine),1.5));
-                    return oe_sky2_solarIrradiance*oe_s2_transmittance(p,oe_sky2_sun)*(rayleigh*phaseR+mie*phaseM);
+                    oe_psky_medium(r-oe_psky_radius,extinction,rayleigh,mie);
+                    float cosine=dot(direction,oe_prestige_sky_sun), g=0.8;
+                    float phaseR=3.0*(1.0+cosine*cosine)/(16.0*oe_psky_pi);
+                    float phaseM=(1.0-g*g)/(4.0*oe_psky_pi*pow(max(0.01,1.0+g*g-2.0*g*cosine),1.5));
+                    return oe_prestige_sky_solarIrradiance*oe_psky_transmittance(p,oe_prestige_sky_sun)*(rayleigh*phaseR+mie*phaseM);
                     #else
                     return vec3(0);
                     #endif
@@ -336,13 +340,13 @@ struct SkyNode2::Impl
         auto ss = owner.getOrCreateStateSet();
         if (cloudRenderer) ss->setDefine("OE_CLOUD_LAYER"); else ss->removeDefine("OE_CLOUD_LAYER");
         std::string defines;
-        if (options.toneMapping) defines += "#define OE_SKY2_TONEMAP\n";
-        if (options.outputSRGB) defines += "#define OE_SKY2_SRGB\n";
-        if (atmospheric) defines += "#define OE_SKY2_ATMOSPHERE\n";
+        if (options.toneMapping) defines += "#define OE_PRESTIGE_SKY_TONEMAP\n";
+        if (options.outputSRGB) defines += "#define OE_PRESTIGE_SKY_SRGB\n";
+        if (atmospheric) defines += "#define OE_PRESTIGE_SKY_ATMOSPHERE\n";
         if (cloudRenderer) defines += "#define OE_CLOUD_LAYER\n";
-        backgroundProgram = program(defines,"SkyNode2.Background.glsl");
-        defines += std::string("#define OE_SKY2_FILTER_SAMPLES ")+(options.preset == HIGH ? "32\n" : "16\n");
-        if (atmospheric) environmentProgram = program(defines,"SkyNode2.LUT.glsl");
+        backgroundProgram = program(defines,"Sky.Background.glsl");
+        defines += std::string("#define OE_PRESTIGE_SKY_FILTER_SAMPLES ")+(options.preset == HIGH ? "32\n" : "16\n");
+        if (atmospheric) environmentProgram = program(defines,"Sky.LUT.glsl");
         for (auto& entry : views)
         for (auto& frame : entry.second->frames)
         {
@@ -362,28 +366,28 @@ struct SkyNode2::Impl
         bs->setAttributeAndModes(new osg::Depth(osg::Depth::LEQUAL,0.0,1.0,false),
             osg::StateAttribute::ON|osg::StateAttribute::OVERRIDE);
         bs->setTextureAttributeAndModes(0,stars,osg::StateAttribute::ON|osg::StateAttribute::OVERRIDE);
-        bs->addUniform(new osg::Uniform("oe_sky2_stars",0));
-        f.state->addUniform(new osg::Uniform("oe_sky2_sunIndex",light->getLightNum()));
-        f.state->addUniform(new osg::Uniform("oe_sky2_eye",osg::Vec3()));
-        f.state->addUniform(new osg::Uniform("oe_sky2_sun",osg::Vec3()));
-        f.state->addUniform(new osg::Uniform("oe_sky2_solarIrradiance",osg::Vec3()));
-        f.state->addUniform(new osg::Uniform("oe_sky2_settings",osg::Vec4()));
-        f.state->addUniform(new osg::Uniform("oe_sky2_flags",osg::Vec4()));
-        f.state->addUniform(new osg::Uniform("oe_sky2_moon",osg::Vec4()));
-        f.state->addUniform(new osg::Uniform("oe_sky2_horizon",1.57f));
-        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_sky2_basis"));
-        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_sky2_earthToECI"));
-        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_sky2_viewToEarth"));
-        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_sky2_viewToSky"));
-        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT4,"oe_sky2_inverseProjection"));
+        bs->addUniform(new osg::Uniform("oe_prestige_sky_stars",0));
+        f.state->addUniform(new osg::Uniform("oe_prestige_sky_sunIndex",light->getLightNum()));
+        f.state->addUniform(new osg::Uniform("oe_prestige_sky_eye",osg::Vec3()));
+        f.state->addUniform(new osg::Uniform("oe_prestige_sky_sun",osg::Vec3()));
+        f.state->addUniform(new osg::Uniform("oe_prestige_sky_solarIrradiance",osg::Vec3()));
+        f.state->addUniform(new osg::Uniform("oe_prestige_sky_settings",osg::Vec4()));
+        f.state->addUniform(new osg::Uniform("oe_prestige_sky_flags",osg::Vec4()));
+        f.state->addUniform(new osg::Uniform("oe_prestige_sky_moon",osg::Vec4()));
+        f.state->addUniform(new osg::Uniform("oe_prestige_sky_horizon",1.57f));
+        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_prestige_sky_basis"));
+        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_prestige_sky_earthToECI"));
+        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_prestige_sky_viewToEarth"));
+        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT3,"oe_prestige_sky_viewToSky"));
+        f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_MAT4,"oe_prestige_sky_inverseProjection"));
         unsigned width = options.preset == HIGH ? 256 : 192, height = options.preset == HIGH ? 144 : 108;
         unsigned slices = options.preset == HIGH ? 32 : 16;
-        f.state->addUniform(new osg::Uniform("oe_sky2_viewSize",osg::Vec2(float(width),float(height))));
-        f.state->addUniform(new osg::Uniform("oe_sky2_aerialSlices",float(slices)));
+        f.state->addUniform(new osg::Uniform("oe_prestige_sky_viewSize",osg::Vec2(float(width),float(height))));
+        f.state->addUniform(new osg::Uniform("oe_prestige_sky_aerialSlices",float(slices)));
         if (atmospheric)
         {
-            f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_VEC2,"oe_sky2_rowInterval",32));
-            f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_VEC4,"oe_sky2_rowWarp",32));
+            f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_VEC2,"oe_prestige_sky_rowInterval",32));
+            f.state->addUniform(new osg::Uniform(osg::Uniform::FLOAT_VEC4,"oe_prestige_sky_rowWarp",32));
             f.sky = target(width,height,true);
             f.environment = target(64,224,true);
             f.aerial = target(64*slices,64); // 64 azimuths x 32 elevations; RGB radiance and transmission halves.
@@ -396,7 +400,7 @@ struct SkyNode2::Impl
             f.state->setTextureAttributeAndModes(units[3].unit(),f.aerial);
             const char* samplers[] = {"atmosphere","view","environment","aerial"};
             for (unsigned i=0; i<4; ++i)
-                f.state->addUniform(new osg::Uniform((std::string("oe_sky2_")+samplers[i]).c_str(),units[i].unit()));
+                f.state->addUniform(new osg::Uniform((std::string("oe_prestige_sky_")+samplers[i]).c_str(),units[i].unit()));
         }
     }
 
@@ -412,9 +416,9 @@ struct SkyNode2::Impl
     //! Tabulates the 32 elevation-row geometries once per eye position, on this view's cull thread.
     static void updateAerialRows(Frame& f, const osg::Vec3& eye, const osg::Matrix3& basis, float horizon)
     {
-        auto intervals = f.state->getUniform("oe_sky2_rowInterval");
-        auto warps = f.state->getUniform("oe_sky2_rowWarp");
-        float radius = eye.length(), top = float(Sky2Atmosphere::top), groundRadius = float(Sky2Atmosphere::radius);
+        auto intervals = f.state->getUniform("oe_prestige_sky_rowInterval");
+        auto warps = f.state->getUniform("oe_prestige_sky_rowWarp");
+        float radius = eye.length(), top = float(SkyAtmosphere::top), groundRadius = float(SkyAtmosphere::radius);
         for (unsigned row=0; row<32; ++row)
         {
             float y = 2.0f*(float(row)/31.0f)-1.0f;
@@ -448,13 +452,13 @@ struct SkyNode2::Impl
     }
 
     //! Culls bounded GPU lookup work only when the corresponding view or ephemeris has changed.
-    void cull(SkyNode2& owner, osgUtil::CullVisitor& cv)
+    void cull(SkyNode& owner, osgUtil::CullVisitor& cv)
     {
         auto camera = cv.getCurrentCamera();
         if (!camera || CameraUtils::isShadowCamera(camera) ||
             CameraUtils::isDepthCamera(camera) || CameraUtils::isPickCamera(camera))
         {
-            owner.SkyNode::traverse(cv);
+            owner.osgEarth::SkyNode::traverse(cv);
             return;
         }
         Frame* frame;
@@ -474,11 +478,11 @@ struct SkyNode2::Impl
         auto& f = *frame;
         osg::Matrixd inverse = osg::Matrixd::inverse(*cv.getModelViewMatrix());
         osg::Matrixd toEarth = inverse*worldToECEF*osg::Matrixd::scale(
-            Sky2Atmosphere::radius/6378137.0,Sky2Atmosphere::radius/6378137.0,Sky2Atmosphere::radius/6356752.314245);
+            SkyAtmosphere::radius/6378137.0,SkyAtmosphere::radius/6378137.0,SkyAtmosphere::radius/6356752.314245);
         osg::Vec3d eye = toEarth.getTrans();
-        if (eye.length2() < 1.0) eye.set(0,0,Sky2Atmosphere::radius+0.001);
-        if (eye.length() < Sky2Atmosphere::radius+0.001)
-            eye *= (Sky2Atmosphere::radius+0.001)/eye.length();
+        if (eye.length2() < 1.0) eye.set(0,0,SkyAtmosphere::radius+0.001);
+        if (eye.length() < SkyAtmosphere::radius+0.001)
+            eye *= (SkyAtmosphere::radius+0.001)/eye.length();
         osg::Vec3d up = eye; up.normalize();
         osg::Vec3d east = (std::abs(up.z()) < 0.99 ? osg::Vec3d(0,0,1) : osg::Vec3d(1,0,0)) ^ up;
         east.normalize();
@@ -492,31 +496,31 @@ struct SkyNode2::Impl
         bool skyDirty = !f.valid || shaderEye != f.lastEye || sun != f.lastSun || solar != f.lastSolar;
         if (f.frameNumber != number) f.scheduled = false;
         f.frameNumber = number;
-        f.state->getUniform("oe_sky2_eye")->set(shaderEye);
-        f.state->getUniform("oe_sky2_sun")->set(osg::Vec3(sun));
-        f.state->getUniform("oe_sky2_solarIrradiance")->set(solar);
-        f.state->getUniform("oe_sky2_sunIndex")->set(light->getLightNum());
+        f.state->getUniform("oe_prestige_sky_eye")->set(shaderEye);
+        f.state->getUniform("oe_prestige_sky_sun")->set(osg::Vec3(sun));
+        f.state->getUniform("oe_prestige_sky_solarIrradiance")->set(solar);
+        f.state->getUniform("oe_prestige_sky_sunIndex")->set(light->getLightNum());
         auto shaderBasis = matrix3(basis);
-        f.state->getUniform("oe_sky2_basis")->set(shaderBasis);
-        f.state->getUniform("oe_sky2_viewToEarth")->set(matrix3(toEarth));
+        f.state->getUniform("oe_prestige_sky_basis")->set(shaderBasis);
+        f.state->getUniform("oe_prestige_sky_viewToEarth")->set(matrix3(toEarth));
         osg::Matrixd earthToSky;
         earthToSky.transpose(basis);
-        f.state->getUniform("oe_sky2_viewToSky")->set(matrix3(toEarth*earthToSky));
-        f.state->getUniform("oe_sky2_inverseProjection")->set(osg::Matrixf::inverse(*cv.getProjectionMatrix()));
-        f.state->getUniform("oe_sky2_earthToECI")->set(matrix3(earthToECI));
+        f.state->getUniform("oe_prestige_sky_viewToSky")->set(matrix3(toEarth*earthToSky));
+        f.state->getUniform("oe_prestige_sky_inverseProjection")->set(osg::Matrixf::inverse(*cv.getProjectionMatrix()));
+        f.state->getUniform("oe_prestige_sky_earthToECI")->set(matrix3(earthToECI));
         float horizon = float(std::acos(-std::sqrt(std::max(0.0,
-            1.0-Sky2Atmosphere::radius*Sky2Atmosphere::radius/eye.length2()))));
-        f.state->getUniform("oe_sky2_horizon")->set(horizon);
+            1.0-SkyAtmosphere::radius*SkyAtmosphere::radius/eye.length2()))));
+        f.state->getUniform("oe_prestige_sky_horizon")->set(horizon);
         if (atmospheric && (!f.valid || shaderEye != f.lastEye))
             updateAerialRows(f,shaderEye,shaderBasis,horizon);
-        f.state->getUniform("oe_sky2_settings")->set(osg::Vec4(options.sunIntensity,options.exposure,
+        f.state->getUniform("oe_prestige_sky_settings")->set(osg::Vec4(options.sunIntensity,options.exposure,
             options.environmentIntensity,validScalar(options.ambient().get(),0.033f)));
-        f.state->getUniform("oe_sky2_flags")->set(osg::Vec4(owner.getAtmosphereVisible(),owner.getSunVisible(),
+        f.state->getUniform("oe_prestige_sky_flags")->set(osg::Vec4(owner.getAtmosphereVisible(),owner.getSunVisible(),
             owner.getMoonVisible(),owner.getStarsVisible()));
         osg::Vec3d observerECEF = (inverse*worldToECEF).getTrans();
         osg::Vec3d toMoon = moon-observerECEF;
         double moonDistance = toMoon.normalize();
-        f.state->getUniform("oe_sky2_moon")->set(osg::Vec4(float(toMoon.x()),float(toMoon.y()),float(toMoon.z()),
+        f.state->getUniform("oe_prestige_sky_moon")->set(osg::Vec4(float(toMoon.x()),float(toMoon.y()),float(toMoon.z()),
             float(std::asin(std::min(1.0,1737400.0/std::max(1737401.0,moonDistance))))));
         lightSource->accept(cv);
         cv.pushStateSet(f.state);
@@ -550,7 +554,7 @@ struct SkyNode2::Impl
         }
         f.scheduled = true;
         f.background->accept(cv);
-        owner.SkyNode::traverse(cv);
+        owner.osgEarth::SkyNode::traverse(cv);
         if (cloudState) cv.popStateSet();
         cv.popStateSet();
         f.lastEye = shaderEye; f.lastSun = sun;
@@ -559,7 +563,7 @@ struct SkyNode2::Impl
     }
 };
 
-SkyNode2::Options::Options(const ConfigOptions& input) : SkyOptions(input)
+SkyNode::Options::Options(const ConfigOptions& input) : SkyOptions(input)
 {
     std::string value;
     input.getConfig().get("preset",value);
@@ -578,9 +582,10 @@ SkyNode2::Options::Options(const ConfigOptions& input) : SkyOptions(input)
     clouds = input.getConfig().child("clouds");
 }
 
-Config SkyNode2::Options::getConfig() const
+Config SkyNode::Options::getConfig() const
 {
     Config config = SkyOptions::getConfig();
+    config.key() = "prestige:sky";
     config.set("preset",preset == FLAT ? "flat" : preset == HIGH ? "high" : "balanced");
     config.set("exposure",exposure);
     config.set("sun_intensity",sunIntensity);
@@ -591,33 +596,34 @@ Config SkyNode2::Options::getConfig() const
     return config;
 }
 
-SkyNode2::SkyNode2(const Options& options) : SkyNode(options), _impl(new Impl(options))
+SkyNode::SkyNode(const Options& options) : osgEarth::SkyNode(options), _impl(new Impl(options))
 {
-    setName("SkyNode2");
+    setName("SkyNode");
     setCullingActive(false);
     setNumChildrenRequiringUpdateTraversal(1);
     ShaderGenerator::setIgnoreHint(this,true);
     auto ss = getOrCreateStateSet();
-    ss->setDefine("OE_SKY2");
+    ss->setDefine("OE_OVERRIDE_PHONG_LIGHTING");
     ss->setDefine("OE_USE_PBR");
     // The render stage expands this to its highest OSG light index, leaving sun-only views on a smaller shader.
     ss->setDefine("OE_NUM_LIGHTS","1");
-    if (_impl->options.outputSRGB) ss->setDefine("OE_SKY2_SRGB");
-    if (_impl->options.toneMapping) ss->setDefine("OE_SKY2_TONEMAP");
+    if (_impl->options.outputSRGB) ss->setDefine("OE_PRESTIGE_SKY_SRGB");
+    if (_impl->options.toneMapping) ss->setDefine("OE_PRESTIGE_SKY_TONEMAP");
     Lighting::installDefaultMaterial(ss);
     auto vp = VirtualProgram::getOrCreate(ss);
-    vp->setName("SkyNode2 unified lighting");
-    Shaders shaders;
-    shaders.load(vp,shaders.PBR);
-    shaders.load(vp,"SkyNode2.Lighting.glsl");
+    vp->setName("SkyNode unified lighting");
+    PrestigeShaders shaders;
+    osgEarth::Shaders coreShaders;
+    coreShaders.load(vp,coreShaders.PBR);
+    shaders.load(vp,"Sky.Lighting.glsl");
 }
 
-SkyNode2::~SkyNode2() = default;
-const SkyNode2::Options& SkyNode2::getOptions() const { return _impl->options; }
-osg::Light* SkyNode2::getSunLight() const { return _impl->light; }
-CloudLayer* SkyNode2::getCloudLayer() const { return _impl->clouds.get(); }
+SkyNode::~SkyNode() = default;
+const SkyNode::Options& SkyNode::getOptions() const { return _impl->options; }
+osg::Light* SkyNode::getSunLight() const { return _impl->light; }
+CloudLayer* SkyNode::getCloudLayer() const { return _impl->clouds.get(); }
 
-void SkyNode2::setCloudLayer(CloudLayer* layer)
+void SkyNode::setCloudLayer(CloudLayer* layer)
 {
     if (_impl->clouds == layer) return;
     _impl->clouds = layer;
@@ -625,7 +631,7 @@ void SkyNode2::setCloudLayer(CloudLayer* layer)
     _impl->configureClouds(*this);
 }
 
-void SkyNode2::attach(osg::View* view, int lightNum)
+void SkyNode::attach(osg::View* view, int lightNum)
 {
     if (!view || lightNum < 0 || lightNum > 7) return;
     _impl->light->setLightNum(lightNum);
@@ -634,30 +640,30 @@ void SkyNode2::attach(osg::View* view, int lightNum)
     view->getCamera()->setClearColor(osg::Vec4(0,0,0,1));
 }
 
-void SkyNode2::setExposure(float value)
+void SkyNode::setExposure(float value)
 {
     if (std::isfinite(value) && value >= 0.0f) _impl->options.exposure = value;
 }
 
-void SkyNode2::setEnvironmentIntensity(float value)
+void SkyNode::setEnvironmentIntensity(float value)
 {
     if (std::isfinite(value) && value >= 0.0f) _impl->options.environmentIntensity = value;
 }
 
-void SkyNode2::setSunIntensity(float value)
+void SkyNode::setSunIntensity(float value)
 {
     if (std::isfinite(value) && value >= 0.0f) _impl->options.sunIntensity = value;
 }
 
-void SkyNode2::setAmbientIntensity(float value)
+void SkyNode::setAmbientIntensity(float value)
 {
     if (std::isfinite(value) && value >= 0.0f) _impl->options.ambient() = value;
 }
 
-void SkyNode2::onSetEphemeris() { _impl->celestialDirty = true; }
-void SkyNode2::onSetDateTime() { _impl->celestialDirty = true; }
+void SkyNode::onSetEphemeris() { _impl->celestialDirty = true; }
+void SkyNode::onSetDateTime() { _impl->celestialDirty = true; }
 
-void SkyNode2::onSetReferencePoint()
+void SkyNode::onSetReferencePoint()
 {
     _impl->worldToECEF.makeIdentity();
     if (getReferencePoint().isValid())
@@ -674,7 +680,7 @@ void SkyNode2::onSetReferencePoint()
     _impl->celestialDirty = true;
 }
 
-void SkyNode2::traverse(osg::NodeVisitor& visitor)
+void SkyNode::traverse(osg::NodeVisitor& visitor)
 {
     if (visitor.getVisitorType() == osg::NodeVisitor::UPDATE_VISITOR)
     {
@@ -714,12 +720,12 @@ void SkyNode2::traverse(osg::NodeVisitor& visitor)
     }
     auto cv = dynamic_cast<osgUtil::CullVisitor*>(&visitor);
     if (cv) _impl->cull(*this,*cv);
-    else SkyNode::traverse(visitor);
+    else osgEarth::SkyNode::traverse(visitor);
 }
 
-void SkyNode2::releaseGLObjects(osg::State* state) const
+void SkyNode::releaseGLObjects(osg::State* state) const
 {
-    SkyNode::releaseGLObjects(state);
+    osgEarth::SkyNode::releaseGLObjects(state);
     std::lock_guard<std::mutex> lock(_impl->mutex);
     for (auto& entry : _impl->views)
     for (auto& frame : entry.second->frames)
@@ -736,9 +742,9 @@ void SkyNode2::releaseGLObjects(osg::State* state) const
     if (_impl->cloudRenderer) _impl->cloudRenderer->releaseGLObjects(state);
 }
 
-void SkyNode2::resizeGLObjectBuffers(unsigned size)
+void SkyNode::resizeGLObjectBuffers(unsigned size)
 {
-    SkyNode::resizeGLObjectBuffers(size);
+    osgEarth::SkyNode::resizeGLObjectBuffers(size);
     std::lock_guard<std::mutex> lock(_impl->mutex);
     for (auto& entry : _impl->views)
     for (auto& frame : entry.second->frames)
@@ -755,25 +761,25 @@ void SkyNode2::resizeGLObjectBuffers(unsigned size)
 
 namespace
 {
-    // Core registration permits <sky2> in earth files without a sky driver library.
-    class SkyNode2Extension : public Extension,
+    // Registers prestige:sky after the nodekit loads, without an OSG plugin symbol.
+    class SkyExtension : public Extension,
         public ExtensionInterface<MapNode>, public ExtensionInterface<osg::View>, public SkyNodeFactory
     {
     public:
-        META_OE_Extension(osgEarth,SkyNode2Extension,sky2);
-        //! Creates a default core sky extension.
-        SkyNode2Extension() = default;
+        META_OE_Extension(osgEarthPrestige,SkyExtension,prestige:sky);
+        //! Creates a default Prestige sky extension.
+        SkyExtension() = default;
         //! Retains serialized configuration until the map is connected.
-        explicit SkyNode2Extension(const ConfigOptions& config) : _options(config) { }
+        explicit SkyExtension(const ConfigOptions& config) : _options(config) { }
         //! Returns the persisted extension settings.
         const ConfigOptions& getConfigOptions() const override { return _options; }
         //! Creates the same implementation used by direct construction.
-        SkyNode* createSkyNode() override { return new SkyNode2(_options); }
+        osgEarth::SkyNode* createSkyNode() override { return new SkyNode(_options); }
         //! Inserts the sky above its map and selects a tangent frame for projected coordinates.
         bool connect(MapNode* map) override
         {
             if (!map) return false;
-            osg::ref_ptr<SkyNode2> sky = new SkyNode2(_options);
+            osg::ref_ptr<SkyNode> sky = new SkyNode(_options);
             if (map->getMapSRS()->isProjected())
                 sky->setReferencePoint(map->getMap()->getProfile()->getExtent().getCentroid());
             _map = map;
@@ -787,7 +793,7 @@ namespace
         //! Removes the inserted group, preserving the map and other parents.
         bool disconnect(MapNode*) override
         {
-            osg::ref_ptr<SkyNode2> sky;
+            osg::ref_ptr<SkyNode> sky;
             if (_sky.lock(sky)) removeGroup(sky.get());
             _pendingSky = nullptr;
             _sky = nullptr;
@@ -797,7 +803,7 @@ namespace
         //! Connects the sun light to an application's view.
         bool connect(osg::View* view) override
         {
-            osg::ref_ptr<SkyNode2> sky;
+            osg::ref_ptr<SkyNode> sky;
             if (!view || !_sky.lock(sky)) return false;
             if (_pendingSky)
             {
@@ -820,15 +826,17 @@ namespace
         //! Removes only the light owned by this extension from a disconnected view.
         bool disconnect(osg::View* view) override
         {
-            osg::ref_ptr<SkyNode2> sky;
+            osg::ref_ptr<SkyNode> sky;
             if (view && _sky.lock(sky) && view->getLight() == sky->getSunLight()) view->setLight(nullptr);
             return true;
         }
     private:
-        SkyNode2::Options _options;
-        osg::observer_ptr<SkyNode2> _sky;
+        SkyNode::Options _options;
+        osg::observer_ptr<SkyNode> _sky;
         osg::observer_ptr<MapNode> _map;
-        osg::ref_ptr<SkyNode2> _pendingSky;
+        osg::ref_ptr<SkyNode> _pendingSky;
     };
-    REGISTER_OSGEARTH_EXTENSION(osgearth_sky2,SkyNode2Extension)
+    REGISTER_OSGEARTH_EXTENSION_FACTORY("prestige:sky", SkyExtension);
 }
+
+} // namespace osgEarthPrestige

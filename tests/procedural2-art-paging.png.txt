@@ -1,0 +1,19 @@
+Asset bundles: 6, content bytes: 18753860/67108864, load failures: 0, budget denials: 0
+MSAA samples requested: 4
+Home: 1140192 instances, 6 asset bundles, 18753860 content bytes
+New Zealand: 538347 instances, 6 asset bundles, 18753860 content bytes
+Antimeridian: 2877128 instances, 6 asset bundles, 18753860 content bytes
+High latitude: 2027436 instances, 6 asset bundles, 18753860 content bytes
+Orbit: 0 instances, 0 asset bundles, 0 content bytes
+Reload home: 1140192 instances, 6 asset bundles, 18753860 content bytes
+Capture: procedural2-art-paging.png
+Focal elevation: 159.905 m in map SRS
+Viewpoint: {"viewpoint":{"heading":"-20","height":159.9054565429688,"lat":40.650,"long":-75.0,"name":"Procedural2 landscape","pitch":"-8","range":"24m","srs":"+proj=longlat +datum=WGS84 +no_defs"}}
+
+Procedural grass: disabled
+trees: 262185 resident instances in 68 unique drawables
+shrubs: 20413 resident instances in 64 unique drawables
+grass: 794363 resident instances in 40 unique drawables
+undergrowth: 54475 resident instances in 64 unique drawables
+rocks: 8756 resident instances in 28 unique drawables
+Paging checks: passed

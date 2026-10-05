@@ -881,3 +881,69 @@ TEST_CASE("Chonk additive quality shares global SSE without population leakage",
     CHECK(lods(second) == std::set<unsigned>{0u});
     CHECK(glGetError() == GL_NO_ERROR);
 }
+
+//! The opt-in additive budget must affect actual GPU LOD/cull decisions, preserve sources, and remain population-local.
+TEST_CASE("Chonk additive quality shares global SSE without population leakage", "[chonk][gpu]")
+{
+    if (!Capabilities::get().supportsNVGL())
+    {
+        WARN("Additive quality GPU test needs NVGL");
+        return;
+    }
+    ChonkTest::Renderer renderer;
+    REQUIRE(renderer.initialize());
+    auto model = Chonk::create();
+    REQUIRE(model->add(ChonkTest::mesh(),32.0f,FLT_MAX,*renderer.factory));
+    REQUIRE(model->add(ChonkTest::mesh(),4.0f,32.0f,*renderer.factory));
+    osg::ref_ptr<InspectableDrawable> first = new InspectableDrawable(), second = new InspectableDrawable();
+    osg::ref_ptr<osg::Uniform> offsets[2];
+    auto scene = new osg::Group();
+    unsigned index = 0;
+    for (auto* drawable : {first.get(),second.get()})
+    {
+        drawable->setBirthday(-10);
+        drawable->add(model,osg::Matrixf::translate(index ? 5.0f : -5.0f,0,0));
+        auto* branch = new osg::Group();
+        auto* ss = branch->getOrCreateStateSet();
+        ss->setDefine("OE_CHONK_SSE_ADJUST");
+        offsets[index] = new osg::Uniform("oe_chonk_sse_adjust",osg::Vec2f(0,1.0f/25.0f));
+        ss->addUniform(offsets[index]);
+        branch->addChild(drawable); scene->addChild(branch);
+        ++index;
+    }
+    renderer.setScene(scene);
+    renderer.viewer.getCamera()->setViewMatrixAsLookAt(osg::Vec3d(0,0,40),osg::Vec3d(),osg::Vec3d(0,1,0));
+    auto* global = renderer.root->getStateSet()->getUniform("oe_sse");
+    //! Reads emitted LODs after a completed frame; source buffers must stay byte-for-byte unchanged.
+    auto lods = [&](InspectableDrawable* drawable)
+    {
+        const auto snapshot = drawable->snapshot(*renderer.context->getState());
+        REQUIRE(snapshot.sourceUnchanged);
+        std::set<unsigned> result;
+        for (const auto& command : snapshot.commands)
+            for (unsigned j=0; j<command.cmd.instanceCount; ++j)
+                result.insert(snapshot.visible[command.cmd.baseInstance+j].lod);
+        return result;
+    };
+    global->set(25.0f);
+    renderer.frame(); renderer.frame();
+    CHECK(lods(first) == std::set<unsigned>{0u});
+    CHECK(lods(second) == std::set<unsigned>{0u});
+    offsets[0]->set(osg::Vec2f(25,1.0f/25.0f));
+    renderer.frame(); renderer.frame();
+    CHECK(lods(first) == std::set<unsigned>{1u});
+    CHECK(lods(second) == std::set<unsigned>{0u});
+    // Same sum through the global control must produce the same representation, without applying SSE twice.
+    offsets[0]->set(osg::Vec2f(0,1.0f/25.0f)); global->set(50.0f);
+    renderer.frame(); renderer.frame();
+    CHECK(lods(first) == std::set<unsigned>{1u});
+    CHECK(lods(second) == std::set<unsigned>{1u});
+    global->set(1000.0f);
+    renderer.frame(); renderer.frame();
+    CHECK(lods(first).empty()); CHECK(lods(second).empty());
+    global->set(25.0f);
+    renderer.frame(); renderer.frame();
+    CHECK(lods(first) == std::set<unsigned>{0u});
+    CHECK(lods(second) == std::set<unsigned>{0u});
+    CHECK(glGetError() == GL_NO_ERROR);
+}

@@ -1,0 +1,341 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarthImGui/ImGuiPanel>
+#include <osgEarthProcedural2/FeatureOverlay>
+#include <osgEarth/FeatureNode>
+#include <osgEarth/Utils>
+#include <osgViewer/ViewerBase>
+#include <osgGA/GUIEventHandler>
+#include <atomic>
+#include <future>
+#include <mutex>
+
+namespace osgEarth { namespace Procedural2
+{
+    //! ImGui adapter for the edit document. Picking and preview are independent of storage and coverage policy.
+    class FeatureOverlayGUI
+    {
+        struct Sketch
+        {
+            std::mutex mutex;
+            bool active = false, finish = false, polygon = true;
+            unsigned revision = 0;
+            FeatureID replaceID = 0;
+            std::string type;
+            std::vector<osg::Vec3d> points;
+        };
+        struct Picker : osgGA::GUIEventHandler
+        {
+            std::shared_ptr<Sketch> sketch;
+            osg::observer_ptr<MapNode> map;
+            std::atomic<bool> captureMouse{false}, captureKeyboard{false};
+            //! Retains only sketch state and a weak map, so queued events never reference an ImGui panel.
+            Picker(std::shared_ptr<Sketch> value, MapNode* node) : sketch(std::move(value)), map(node) { }
+            //! Consumes sketch clicks before navigation; terrain picking avoids hitting vegetation or preview geometry.
+            bool handle(const osgGA::GUIEventAdapter& event, osgGA::GUIActionAdapter& action) override
+            {
+                std::lock_guard<std::mutex> lock(sketch->mutex);
+                if (!sketch->active || event.getHandled()) return false;
+                if (event.getEventType() == event.KEYUP && !captureKeyboard.load())
+                {
+                    if (event.getKey() == event.KEY_Escape)
+                    { sketch->active = false; sketch->points.clear(); ++sketch->revision; return true; }
+                    if (event.getKey() == event.KEY_Return) { sketch->finish = true; return true; }
+                    if (event.getKey() == event.KEY_BackSpace)
+                    { if (!sketch->points.empty()) sketch->points.pop_back(); ++sketch->revision; return true; }
+                }
+                if (captureMouse.load()) return false;
+                if (event.getButton() != event.LEFT_MOUSE_BUTTON) return false;
+                if (event.getEventType() == event.PUSH) return true;
+                if (event.getEventType() != event.RELEASE) return false;
+                osg::ref_ptr<MapNode> retained;
+                osg::Vec3d world;
+                if (!map.lock(retained) || !retained->getTerrain()->getWorldCoordsUnderMouse(
+                    action.asView(),event.getX(),event.getY(),world)) return true;
+                GeoPoint point; point.fromWorld(retained->getMapSRS(),world);
+                point = point.transform(SpatialReference::get("wgs84"));
+                if (point.isValid() && sketch->points.size() < 2048u)
+                { sketch->points.emplace_back(point.x(),point.y(),0.0); ++sketch->revision; }
+                return true;
+            }
+        };
+        struct Result
+        {
+            std::atomic<bool> ready{false};
+            Status status;
+            FeatureID id = 0;
+        };
+        struct IOResult
+        {
+            Status status;
+            OverlaySnapshot document;
+        };
+        std::shared_ptr<FeatureOverlay> _document;
+        osg::observer_ptr<osgViewer::View> _view;
+        osg::observer_ptr<MapNode> _map;
+        osg::ref_ptr<Picker> _picker;
+        osg::ref_ptr<osg::Group> _preview;
+        std::shared_ptr<Sketch> _sketch;
+        std::shared_ptr<Result> _pending;
+        std::future<IOResult> _io;
+        std::shared_ptr<const OverlayStorage> _storage;
+        std::weak_ptr<FeatureOverlay> _ioDocument;
+        bool _suspended = false;
+        bool _loading = false, _show = true;
+        int _type = 0;
+        FeatureID _selected = 0, _shownSelected = -1;
+        unsigned _shownSketch = ~0u;
+        std::uint64_t _shownRevision = ~std::uint64_t(0);
+        bool _shown = false;
+        char _path[1024] = "vegetation2-edits.geojson";
+        std::string _message;
+
+        //! Queues scene/document changes; publication status is read only after the release/acquire handshake.
+        void submit(osgViewer::View* view, std::shared_ptr<FeatureOverlay> document,
+            const std::function<Status(FeatureOverlay&,FeatureID&)>& edit)
+        {
+            auto result = std::make_shared<Result>(); _pending = result;
+            auto retained = document;
+            view->getViewerBase()->addUpdateOperation(new OneTimer([retained,result,edit]()
+            {
+                result->status = edit(*retained,result->id);
+                result->ready.store(true,std::memory_order_release);
+            }));
+        }
+
+        //! Removes only this editor's handler and preview on update; pending edits retain their target document.
+        void detach()
+        {
+            if (_sketch) { std::lock_guard<std::mutex> lock(_sketch->mutex); _sketch->active = false; }
+            auto* view = _view.get();
+            osg::ref_ptr<MapNode> map;
+            if (view && view->getViewerBase())
+            {
+                _map.lock(map); auto picker = _picker; auto preview = _preview;
+                auto weakView = _view;
+                view->getViewerBase()->addUpdateOperation(new OneTimer([weakView,map,picker,preview]()
+                {
+                    if (weakView.valid()) weakView->removeEventHandler(picker);
+                    if (map && preview) map->removeChild(preview);
+                }));
+            }
+            _picker = nullptr; _preview = nullptr; _sketch.reset(); _document.reset();
+        }
+
+        //! Builds an outline on update. Policy buffers remain in the coverage compiler, not the preview renderer.
+        static void addOutline(osg::Group* parent, const Feature* feature, bool selected)
+        {
+            osg::ref_ptr<Geometry> line = new LineString();
+            line->assign(feature->getGeometry()->begin(),feature->getGeometry()->end());
+            if (feature->getGeometry()->getType() == Geometry::TYPE_POLYGON && !line->empty()) line->push_back(line->front());
+            if (line->size() < 2u) return;
+            Style style;
+            style.getOrCreate<LineSymbol>()->stroke()->color() = selected ? Color::Yellow : Color::Cyan;
+            style.getOrCreate<LineSymbol>()->stroke()->width() = Distance(selected ? 3.0 : 2.0,Units::PIXELS);
+            style.getOrCreate<AltitudeSymbol>()->clamping() = AltitudeSymbol::CLAMP_TO_TERRAIN;
+            style.getOrCreate<AltitudeSymbol>()->technique() = AltitudeSymbol::TECHNIQUE_DRAPE;
+            style.getOrCreate<RenderSymbol>()->lighting() = false;
+            parent->addChild(new FeatureNode(new Feature(line,feature->getSRS()),style));
+        }
+
+        //! Rebuilds lightweight outlines only after document/selection/sketch changes, on scene update traversal.
+        void preview(osgViewer::View* view, std::shared_ptr<const OverlaySnapshot> snapshot)
+        {
+            std::lock_guard<std::mutex> lock(_sketch->mutex);
+            if (_shownRevision == snapshot->revision && _shownSelected == _selected &&
+                _shownSketch == _sketch->revision && _shown == _show) return;
+            _shownRevision = snapshot->revision; _shownSelected = _selected;
+            _shownSketch = _sketch->revision; _shown = _show;
+            auto group = _preview; auto points = _sketch->points;
+            const auto selected = _selected; const bool show = _show, polygon = _sketch->polygon;
+            view->getViewerBase()->addUpdateOperation(new OneTimer([group,snapshot,points,selected,show,polygon]()
+            {
+                group->removeChildren(0,group->getNumChildren());
+                if (show) for (const auto& feature : snapshot->features)
+                    addOutline(group,feature,feature->getFID() == selected);
+                if (points.size() >= 2u)
+                {
+                    osg::ref_ptr<Geometry> geometry = polygon ? static_cast<Geometry*>(new Polygon()) : new LineString();
+                    geometry->assign(points.begin(),points.end());
+                    osg::ref_ptr<Feature> feature = new Feature(geometry,SpatialReference::get("wgs84"));
+                    addOutline(group,feature,true);
+                }
+            }));
+        }
+
+    public:
+        //! Accepts an application storage adapter; defaults to local GeoJSON when none is supplied.
+        explicit FeatureOverlayGUI(std::shared_ptr<const OverlayStorage> storage = {}) :
+            _storage(storage ? std::move(storage) : std::make_shared<GeoJSONOverlayStorage>()) { }
+        //! Stops picking and queues removal of owned scene helpers.
+        ~FeatureOverlayGUI() { detach(); }
+        //! Suspends drawing when the parent panel hides or the selected document disappears.
+        void suspend()
+        {
+            if (_suspended) return;
+            _suspended = true;
+            if (_sketch)
+            {
+                std::lock_guard<std::mutex> lock(_sketch->mutex);
+                _sketch->active = false; _sketch->points.clear(); ++_sketch->revision;
+            }
+            if (_preview)
+            {
+                auto* view = _view.get();
+                if (view && view->getViewerBase())
+                {
+                    auto preview = _preview;
+                    view->getViewerBase()->addUpdateOperation(new OneTimer([preview]() { preview->setNodeMask(0u); }));
+                }
+            }
+        }
+        //! Draws an independent document editor; document and scene mutations are queued to update traversal.
+        void draw(std::shared_ptr<FeatureOverlay> document, MapNode* map, osgViewer::View* view)
+        {
+            if (!document || document->types().empty() || !view || !view->getViewerBase()) { suspend(); return; }
+            if (_document != document || _view.get() != view)
+            {
+                detach(); _document = document; _view = view; _map = map;
+                _sketch = std::make_shared<Sketch>(); _picker = new Picker(_sketch,map); _preview = new osg::Group();
+                _selected = 0; _type = 0; _pending.reset(); _shownRevision = ~std::uint64_t(0);
+                auto picker = _picker; auto preview = _preview; osg::ref_ptr<MapNode> retainedMap = map;
+                // osgearth_imgui owns its Viewer on the stack: never put it in a ref_ptr or observer lock.
+                auto weakView = _view;
+                view->getViewerBase()->addUpdateOperation(new OneTimer([picker,preview,retainedMap,weakView]()
+                {
+                    if (!weakView.valid()) return;
+                    weakView->getEventHandlers().push_front(picker);
+                    retainedMap->addChild(preview);
+                }));
+            }
+            _picker->captureMouse.store(ImGui::GetIO().WantCaptureMouse);
+            // Sketch clicks are consumed before ImGui, so its last window may retain keyboard focus.
+            // Reserve typing fields, while still allowing Enter/Escape/Backspace to operate on the outline.
+            _picker->captureKeyboard.store(ImGui::GetIO().WantTextInput);
+            if (_pending && _pending->ready.load(std::memory_order_acquire))
+            {
+                _message = _pending->status.isOK() ? "Applied; affected pages will reload." : _pending->status.toString();
+                if (_pending->id) _selected = _pending->id;
+                if (_pending->status.isOK())
+                { std::lock_guard<std::mutex> lock(_sketch->mutex); _sketch->points.clear(); ++_sketch->revision; }
+                _pending.reset();
+            }
+            if (_io.valid() && _io.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            {
+                const auto result = _io.get();
+                _message = result.status.isOK() ? "Saved overlay." : result.status.toString();
+                if (_loading && result.status.isOK() && _ioDocument.lock() == document)
+                    submit(view,document,[result](FeatureOverlay& target,FeatureID&) { return target.replace(result.document); });
+                else if (_loading && result.status.isOK()) _message = "Document changed; loaded document was not applied.";
+            }
+            auto snapshot = document->snapshot();
+            auto previewGroup = _preview;
+            if (_suspended)
+            {
+                _suspended = false;
+                view->getViewerBase()->addUpdateOperation(new OneTimer([previewGroup]() { previewGroup->setNodeMask(~0u); }));
+            }
+            bool finish = false;
+            {
+                std::lock_guard<std::mutex> lock(_sketch->mutex); finish = _sketch->finish; _sketch->finish = false;
+            }
+            if (ImGui::CollapsingHeader("Feature overlays",ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                ImGui::TextWrapped("Local features use the configured coverage rules. Save separately to retain edits.");
+                ImGui::BeginDisabled(bool(_pending) || _io.valid());
+                const auto& types = document->types();
+                const auto& type = types[_type];
+                if (ImGui::BeginCombo("Feature type",(type.label.empty() ? type.name : type.label).c_str()))
+                {
+                    for (unsigned i = 0; i < types.size(); ++i)
+                        if (ImGui::Selectable((types[i].label.empty() ? types[i].name : types[i].label).c_str(),
+                            _type == int(i)))
+                            _type = int(i);
+                    ImGui::EndCombo();
+                }
+                const auto& chosen = types[_type];
+                for (const auto& attr : chosen.attributes)
+                    ImGui::TextDisabled("%s = %s",attr.first.c_str(),attr.second.c_str());
+                if (ImGui::Button("Draw new outline"))
+                {
+                    std::lock_guard<std::mutex> lock(_sketch->mutex);
+                    _sketch->points.clear(); _sketch->type = chosen.name; _sketch->polygon = chosen.geometry == "polygon";
+                    _sketch->replaceID = 0; _sketch->active = true; ++_sketch->revision;
+                }
+                ImGui::SameLine(); if (ImGui::Button("Finish")) finish = true;
+                ImGui::SameLine(); if (ImGui::Button("Cancel"))
+                {
+                    std::lock_guard<std::mutex> lock(_sketch->mutex);
+                    _sketch->active = false; _sketch->points.clear(); ++_sketch->revision;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(_sketch->mutex);
+                    if (_sketch->active) ImGui::TextWrapped("Drawing %s (%zu points). Click terrain; Enter finishes, "
+                        "Backspace removes a point, Escape cancels. Right-drag still navigates.",
+                        _sketch->type.c_str(),_sketch->points.size());
+                }
+                if (ImGui::Button("Undo")) submit(view,document,[](FeatureOverlay& target,FeatureID&) { return target.undo(); });
+                ImGui::SameLine();
+                if (ImGui::Button("Redo")) submit(view,document,[](FeatureOverlay& target,FeatureID&) { return target.redo(); });
+                ImGui::SameLine(); ImGui::Checkbox("Show outlines",&_show);
+                ImGui::Text("%zu local features",snapshot->features.size());
+                if (ImGui::BeginListBox("##overlay-features",ImVec2(-1,100)))
+                {
+                    for (const auto& feature : snapshot->features)
+                    {
+                        const auto label = std::to_string(feature->getFID()) + ": " + feature->getString("p2:type");
+                        if (ImGui::Selectable(label.c_str(),_selected == feature->getFID())) _selected = feature->getFID();
+                    }
+                    ImGui::EndListBox();
+                }
+                if (ImGui::Button("Delete selected"))
+                {
+                    const auto id = _selected;
+                    submit(view,document,[id](FeatureOverlay& target,FeatureID&) { return target.erase(id); });
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Redraw selected"))
+                    for (const auto& feature : snapshot->features) if (feature->getFID() == _selected)
+                    {
+                        std::lock_guard<std::mutex> lock(_sketch->mutex);
+                        _sketch->type = feature->getString("p2:type"); _sketch->replaceID = _selected;
+                        _sketch->polygon = feature->getGeometry()->getType() == Geometry::TYPE_POLYGON;
+                        _sketch->points.clear(); _sketch->active = true; ++_sketch->revision;
+                    }
+                ImGui::InputText("Overlay location",_path,sizeof(_path));
+                if (ImGui::Button("Save overlay"))
+                {
+                    const std::string path = _path; _loading = false; _ioDocument = document;
+                    auto storage = _storage;
+                    _io = std::async(std::launch::async,[path,snapshot,storage]()
+                    { IOResult result; result.status = storage->write(path,*snapshot); return result; });
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Load / replace"))
+                {
+                    const std::string path = _path; _loading = true; _ioDocument = document;
+                    auto storage = _storage;
+                    _io = std::async(std::launch::async,[path,storage]()
+                    { IOResult result; result.status = storage->read(path,result.document); return result; });
+                }
+                ImGui::EndDisabled();
+                if (_pending || _io.valid()) ImGui::TextUnformatted("Working...");
+                if (!_message.empty()) ImGui::TextWrapped("%s",_message.c_str());
+            }
+            if (finish && !_pending && !_io.valid())
+            {
+                std::lock_guard<std::mutex> lock(_sketch->mutex);
+                osg::ref_ptr<Geometry> geometry = _sketch->polygon ? static_cast<Geometry*>(new Polygon()) : new LineString();
+                geometry->assign(_sketch->points.begin(),_sketch->points.end());
+                const auto type = _sketch->type; const auto replaceID = _sketch->replaceID;
+                submit(view,document,[geometry,type,replaceID](FeatureOverlay& target,FeatureID& id)
+                { id = replaceID; return target.put(type,geometry,SpatialReference::get("wgs84"),id); });
+                _sketch->active = false;
+            }
+            preview(view,snapshot);
+        }
+    };
+} }

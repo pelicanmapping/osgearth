@@ -43,7 +43,7 @@ namespace osgEarth
 
         private:
             void buildStateSet();
-            TextureImageUnitReservation _res_albedo, _res_normal, _res_pbr;
+            TextureImageUnitReservation _res_albedo, _res_normal, _res_pbr, _res_occlusion;
         };
     }
 }

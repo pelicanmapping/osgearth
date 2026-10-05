@@ -203,6 +203,20 @@ namespace osgEarth { namespace Util
             return _lodMethod;
         }
 
+        using RefinementFunction = std::function<bool(osg::NodeVisitor&, bool)>;
+        //! Optionally adjusts the default LOD decision, e.g. using a shadow pass's reference camera.
+        //! Install before publication. Called during cull; must support concurrent visitors without scene mutation.
+        void setRefinementFunction(RefinementFunction function) { _refinementFunction = function; }
+
+        using ReplacementFunction = std::function<bool(osg::NodeVisitor&, osg::Node*, bool)>;
+        //! Optional REPLACE cull traversal: receives merged payload (null while pending) and refinement decision.
+        //! The function traverses static/replacement content and returns whether to retain loaded children.
+        //! Install before publication; support concurrent visitors and do not mutate shared scene state during cull.
+        void setReplacementFunction(ReplacementFunction function) { _replacementFunction = function; }
+
+        //! Reference time at the last successful merge; meaningful only while a replacement is merged.
+        double getMergeTime() const { return _mergeTime; }
+
         //! Mark the content as "in use" so that it will not
         //! be removed if setAutoUnload is true.
         void touch();
@@ -241,6 +255,9 @@ namespace osgEarth { namespace Util
         friend class PagingManager;
 
         Loader _load_function;
+        RefinementFunction _refinementFunction;
+        ReplacementFunction _replacementFunction;
+        double _mergeTime = 0.0;
 
         void* _token = nullptr;
         osg::observer_ptr<PagingManager> _pagingManager_weak;
@@ -273,7 +290,7 @@ namespace osgEarth { namespace Util
         double _timeoutSeconds = 0.0;
         osg::ref_ptr<osg::Group> _payload;
 
-        bool merge(int revision);
+        bool merge(int revision, double referenceTime);
         void traverseChildren(osg::NodeVisitor& nv);
     };
 

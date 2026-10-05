@@ -1,0 +1,12 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarthProcedural2/Scatter>
+
+namespace osgEarth { namespace Procedural2
+{
+    //! Nominal tier handover error in meters for a valid page; independent of cluster size and retention.
+    OSGEARTHPROCEDURAL2_EXPORT double canopyReferenceError(const TileKey&);
+} }

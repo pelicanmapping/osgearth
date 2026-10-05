@@ -1,0 +1,200 @@
+<!-- First Step 4B forest checkpoint. Uses the main demo's real OSM sources, rules, and asset catalog. -->
+<map name="Procedural2 - OSM canopy hierarchy">
+    <libraries>osgEarthProcedural2</libraries>
+    <!-- Fixed UTC hour makes geographic coverage visible in this demo. -->
+    <sky2><hours>10.5</hours></sky2>
+    <options>
+        <lighting>true</lighting>
+        <terrain>
+            <color>#555744</color>
+        </terrain>
+    </options>
+
+	<XYZImage name="Google Imagery">
+		<url><![CDATA[ https://www.google.com/maps/vt?lyrs=s@189&gl=cn&x={x}&y={y}&z={z} ]]></url>
+	</XYZImage>
+
+    <TMSElevation name="ReadyMap 90m Elevation">
+        <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
+        <vdatum>egm96</vdatum>
+    </TMSElevation>
+    <XYZFeatures name="data:osm">
+        <url>https://readymap.org/readymap/mbtiles/osm/{z}/{x}/{-y}.pbf</url>
+        <min_level>14</min_level><max_level>14</max_level>
+        <profile>spherical-mercator</profile><format>pbf</format><fid_attribute>@id</fid_attribute>
+        <attribution>OpenStreetMap contributors</attribution>
+    </XYZFeatures>
+    <Vegetation2 name="OSM land-use populations">
+        <sources>
+            <source name="osm">
+                <features>data:osm</features>
+            </source>
+            <source name="edits">
+                <overlay>
+                    <type name="clearing" label="Clear vegetation" geometry="polygon">
+                        <attribute key="vegetation:exclude" value="yes" />
+                    </type>
+                    <type name="building" label="Building footprint" geometry="polygon">
+                        <attribute key="building" value="yes" />
+                    </type>
+                    <type name="water" label="Water area" geometry="polygon">
+                        <attribute key="natural" value="water" />
+                    </type>
+                    <type name="path" label="Path (4m buffer each side)" geometry="line">
+                        <attribute key="highway" value="path" />
+                    </type>
+                </overlay>
+            </source>
+        </sources>
+        <!-- Authoring vocabulary only. Matching coverage rules below own buffers and population policy. -->
+
+        <coverage>
+            <rule source="edits" key="vegetation:exclude" value="yes" action="exclude"/>
+            <!-- Natural populations use OSM. Agricultural groups are included only by their row rules. -->
+            <rule source="osm" group="trees" key="natural" value="wood" action="include"/>
+            <rule source="osm" group="trees" key="landuse" value="forest" action="include"/>
+            <rule source="osm" group="shrubs" key="natural" value="wood" action="include"/>
+            <rule source="osm" group="shrubs" key="landuse" value="forest" action="include"/>
+            <rule source="osm" group="grass" key="natural" value="wood" action="include"/>
+            <rule source="osm" group="grass" key="landuse" value="forest" action="include"/>
+            <rule source="osm" group="undergrowth" key="natural" value="wood" action="include"/>
+            <rule source="osm" group="undergrowth" key="landuse" value="forest" action="include"/>
+            <rule source="osm" group="trees" key="natural" value="tree" action="points"/>
+            <!-- Agriculture replaces background random scatter where OSM land-use polygons overlap woodland. -->
+            <rule source="osm" group="trees" key="landuse" value="orchard"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="trees" key="landuse" value="vineyard"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="trees" key="landuse" value="farmland"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="shrubs" key="landuse" value="orchard"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="shrubs" key="landuse" value="vineyard"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="shrubs" key="landuse" value="farmland"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="grass" key="landuse" value="orchard"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="grass" key="landuse" value="vineyard"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="grass" key="landuse" value="farmland"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="undergrowth" key="landuse" value="orchard"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="undergrowth" key="landuse" value="vineyard"
+                action="include" density="0" priority="100"/>
+            <rule source="osm" group="undergrowth" key="landuse" value="farmland"
+                action="include" density="0" priority="100"/>
+            <!-- Specific perennial land use overrides any broader farmland polygon in the crop population. -->
+            <rule source="osm" group="crop_rows" key="landuse" value="orchard"
+                action="include" density="0" priority="200"/>
+            <rule source="osm" group="crop_rows" key="landuse" value="vineyard"
+                action="include" density="0" priority="200"/>
+            <!-- World mode needs no origin metadata. Spacing and grid-north headings below are visual defaults. -->
+            <rule name="osm-orchards" source="osm" group="orchards" key="landuse"
+                value="orchard" action="include" strategy="rows" priority="100">
+                <placement origin_mode="world" heading="15" row_spacing="10" plant_spacing="7"/>
+            </rule>
+            <rule name="osm-vineyards" source="osm" group="vineyards" key="landuse"
+                value="vineyard" action="include" strategy="rows" priority="100">
+                <placement origin_mode="world" heading="0" heading_attribute="vine_row_orientation"
+                    row_spacing="5" plant_spacing="2"/>
+            </rule>
+            <rule name="osm-crops" source="osm" group="crop_rows" key="landuse"
+                value="farmland" action="include" strategy="rows" priority="100">
+                <placement origin_mode="world" heading="75" row_spacing="3" plant_spacing="1.5"/>
+            </rule>
+            <!-- All populations share OSM exclusions. Explicit mapped trees bypass line buffers; polygon exclusions still apply. -->
+            <rule key="building" value="*" except="no" action="exclude"/>
+            <rule key="natural" value="water" action="exclude"/>
+            <rule key="waterway" value="riverbank" action="exclude"/>
+            <!-- Buffer is half-width, in meters; road-class/width attributes can be refined later. -->
+            <rule key="highway" value="*" except="no" action="exclude" buffer="4"/>
+        </coverage>
+        <seed>17</seed>
+        <asset_budget_mb>64</asset_budget_mb>
+        <assets>
+            <asset canopy_trees="5" name="broadleaf" near="../data/procedural2/pbr/broadleaf-near.osg"
+                coarse="../data/procedural2/pbr/broadleaf-coarse.osg"
+                canopy="../data/procedural2/pbr/broadleaf-canopy.osg"/>
+            <asset canopy_trees="5" name="conifer" near="../data/procedural2/pbr/conifer-near.osg"
+                coarse="../data/procedural2/pbr/conifer-coarse.osg"
+                canopy="../data/procedural2/pbr/conifer-canopy.osg"/>
+            <asset name="shrub" near="../data/procedural2/pbr/shrub-near.osg"
+                coarse="../data/procedural2/pbr/shrub-coarse.osg"/>
+            <asset name="grass-tuft" near="../data/procedural2/pbr/grass-tuft-near.osg"
+                coarse="../data/procedural2/pbr/grass-tuft-coarse.osg"/>
+            <asset name="fern" near="../data/procedural2/pbr/fern-near.osg"
+                coarse="../data/procedural2/pbr/fern-coarse.osg"/>
+            <asset name="boulder" near="../data/procedural2/pbr/boulder-near.osg"
+                coarse="../data/procedural2/pbr/boulder-coarse.osg"/>
+            <asset name="canopy-cluster" near="../data/procedural2/pbr/canopy-cluster-near.osg"
+                coarse="../data/procedural2/pbr/canopy-cluster-coarse.osg"/>
+        </assets>
+        <profile>global-geodetic</profile>
+        <elevation_resolution>10m</elevation_resolution>
+        <groups>
+            <!-- Coarse render batches support long tree ranges; placement identity remains tied to source cells. -->
+            <group name="trees" asset="trees" density="10000" cell_level="16" render_cell_level="14"
+                canopy="true" canopy_far="true" quality_offset="128"
+                canopy_mid_strategy="exact" canopy_far_strategy="coverage"
+                canopy_mid_retention="0.9" canopy_far_retention="0.5"
+                canopy_mid_gpu_culling="true" canopy_far_gpu_culling="true"
+                canopy_transition="0.25" canopy_fade_seconds="0.4"
+                max_range="30000" lod_pixels="96">
+                <models><model>broadleaf</model><model>conifer</model></models>
+            </group>
+            <group enabled="false" name="shrubs" asset="shrubs" density="4500" cell_level="18" render_cell_level="16"
+                max_range="700" lod_pixels="48" density_start="150" density_end="550" far_density="0.5">
+                <models><model>shrub</model></models>
+            </group>
+            <group enabled="false" name="grass" asset="grass" density="1120000" cell_level="20" render_cell_level="17"
+                max_range="200" lod_pixels="18" density_start="25" density_end="160" far_density="0.2">
+                <models><model>grass-tuft</model></models>
+            </group>
+            <group enabled="false" name="undergrowth" asset="undergrowth" density="48000" cell_level="19" render_cell_level="17"
+                max_range="280" lod_pixels="28" density_start="50" density_end="220" far_density="0.35">
+                <models><model>fern</model></models>
+            </group>
+            <group name="rocks" enabled="false" asset="rocks" density="1100" cell_level="17" render_cell_level="15"
+                max_range="1000" lod_pixels="40">
+                <models><model>boulder</model></models>
+            </group>
+            <!-- Starter proxies make the planting patterns readable; crop/vine art is provisional.
+                 These populations keep independent controls; coarser render batches suit continuous agricultural coverage. -->
+            <group enabled="false" name="orchards" asset="trees" density="1" cell_level="18" render_cell_level="15"
+                max_range="2500" lod_pixels="48" min_scale="0.55" max_scale="0.605">
+                <models><model>broadleaf</model></models>
+            </group>
+            <group enabled="false" name="vineyards" asset="shrubs" density="1" cell_level="18" render_cell_level="15"
+                max_range="1200" lod_pixels="24" min_pixels="0.1" min_scale="1.5" max_scale="1.6">
+                <models><model>shrub</model></models>
+            </group>
+            <group enabled="false" name="crop_rows" asset="grass" density="1" cell_level="18" render_cell_level="15"
+                max_range="1000" lod_pixels="12" min_pixels="0.1" min_scale="1.5" max_scale="1.6">
+                <models><model>fern</model></models>
+            </group>
+        </groups>
+    </Vegetation2>
+    <!-- Step 4B: real OSM forests, two aggregate scales, 30km maximum range. -->
+    <viewpoints home="0" time="0" map_keys="false">
+        <viewpoint name="4B - Forest approach" lat="60.33" long="24.49" height="103.52"
+            heading="-20" pitch="-25" range="2200"/>
+        <viewpoint name="4B - Forest middle distance" lat="60.33" long="24.49" height="103.52"
+            heading="-20" pitch="-35" range="8000"/>
+        <viewpoint name="4B - Forest far distance" lat="60.33" long="24.49" height="103.52"
+            heading="-20" pitch="-35" range="16000"/>
+        <viewpoint name="4B - Mountain forest" lat="46.20" long="7.31" height="1600"
+            heading="-20" pitch="-35" range="8000"/>
+        <viewpoint name="Helsinki - canopy hierarchy" lat="60.2189" long="24.9129" height="49.4"
+            heading="-20" pitch="-35" range="12000"/>
+        <viewpoint name="Helsinki ground" lat="60.2189" long="24.9129" height="49.4"
+            heading="-20" pitch="-12" range="120"/>
+        <viewpoint name="Aspen" lat="39.1865" long="-106.8236" height="2430"
+            heading="8" pitch="-33" range="2600"/>
+        <viewpoint name="Sion" lat="46.2283" long="7.355" height="539"
+            heading="21" pitch="-24" range="6500"/>
+        <viewpoint name="Orbit" lat="60.2189" long="24.9129" height="49.4"
+            heading="0" pitch="-90" range="20000000"/>
+    </viewpoints>
+</map>

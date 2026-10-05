@@ -1,0 +1,104 @@
+<!-- Step 4A: synthetic GeoJSON fixture for geographic coverage and exclusions. -->
+<map name="Procedural2 - offline coverage fixture">
+    <libraries>osgEarthProcedural2</libraries>
+    <!-- Fixed UTC hour makes geographic coverage visible in this demo. -->
+    <sky2><hours>17.0</hours></sky2>
+    <options>
+        <lighting>true</lighting>
+        <terrain>
+            <color>#555744</color>
+        </terrain>
+    </options>
+    <TMSElevation name="ReadyMap 90m Elevation">
+        <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
+        <vdatum>egm96</vdatum>
+    </TMSElevation>
+    <OGRFeatures name="data:osm">
+        <url>../data/procedural2/coverage/fixture.geojson</url>
+    </OGRFeatures>
+    <Vegetation2 name="OSM landscape populations">
+        <sources>
+            <source name="osm">
+                <features>data:osm</features>
+            </source>
+            <source name="edits">
+                <overlay>
+                    <type name="clearing" label="Clear vegetation" geometry="polygon">
+                        <attribute key="vegetation:exclude" value="yes" />
+                    </type>
+                    <type name="building" label="Building footprint" geometry="polygon">
+                        <attribute key="building" value="yes" />
+                    </type>
+                    <type name="water" label="Water area" geometry="polygon">
+                        <attribute key="natural" value="water" />
+                    </type>
+                    <type name="path" label="Path (4m buffer each side)" geometry="line">
+                        <attribute key="highway" value="path" />
+                    </type>
+                </overlay>
+            </source>
+        </sources>
+
+        <coverage>
+            <rule source="edits" key="vegetation:exclude" value="yes" action="exclude"/>
+            <!-- Coverage is a union; mapped holes and hard exclusions take precedence. -->
+            <rule key="natural" value="wood" action="include"/>
+            <rule key="landuse" value="forest" action="include"/>
+            <rule group="trees" key="natural" value="tree" action="points"/>
+            <rule key="building" value="*" except="no" action="exclude"/>
+            <rule key="natural" value="water" action="exclude"/>
+            <rule key="waterway" value="riverbank" action="exclude"/>
+            <!-- Buffer is half-width, in meters; road-class/width attributes can be refined later. -->
+            <rule key="highway" value="*" except="no" action="exclude" buffer="4"/>
+        </coverage>
+        <seed>17</seed>
+        <asset_budget_mb>64</asset_budget_mb>
+        <assets>
+            <asset name="broadleaf" near="../data/procedural2/pbr/broadleaf-near.osg"
+                coarse="../data/procedural2/pbr/broadleaf-coarse.osg"/>
+            <asset name="conifer" near="../data/procedural2/pbr/conifer-near.osg"
+                coarse="../data/procedural2/pbr/conifer-coarse.osg"/>
+            <asset name="shrub" near="../data/procedural2/pbr/shrub-near.osg"
+                coarse="../data/procedural2/pbr/shrub-coarse.osg"/>
+            <asset name="grass-tuft" near="../data/procedural2/pbr/grass-tuft-near.osg"
+                coarse="../data/procedural2/pbr/grass-tuft-coarse.osg"/>
+            <asset name="fern" near="../data/procedural2/pbr/fern-near.osg"
+                coarse="../data/procedural2/pbr/fern-coarse.osg"/>
+            <asset name="boulder" near="../data/procedural2/pbr/boulder-near.osg"
+                coarse="../data/procedural2/pbr/boulder-coarse.osg"/>
+            <asset name="canopy-cluster" near="../data/procedural2/pbr/canopy-cluster-near.osg"
+                coarse="../data/procedural2/pbr/canopy-cluster-coarse.osg"/>
+        </assets>
+        <profile>global-geodetic</profile>
+        <elevation_resolution>10m</elevation_resolution>
+        <groups>
+            <!-- Tree batching is coarser for 12km residency. Density LOD never changes placement IDs or positions. -->
+            <group name="trees" asset="trees" density="2000" cell_level="16" render_cell_level="13"
+                max_range="6000" lod_pixels="96">
+                <models><model>broadleaf</model><model>conifer</model></models>
+            </group>
+            <group name="shrubs" asset="shrubs" density="4500" cell_level="18" render_cell_level="16"
+                max_range="700" lod_pixels="48" density_start="150" density_end="550" far_density="0.5">
+                <models><model>shrub</model></models>
+            </group>
+            <group name="grass" asset="grass" density="1120000" cell_level="20" render_cell_level="17"
+                max_range="200" lod_pixels="18" density_start="25" density_end="160" far_density="0.2">
+                <models><model>grass-tuft</model></models>
+            </group>
+            <group name="undergrowth" asset="undergrowth" density="48000" cell_level="19" render_cell_level="17"
+                max_range="280" lod_pixels="28" density_start="50" density_end="220" far_density="0.35">
+                <models><model>fern</model></models>
+            </group>
+            <group name="rocks" enabled="false" asset="rocks" density="1100" cell_level="17" render_cell_level="15"
+                max_range="1000" lod_pixels="40">
+                <models><model>boulder</model></models>
+            </group>
+        </groups>
+    </Vegetation2>
+    <viewpoints home="0" time="0" map_keys="false">
+        <viewpoint name="Coverage and exclusions" lat="40.65" long="-75" height="160"
+            heading="0" pitch="-90" range="2100"/>
+        <viewpoint name="Road edge" lat="40.65" long="-75.003" height="160"
+            heading="0" pitch="-25" range="160"/>
+    </viewpoints>
+</map>

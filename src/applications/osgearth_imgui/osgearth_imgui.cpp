@@ -30,6 +30,10 @@
 #include <osgEarthImGui/ResourceLibraryGUI>
 #include <osgEarthImGui/DecalsGUI>
 
+#ifdef OSGEARTH_HAVE_PROCEDURAL2_NODEKIT
+#include <osgEarthImGui/VegetationLayer2GUI>
+#endif
+
 #ifdef OSGEARTH_HAVE_GEOCODER
 #include <osgEarthImGui/SearchGUI>
 #endif
@@ -125,6 +129,10 @@ main(int argc, char** argv)
         ui->add("Tools", new TextureInspectorGUI());
         ui->add("Tools", new ViewpointsGUI());
         ui->add("Tools", new LiveCamerasGUI());
+
+#ifdef OSGEARTH_HAVE_PROCEDURAL2_NODEKIT
+        ui->add("Procedural", new osgEarth::Procedural2::VegetationLayer2GUI(), arguments.read("--vegetation2"));
+#endif
 
 #ifdef OSGEARTH_HAVE_CESIUM_NODEKIT
         ui->add("Cesium", new osgEarth::Cesium::CesiumIonGUI());

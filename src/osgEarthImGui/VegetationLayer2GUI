@@ -1,0 +1,563 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarthImGui/ImGuiPanel>
+#include <osgEarthImGui/FeatureOverlayGUI>
+#include <osgEarthProcedural2/VegetationLayer2>
+#include <osgEarth/Utils>
+#include <osgViewer/ViewerBase>
+#include <atomic>
+#include <algorithm>
+
+namespace osgEarth { namespace Procedural2
+{
+    //! Draft-based editor: scene mutations are queued to update traversal, never performed during GUI drawing.
+    class VegetationLayer2GUI : public ImGuiPanel
+    {
+        struct Result
+        {
+            std::atomic<bool> ready{false};
+            Status status;
+            ScatterGroup submitted;
+            bool qualityOnly = false;
+        };
+
+        struct CountResult
+        {
+            std::atomic<bool> ready{false};
+            AggregateResidency value;
+        };
+
+        struct Editor
+        {
+            ScatterGroup draft, applied, loaded;
+            bool dirty = false;
+            std::string message;
+            std::shared_ptr<Result> pending;
+            std::shared_ptr<CountResult> pendingCounts;
+            AggregateResidency counts;
+            double nextCountRefresh = 0.0;
+
+            //! Captures the scene's starting policy for reverting edits or restoring the loaded configuration.
+            explicit Editor(const ScatterGroup& group) : draft(group), applied(group), loaded(group) { }
+        };
+
+        osg::observer_ptr<VegetationLayer2> _layer;
+        osg::ref_ptr<const Profile> _profile;
+        std::vector<Editor> _editors;
+        FeatureOverlayGUI _overlayEditor;
+        int _editableInput = 0;
+        int _clusterDebug = 0;
+        bool _debugMedium = true, _debugFar = true;
+
+        //! Switches the selected layer, discarding only this panel's unapplied drafts.
+        void select(VegetationLayer2* layer)
+        {
+            _layer = layer;
+            _editableInput = 0;
+            _clusterDebug = int(layer->getClusterDebugMode());
+            _debugMedium = (layer->getClusterDebugTiers() & 1u) != 0u;
+            _debugFar = (layer->getClusterDebugTiers() & 2u) != 0u;
+            _editors.clear();
+            _profile = Profile::create(layer->options().profile().get());
+            const auto& original = layer->options_original().groups();
+            for (const auto& group : layer->options().groups())
+            {
+                _editors.emplace_back(group);
+                auto loaded = std::find_if(original.begin(), original.end(), [&group](const ScatterGroup& value)
+                    { return value.name == group.name; });
+                if (loaded != original.end()) _editors.back().loaded = *loaded;
+            }
+        }
+
+        //! Explains a control on hover without obscuring its value.
+        static void help(const char* text)
+        {
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", text);
+        }
+
+        //! Edits an unsigned policy level through a signed slider without aliasing integer types.
+        static bool level(const char* label, unsigned& value)
+        {
+            int edited = static_cast<int>(value);
+            if (!ImGuiLTable::SliderInt(label, &edited, 1, 24)) return false;
+            value = static_cast<unsigned>(std::max(1, std::min(24, edited)));
+            return true;
+        }
+
+        //! Shows north-south cell span, which stays meaningful for global geodetic cells near the poles.
+        void cellSize(const char* label, unsigned level, unsigned divisions = 1u) const
+        {
+            if (!_profile.valid() || level < 1u || level > 24u) return;
+            const auto extent = TileKey(level, 0, 0, _profile).getExtent();
+            const double meters = extent.getSRS()->isProjected() ?
+                Units::convert(extent.getSRS()->getUnits(), Units::METERS, extent.height()) : extent.height(Units::METERS);
+            ImGuiLTable::Text(label, "%.1f m N-S", meters / divisions);
+        }
+
+        //! Samples resident pages once per second on update, without draw-thread traversal or GPU readback.
+        void aggregateCounts(Editor& editor, VegetationLayer2* layer, osg::RenderInfo& ri)
+        {
+            if (editor.pendingCounts && editor.pendingCounts->ready.load(std::memory_order_acquire))
+            {
+                editor.counts = editor.pendingCounts->value;
+                editor.pendingCounts.reset();
+            }
+            const double now = ImGui::GetTime();
+            auto target = view(ri);
+            if (!editor.pendingCounts && now >= editor.nextCountRefresh && target && target->getViewerBase())
+            {
+                auto result = std::make_shared<CountResult>();
+                editor.pendingCounts = result;
+                editor.nextCountRefresh = now + 1.0;
+                osg::ref_ptr<VegetationLayer2> retained = layer;
+                const auto name = editor.applied.name;
+                target->getViewerBase()->addUpdateOperation(new OneTimer([retained, result, name]()
+                    {
+                        result->value = retained->getAggregateResidency(name);
+                        result->ready.store(true, std::memory_order_release);
+                    }));
+            }
+            ImGui::TextWrapped("Medium: %zu clusters / %zu tree cards", editor.counts.midClumps, editor.counts.midPieces);
+            ImGui::TextWrapped("Far: %zu clusters / %zu proxies", editor.counts.farClumps, editor.counts.farPieces);
+            ImGui::TextWrapped("Applied counts include cached parents and children, not only visible clusters.");
+        }
+
+        //! Applies an immutable policy on update; result lifetime is independent of panel/layer selection.
+        void apply(Editor& editor, VegetationLayer2* layer, osg::RenderInfo& ri, bool qualityOnly = false)
+        {
+            auto target = view(ri);
+            if (!target || !target->getViewerBase())
+            {
+                editor.message = "No viewer update queue is available.";
+                return;
+            }
+            auto result = std::make_shared<Result>();
+            result->qualityOnly = qualityOnly;
+            result->submitted = qualityOnly ? editor.applied : editor.draft;
+            if (qualityOnly) result->submitted.qualityOffset = editor.draft.qualityOffset;
+            editor.pending = result;
+            osg::ref_ptr<VegetationLayer2> retained = layer;
+            target->getViewerBase()->addUpdateOperation(new OneTimer([retained, result]()
+                {
+                    result->status = retained->setGroup(result->submitted);
+                    result->ready.store(true, std::memory_order_release);
+                }));
+        }
+
+        //! Queues session-only debug changes without applying any population drafts or rebuilding page content.
+        void clusterDebug(VegetationLayer2* layer, osg::RenderInfo& ri)
+        {
+            if (!ImGui::CollapsingHeader("Debug clusters")) return;
+            bool changed = ImGui::Combo("Color mode", &_clusterDebug, "Off\0Tier colors\0Cluster colors\0");
+            ImGui::BeginDisabled(_clusterDebug == 0);
+            changed |= ImGui::Checkbox("Medium clusters", &_debugMedium);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Far clusters", &_debugFar);
+            ImGui::EndDisabled();
+            ImGui::TextWrapped("Live, no Apply. Medium uses cool colors; far uses warm colors. "
+                "Cluster colors identify each culling group. Individual trees keep their normal materials. "
+                "Colors follow actual visibility and fades; hidden clusters are not drawn.");
+            if (!changed) return;
+            auto target = view(ri);
+            if (!target || !target->getViewerBase()) return;
+            osg::ref_ptr<VegetationLayer2> retained = layer;
+            const auto mode = static_cast<ClusterDebugMode>(_clusterDebug);
+            const unsigned tiers = (_debugMedium ? 1u : 0u) | (_debugFar ? 2u : 0u);
+            target->getViewerBase()->addUpdateOperation(new OneTimer([retained,mode,tiers]()
+                { retained->setClusterDebug(mode,tiers); }));
+        }
+
+        //! Draws one population's draft, validation feedback, and explicit apply/revert actions.
+        void population(Editor& editor, VegetationLayer2* layer, osg::RenderInfo& ri)
+        {
+            if (editor.pending && editor.pending->ready.load(std::memory_order_acquire))
+            {
+                if (editor.pending->status.isOK())
+                {
+                    editor.applied = editor.pending->submitted;
+                    editor.dirty = editor.draft.getConfig().toJSON() != editor.applied.getConfig().toJSON();
+                    editor.message = editor.pending->qualityOnly ? "Quality updated; placement pages retained." :
+                        "Applied. This population will page in with the new settings.";
+                }
+                else editor.message = editor.pending->status.toString();
+                editor.pending.reset();
+            }
+
+            auto& g = editor.draft;
+            bool changed = false;
+            ImGui::BeginDisabled(bool(editor.pending) || !layer->isOpen());
+            if (ImGuiLTable::Begin("Population"))
+            {
+                changed |= ImGuiLTable::Checkbox("Enabled", &g.enabled);
+                const float previousQualityOffset = g.qualityOffset;
+                if (ImGuiLTable::SliderFloat("Quality offset (px)", &g.qualityOffset, 0.0f, 400.0f, "%.1f", 0))
+                {
+                    // Numeric entry can bypass the slider bounds; clamp before submitting a live update.
+                    g.qualityOffset = std::max(0.0f, g.qualityOffset);
+                    if (g.qualityOffset != previousQualityOffset)
+                    {
+                        changed = true;
+                        apply(editor, layer, ri, true);
+                    }
+                }
+                help(g.asset == "trees" ?
+                    "Applied live. Adds to Rendering > SSE; zero inherits global quality. Higher error brings "
+                    "impostors and enabled canopy tiers closer; lower error keeps detailed trees farther out. "
+                    "Quality does not remove distant trees. Maximum range controls forest visibility." :
+                    "Applied live. Adds to Rendering > SSE; zero inherits global quality. The combined error "
+                    "selects coarser representations and sets a literal pixel visibility cutoff.");
+                auto mapNode = findNode<MapNode>(ri);
+                const float globalError = mapNode ? mapNode->getScreenSpaceError() : 25.0f;
+                ImGuiLTable::Text("Global SSE (px)", "%.1f", globalError);
+                ImGuiLTable::Text("Effective error (px)", "%.1f", g.effectiveError(globalError));
+                const double densityStep = 100.0, densityFast = 1000.0;
+                changed |= ImGuiLTable::InputScalar(g.proceduralGrass ? "Patches / km2" : "Density / km2",
+                    ImGuiDataType_Double, &g.density,
+                    &densityStep, &densityFast, "%.1f");
+                help("Density counts patch centers in procedural mode, otherwise asset instances. "
+                    "Zero unloads the population. Structured layouts use their own spacing and occupancy controls.");
+                changed |= ImGuiLTable::InputFloat("Maximum range (m)", &g.maxRange);
+                ImGuiLTable::End();
+            }
+
+            if (ImGui::CollapsingHeader("Paging (advanced)") && ImGuiLTable::Begin("Paging"))
+            {
+                changed |= level("Source cell level", g.cellLevel);
+                help("Higher levels mean smaller cells. Changing this level changes placement IDs and positions.");
+                cellSize("Source cell span", g.cellLevel);
+                changed |= level("Render cell level", g.renderCellLevel);
+                help("Controls paging and batching without moving plants. Must be within six levels of the source.");
+                cellSize("Render cell span", g.renderCellLevel);
+                if (g.renderCellLevel <= g.cellLevel && g.cellLevel - g.renderCellLevel <= 6u)
+                    ImGuiLTable::Text("Source cells / batch", "%u", 1u << (2u * (g.cellLevel - g.renderCellLevel)));
+                ImGuiLTable::End();
+            }
+
+            bool hasRows = false;
+            for (const auto& rule : layer->options().coverage())
+                hasRows = hasRows || (rule.strategy == "rows" && (rule.group == "*" || rule.group == g.name));
+            if (hasRows && ImGui::CollapsingHeader("Structured rows", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                if (ImGuiLTable::Begin("Rows"))
+                {
+                    float occupancy = g.rowDensity * 100.0f;
+                    if (ImGuiLTable::SliderFloat("Occupied slots (%)", &occupancy, 0.0f, 100.0f))
+                    { g.rowDensity = occupancy * 0.01f; changed = true; }
+                    help("Removes a stable subset of plants without moving the remaining row slots.");
+                    changed |= ImGuiLTable::SliderFloat("Row gap scale", &g.rowSpacingScale, 0.1f, 10.0f);
+                    changed |= ImGuiLTable::SliderFloat("Plant gap scale", &g.plantSpacingScale, 0.1f, 10.0f);
+                    ImGuiLTable::End();
+                }
+                ImGui::TextWrapped("Spacing multiplies each field's configured meter spacing. "
+                    "Natural density does not set row spacing. Source-cell levels do not move row slots.");
+            }
+
+            if (g.asset == "trees" && ImGui::CollapsingHeader("Distance representation"))
+            {
+                int tiers = !g.canopy ? 0 : g.canopyFar ? 2 : 1;
+                if (ImGui::Combo("Tiers", &tiers, "Individuals\0Medium\0Medium + Far\0"))
+                { g.canopy = tiers > 0; g.canopyFar = tiers == 2; changed = true; }
+                ImGui::BeginDisabled(!g.canopy);
+                int midStrategy = g.canopyMidStrategy == "coverage" ? 1 : 0;
+                if (ImGui::Combo("Medium representation", &midStrategy, "Exact tree clusters\0Coverage cards\0"))
+                { g.canopyMidStrategy = midStrategy == 1 ? "coverage" : "exact"; changed = true; }
+                help("Apply to rebuild pages. Exact uses original placements; coverage samples representative roots. "
+                    "Specialized row regions retain exact placement.");
+                ImGui::BeginDisabled(!g.canopyFar);
+                int farStrategy = g.canopyFarStrategy == "coverage" ? 1 : 0;
+                if (ImGui::Combo("Far representation", &farStrategy, "Exact tree clusters\0Coverage stands\0"))
+                { g.canopyFarStrategy = farStrategy == 1 ? "coverage" : "exact"; changed = true; }
+                help("Independent of medium. Coverage uses reusable multi-tree stands with smaller cards at exclusions. "
+                    "Specialized row regions retain exact placement. Apply to rebuild pages.");
+                ImGui::EndDisabled();
+
+                if (ImGuiLTable::Begin("Tree card clusters"))
+                {
+
+                    float midRetained = g.canopyMidRetention*100.0f;
+                    if (ImGuiLTable::SliderFloat("Medium retained (%)", &midRetained, 0.0f, 100.0f, "%.1f%%", 0))
+                    { g.canopyMidRetention = midRetained*0.01f; changed = true; }
+                    help("100% retains the full medium population. Apply rebuilds pages with a stable subset before "
+                        "height sampling and clustering; detailed trees and quality thresholds stay unchanged.");
+
+                    ImGui::BeginDisabled(!g.canopyFar);
+                    float farRetained = g.canopyFarRetention*100.0f;
+                    if (ImGuiLTable::SliderFloat("Far retained (%)", &farRetained, 0.0f, 100.0f, "%.1f%%", 0))
+                    { g.canopyFarRetention = farRetained*0.01f; changed = true; }
+                    help("Independent percentage of the full far population, not of the medium percentage. "
+                        "In coverage mode it removes whole stand proxies and boundary tree cards, so gaps can be larger.");
+
+                    ImGui::EndDisabled();
+                    ImGuiLTable::End();
+                }
+                ImGui::TextWrapped(g.usesCoverage() ?
+                    "Experimental mode approximates forest coverage with representative roots and reusable stands. "
+                    "Near exclusions it uses smaller tree cards. A far proxy may represent several trees. " :
+                    "Clusters retain tree sizes, species, density, and terrain roots.");
+                ImGui::TextWrapped("Larger groups reduce culling records without stretching trees or changing handover thresholds. "
+                    "Quality selects the tier; maximum range limits visibility, with either GPU culling mode.");
+                if (ImGui::TreeNode("Grouping and transitions (advanced)"))
+                {
+                    changed |= ImGui::Checkbox("Medium GPU culling", &g.canopyMidGPUCulling);
+                    int midSize = int(g.canopyMidClusterSize), farSize = int(g.canopyFarClusterSize);
+                    if (ImGui::SliderInt("Medium proxies/cluster", &midSize, 8, 256))
+                    { g.canopyMidClusterSize = unsigned(midSize); changed = true; }
+                    ImGui::BeginDisabled(!g.canopyFar);
+                    changed |= ImGui::Checkbox("Far GPU culling", &g.canopyFarGPUCulling);
+                    if (ImGui::SliderInt("Far proxies/cluster", &farSize, 8, 256))
+                    { g.canopyFarClusterSize = unsigned(farSize); changed = true; }
+                    ImGui::EndDisabled();
+                    changed |= ImGui::SliderFloat("Tier overlap", &g.canopyTransition, 0.0f, 0.5f);
+                    changed |= ImGui::SliderFloat("Page arrival fade (s)", &g.canopyFadeSeconds, 0.0f, 2.0f);
+                    ImGui::TreePop();
+                }
+                ImGui::EndDisabled();
+                aggregateCounts(editor, layer, ri);
+                ImGui::TextWrapped("Uses the same exclusion rules as nearby trees. Retained percentages remove geometry; "
+                    "0% leaves that tier empty.");
+            }
+
+            if (!g.proceduralGrass && !layer->options().assets().empty() && ImGui::CollapsingHeader("Model choices"))
+            {
+                ImGui::TextWrapped("Selected models are mixed equally at stable placement IDs.");
+                if (layer->options().assets().empty()) ImGui::TextWrapped("No asset catalog: using built-in placeholders.");
+                for (const auto& asset : layer->options().assets())
+                {
+                    auto found = std::find(g.models.begin(), g.models.end(), asset.name);
+                    bool selected = found != g.models.end();
+                    if (ImGui::Checkbox(asset.name.c_str(), &selected))
+                    {
+                        if (selected) g.models.push_back(asset.name);
+                        else g.models.erase(found);
+                        changed = true;
+                    }
+                }
+            }
+
+            if (g.proceduralGrass && ImGui::CollapsingHeader("Procedural grass patches", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                if (ImGuiLTable::Begin("Grass"))
+                {
+                    int blades = static_cast<int>(g.grassBlades);
+                    if (ImGuiLTable::SliderInt("Blades / near patch", &blades, 4, 128))
+                    {
+                        g.grassBlades = static_cast<unsigned>(blades);
+                        changed = true;
+                    }
+                    ImGuiLTable::Text("Blades / coarse patch", "%u", (g.grassBlades + 3u) / 4u);
+                    ImGuiLTable::Text("Nominal near blades / m2", "%.1f", g.density * g.grassBlades / 1000000.0);
+                    changed |= ImGuiLTable::SliderFloat("Patch radius (m)", &g.grassRadius, 0.1f, 4.0f);
+                    changed |= ImGuiLTable::SliderFloat("Blade height (m)", &g.grassHeight, 0.05f, 2.0f);
+                    changed |= ImGuiLTable::SliderFloat("Blade half-width (m)", &g.grassWidth, 0.002f, 0.1f, "%.3f", 0);
+                    changed |= ImGuiLTable::SliderFloat("Wind displacement (m)", &g.grassWind, 0.0f, 1.0f);
+                    help("Zero freezes the demonstration wind. All grass dimensions are multiplied by instance scale.");
+                    ImGuiLTable::End();
+                }
+                ImGui::TextWrapped("Experimental. CPU height/slope samples approximate a plane under each patch. "
+                    "Density and cell controls still govern patch centers; individual blades are generated on the GPU.");
+            }
+
+            if (ImGui::CollapsingHeader("Representation (advanced)"))
+            {
+                if (ImGuiLTable::Begin("LOD"))
+                {
+                    changed |= ImGuiLTable::InputFloat("Coarse LOD below (px)", &g.lodPixels);
+                    help("Authored cutoff at an effective 25px budget, scaled by the unified quality control. "
+                        "Zero disables coarse geometry.");
+                    if (g.asset != "trees")
+                    {
+                        changed |= ImGuiLTable::InputFloat("Cull below (px)", &g.minPixels);
+                        help("Visibility cutoff is the larger of this and the combined error.");
+                    }
+                    changed |= ImGuiLTable::SliderFloat("LOD transition", &g.lodTransition, 0.0f, 0.5f);
+                    if (g.asset != "trees")
+                    {
+                        float percent = g.farDensity * 100.0f;
+                        if (ImGuiLTable::SliderFloat("Far density (%)", &percent, 0.0f, 100.0f, "%.1f%%", 0))
+                        {
+                            g.farDensity = percent * 0.01f;
+                            changed = true;
+                        }
+                        help("100% disables thinning. Lower values keep a stable subset; loaded instance memory is unchanged.");
+                        changed |= ImGuiLTable::InputFloat("Thin from (m)", &g.densityStart);
+                        changed |= ImGuiLTable::InputFloat("Thin until (m)", &g.densityEnd);
+                    }
+                    ImGuiLTable::End();
+                }
+            }
+            if (ImGui::CollapsingHeader("Scale and placement limits"))
+            {
+                if (ImGuiLTable::Begin("Limits"))
+                {
+                    changed |= ImGuiLTable::InputFloat("Minimum scale", &g.minScale);
+                    changed |= ImGuiLTable::InputFloat("Maximum scale", &g.maxScale);
+                    const unsigned step = 1024u;
+                    changed |= ImGuiLTable::InputScalar("Accepted / source cell", ImGuiDataType_U32,
+                        &g.maxPerCell, &step, nullptr, "%u");
+                    changed |= ImGuiLTable::InputScalar("Accepted / render batch", ImGuiDataType_U32,
+                        &g.maxPerBatch, &step, nullptr, "%u");
+                    ImGuiLTable::End();
+                }
+                ImGui::TextWrapped("Accepted placements above these caps become a stable, distributed subset. "
+                    "Exclusions and tier retention are applied first.");
+                if (ImGui::TreeNode("Generation safeguards (advanced)"))
+                {
+                    const unsigned step = 1024u;
+                    changed |= ImGui::InputScalar("Candidate work limit", ImGuiDataType_U32,
+                        &g.maxCandidatesPerCell, &step, nullptr, "%u");
+                    changed |= ImGui::InputScalar("Work units / request", ImGuiDataType_U32,
+                        &g.maxWorkPerRequest, &step, nullptr, "%u");
+                    ImGui::TextWrapped("Work units also bound cumulative generation/processing across a page. "
+                        "Separate pre-filter work/allocation limit per source-cell generator "
+                        "(or coverage page). Exceeding this safeguard still fails the request. "
+                        "It does not set vegetation density.");
+                    ImGui::TreePop();
+                }
+            }
+            if (changed)
+            {
+                editor.dirty = g.getConfig().toJSON() != editor.applied.getConfig().toJSON();
+                editor.message.clear();
+            }
+            const Status valid = g.validate();
+            if (valid.isError())
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.3f, 1.0f));
+                ImGui::TextWrapped("%s", valid.toString().c_str());
+                ImGui::PopStyleColor();
+            }
+            ImGui::Separator();
+            ImGui::BeginDisabled(!editor.dirty || valid.isError());
+            if (ImGui::Button("Apply population")) apply(editor, layer, ri);
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Revert edits"))
+            {
+                g = editor.applied;
+                editor.dirty = false;
+                editor.message.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Actions")) ImGui::OpenPopup("Population actions");
+            if (ImGui::BeginPopup("Population actions"))
+            {
+                if (ImGui::MenuItem("Reset to loaded"))
+                {
+                    g = editor.loaded;
+                    editor.dirty = g.getConfig().toJSON() != editor.applied.getConfig().toJSON();
+                    editor.message = "Loaded settings restored to draft; Apply to use them.";
+                }
+                if (!editor.dirty && !editor.pending && layer->isOpen() && ImGui::MenuItem("Reload population"))
+                    apply(editor, layer, ri);
+                ImGui::EndPopup();
+            }
+            ImGui::EndDisabled();
+            if (editor.pending) ImGui::TextUnformatted("Applying on the next scene update...");
+            else if (editor.dirty) ImGui::TextUnformatted("Unapplied changes");
+            if (!editor.message.empty()) ImGui::TextWrapped("%s", editor.message.c_str());
+        }
+
+    public:
+        //! Creates a hidden panel; it can also be opened by osgearth_imgui --vegetation2.
+        VegetationLayer2GUI() : ImGuiPanel("Vegetation2") { }
+
+        //! Finds current map layers each frame so switching maps never leaves an editor bound to a removed layer.
+        void draw(osg::RenderInfo& ri) override
+        {
+            if (!isVisible()) { _overlayEditor.suspend(); return; }
+            ImGui::SetNextWindowSize(ImVec2(560, 700), ImGuiCond_FirstUseEver);
+            if (!ImGui::Begin(name(), visible()))
+            {
+                _overlayEditor.suspend();
+                ImGui::End();
+                return;
+            }
+            std::vector<osg::ref_ptr<VegetationLayer2>> layers;
+            auto mapNode = findNode<MapNode>(ri);
+            if (mapNode) mapNode->getMap()->getLayers(layers);
+            if (layers.empty())
+            {
+                _overlayEditor.suspend();
+                _layer = nullptr;
+                _editors.clear();
+                ImGui::TextWrapped("No Vegetation2 layer in this map.");
+                ImGui::End();
+                return;
+            }
+            osg::ref_ptr<VegetationLayer2> layer;
+            _layer.lock(layer);
+            if (std::find(layers.begin(), layers.end(), layer) == layers.end())
+            {
+                layer = layers.front();
+                select(layer);
+            }
+            if (ImGui::BeginCombo("Layer", layer->getName().c_str()))
+            {
+                for (auto candidate : layers)
+                {
+                    ImGui::PushID(candidate.get());
+                    if (ImGui::Selectable(candidate->getName().c_str(), candidate == layer))
+                    {
+                        layer = candidate;
+                        select(layer);
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TextWrapped("Quality updates live. Apply other edits. "
+                "Changes affect this session; the earth file is unchanged.");
+            clusterDebug(layer,ri);
+            std::vector<std::pair<std::string, std::shared_ptr<FeatureOverlay>>> documents;
+            for (const auto& input : layer->options().sources())
+            {
+                auto provider = std::dynamic_pointer_cast<const EditableFeatureProvider>(input.provider);
+                if (provider) documents.emplace_back(input.name, provider->document());
+            }
+            if (!documents.empty())
+            {
+                _editableInput = std::max(0, std::min(_editableInput, int(documents.size()) - 1));
+                if (documents.size() > 1 && ImGui::BeginCombo("Editable source", documents[_editableInput].first.c_str()))
+                {
+                    for (int i = 0; i < int(documents.size()); ++i)
+                        if (ImGui::Selectable(documents[i].first.c_str(), i == _editableInput)) _editableInput = i;
+                    ImGui::EndCombo();
+                }
+                // The reusable demo editor consumes a document, never the vegetation layer.
+                _overlayEditor.draw(documents[_editableInput].second, mapNode, view(ri));
+            }
+            else _overlayEditor.suspend();
+            if (ImGui::CollapsingHeader("Asset residency"))
+            {
+                const auto stats = layer->getAssetResidency();
+                ImGui::Text("%u model bundles: %.2f / %.0f MiB", stats.assets,
+                    stats.bytes / 1048576.0, stats.budget / 1048576.0);
+                ImGui::Text("Load failures: %u   Budget denials: %u", stats.failedLoads, stats.budgetDenials);
+                ImGui::TextWrapped("Mesh and image content only; excludes instance buffers, temporary decoding, "
+                    "and driver allocations. Unreferenced bundles unload automatically. An empty catalog uses placeholders; configured asset failures are reported.");
+                if (!stats.lastError.empty()) ImGui::TextWrapped("Last asset issue: %s", stats.lastError.c_str());
+            }
+            if (!layer->isOpen()) ImGui::TextWrapped("Layer is closed: %s", layer->getStatus().toString().c_str());
+            if (ImGui::BeginTabBar("Populations"))
+            {
+                for (auto& editor : _editors)
+                {
+                    const std::string label = editor.draft.name + (editor.dirty ? " *" : "") + "###" + editor.draft.name;
+                    if (ImGui::BeginTabItem(label.c_str()))
+                    {
+                        ImGui::PushID(editor.draft.name.c_str());
+                        population(editor, layer, ri);
+                        ImGui::PopID();
+                        ImGui::EndTabItem();
+                    }
+                }
+                ImGui::EndTabBar();
+            }
+            ImGui::End();
+        }
+    };
+} }

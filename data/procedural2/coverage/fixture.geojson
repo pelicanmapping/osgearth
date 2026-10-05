@@ -1,0 +1,163 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": 1,
+      "properties": {
+        "natural": "wood"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -75.006,
+              40.644
+            ],
+            [
+              -74.994,
+              40.644
+            ],
+            [
+              -74.994,
+              40.656
+            ],
+            [
+              -75.006,
+              40.656
+            ],
+            [
+              -75.006,
+              40.644
+            ]
+          ],
+          [
+            [
+              -75.002,
+              40.651
+            ],
+            [
+              -75.002,
+              40.6525
+            ],
+            [
+              -75.0005,
+              40.6525
+            ],
+            [
+              -75.0005,
+              40.651
+            ],
+            [
+              -75.002,
+              40.651
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 2,
+      "properties": {
+        "natural": "water"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -74.9994,
+              40.6504
+            ],
+            [
+              -74.9982,
+              40.6504
+            ],
+            [
+              -74.9982,
+              40.6518
+            ],
+            [
+              -74.9994,
+              40.6518
+            ],
+            [
+              -74.9994,
+              40.6504
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 3,
+      "properties": {
+        "building": "yes"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -75.0,
+              40.6498
+            ],
+            [
+              -74.9995,
+              40.6498
+            ],
+            [
+              -74.9995,
+              40.6502
+            ],
+            [
+              -75.0,
+              40.6502
+            ],
+            [
+              -75.0,
+              40.6498
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 4,
+      "properties": {
+        "highway": "residential"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -75.003,
+            40.644
+          ],
+          [
+            -75.003,
+            40.656
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": 5,
+      "properties": {
+        "natural": "tree"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -75.0064,
+          40.6497
+        ]
+      }
+    }
+  ]
+}

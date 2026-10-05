@@ -1,6 +1,8 @@
 #include "FeatureSplattingLayer"
 #include <osgEarth/Capabilities>
 #include <osgEarth/Registry>
+#include <osgEarth/Shaders>
+#include <osgEarth/ShaderLoader>
 #include <osgEarth/TerrainEngineNode>
 
 using namespace osgEarth;
@@ -26,7 +28,8 @@ namespace
     )";
 
     const char* fs = R"(
-        #pragma import_defines(OE_HAS_ALBEDO_TEX, OE_HAS_NORMAL_TEX, OE_HAS_PBR_TEX)
+        #pragma import_defines(OE_HAS_ALBEDO_TEX, OE_HAS_NORMAL_TEX, OE_HAS_PBR_TEX, OE_HAS_OCCLUSION_TEX)
+        #pragma include PBRMaterial.glsl
 
         in vec2 oe_feature_splatting_uv;
         in float oe_layer_opacity;
@@ -36,6 +39,8 @@ namespace
         uniform sampler2D oe_albedo_tex;
         uniform sampler2D oe_normal_tex;
         uniform sampler2D oe_pbr_tex;
+        uniform sampler2D oe_occlusion_tex;
+        uniform vec4 oe_feature_splatting_layoutAndFactors;
 
         uniform float oe_normal_boost = 1.0;
 
@@ -57,9 +62,28 @@ namespace
             return b2 / (b1 + b2);
         }
 
+        // Only DRAM contains displacement; other layouts must not drive parallax.
         float heightSample(vec2 uv)
         {
-            return texture(oe_pbr_tex, uv).r;
+          #ifdef OE_HAS_PBR_TEX
+            if (oe_feature_splatting_layoutAndFactors.x == OE_PBR_LAYOUT_DRAM)
+                return texture(oe_pbr_tex, uv).r;
+          #endif
+            return 0.0;
+        }
+
+        // Sample optional maps, then normalize packing and factors for terrain blending.
+        vec4 sampleMaterial(vec2 uv)
+        {
+            vec4 texel = oe_pbr_default(oe_feature_splatting_layoutAndFactors.x);
+          #ifdef OE_HAS_PBR_TEX
+            texel = texture(oe_pbr_tex, uv);
+          #endif
+            float ao = -1.0;
+          #ifdef OE_HAS_OCCLUSION_TEX
+            ao = texture(oe_occlusion_tex, uv).r;
+          #endif
+            return oe_pbr_decode(texel, oe_feature_splatting_layoutAndFactors, ao);
         }
 
         vec2 POM(in vec2 baseUV, in vec3 viewDirTS)
@@ -152,7 +176,10 @@ namespace
 
             vec3 viewVectorTS = transpose(TBN) * normalize(-vp_VertexView);
             
-            uv = POM(uv, viewVectorTS);
+          #ifdef OE_HAS_PBR_TEX
+            if (oe_feature_splatting_layoutAndFactors.x == OE_PBR_LAYOUT_DRAM)
+                uv = POM(uv, viewVectorTS);
+          #endif
 
           #ifdef OE_HAS_NORMAL_TEX            
             vec3 normalTS = texture(oe_normal_tex, uv).xyz * 2.0 - 1.0;
@@ -161,10 +188,8 @@ namespace
             vp_Normal = normalize(oe_normalMapTBN * normalize(normalTS));
           #endif
 
-          #ifdef OE_HAS_PBR_TEX
-            vec4 pbr = texture(oe_pbr_tex, uv);
+            vec4 pbr = sampleMaterial(uv);
             displacement = pbr.r;
-          #endif
 
           #ifdef OE_HAS_ALBEDO_TEX
             const float ground_height = 0.0;
@@ -175,12 +200,10 @@ namespace
             color = vec4(albedo.rgb, quantized_blend);
           #endif
 
-          #ifdef OE_HAS_PBR_TEX
             oe_pbr.displacement = mix(oe_pbr.displacement, displacement, quantized_blend);
             oe_pbr.roughness = mix(oe_pbr.roughness, pbr.g, quantized_blend);
             oe_pbr.ao = mix(0.0, pbr.b, unquantized_blend);
             oe_pbr.metal = mix(oe_pbr.metal, pbr.a, quantized_blend);
-          #endif
         }
     )";
 }
@@ -217,6 +240,13 @@ FeatureSplattingLayer::prepareForRendering(TerrainEngine* engine)
     engine->getResources()->reserveTextureImageUnitForLayer(_res_albedo, this);
     engine->getResources()->reserveTextureImageUnitForLayer(_res_normal, this);
     engine->getResources()->reserveTextureImageUnitForLayer(_res_pbr, this);
+    const auto& material = options().material().value();
+    if ((material.aoImage || material.ao().isSet()) &&
+        !engine->getResources()->reserveTextureImageUnitForLayer(_res_occlusion, this))
+    {
+        setStatus(Status::ResourceUnavailable, "Failed to reserve occlusion texture image unit");
+        return;
+    }
 
     buildStateSet();
 }
@@ -228,7 +258,10 @@ FeatureSplattingLayer::buildStateSet()
     auto* ss = getOrCreateStateSet();
     auto vp = VirtualProgram::getOrCreate(ss);
     vp->setFunction("oe_feature_splatting_vs", vs, ShaderComp::LOCATION_VERTEX_VIEW);
-    vp->setFunction("oe_feature_splatting_fs", fs, ShaderComp::LOCATION_FRAGMENT_COLORING);
+    osgEarth::Util::Shaders shaders;
+    shaders.add("FeatureSplatting.frag", fs);
+    vp->setFunction("oe_feature_splatting_fs", ShaderLoader::load("FeatureSplatting.frag", shaders),
+        ShaderComp::LOCATION_FRAGMENT_COLORING);
 
     // load up the PBR material:
     osg::ref_ptr<PBRTexture> tex = new PBRTexture();
@@ -238,6 +271,8 @@ FeatureSplattingLayer::buildStateSet()
         setStatus(load_status);
         return;
     }
+
+    ss->getOrCreateUniform("oe_feature_splatting_layoutAndFactors", osg::Uniform::FLOAT_VEC4)->set(tex->layoutAndFactors);
 
     tex->setWrap(osg::Texture::WRAP_S, osg::Texture::REPEAT);
     tex->setWrap(osg::Texture::WRAP_T, osg::Texture::REPEAT);
@@ -261,5 +296,11 @@ FeatureSplattingLayer::buildStateSet()
         ss->setTextureAttribute(_res_pbr.unit(), tex->pbr);
         ss->addUniform(new osg::Uniform("oe_pbr_tex", _res_pbr.unit()));
         ss->setDefine("OE_HAS_PBR_TEX");
+    }
+    if (tex->occlusion.valid())
+    {
+        ss->setTextureAttribute(_res_occlusion.unit(), tex->occlusion);
+        ss->addUniform(new osg::Uniform("oe_occlusion_tex", _res_occlusion.unit()));
+        ss->setDefine("OE_HAS_OCCLUSION_TEX");
     }
 }

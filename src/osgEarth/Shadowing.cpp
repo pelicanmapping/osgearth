@@ -123,6 +123,7 @@ struct ShadowCaster::Impl
             ss->setDefine("OE_SHADOWING",osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE);
             ss->getOrCreateUniform("oe_shadowToPrimaryMatrix",osg::Uniform::FLOAT_MAT4);
             ss->getOrCreateUniform("oe_primaryProjectionMatrix",osg::Uniform::FLOAT_MAT4);
+            ss->getOrCreateUniform("oe_primaryLODScale",osg::Uniform::FLOAT);
             ss->getOrCreateUniform("oe_primaryViewport",osg::Uniform::FLOAT_VEC2);
             f.cameras.push_back(camera);
         }
@@ -342,6 +343,7 @@ void ShadowCaster::traverse(osg::NodeVisitor& nv)
         auto state = pass->getOrCreateStateSet();
         state->getUniform("oe_shadowToPrimaryMatrix")->set(osg::Matrixd::inverse(fit.view)*(*cv->getModelViewMatrix()));
         state->getUniform("oe_primaryProjectionMatrix")->set(projection);
+        state->getUniform("oe_primaryLODScale")->set(cv->getLODScale());
         auto viewport = cv->getViewport();
         state->getUniform("oe_primaryViewport")->set(viewport ?
             osg::Vec2(viewport->width(),viewport->height()) : osg::Vec2(1,1));

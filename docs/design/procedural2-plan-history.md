@@ -523,7 +523,7 @@ Current 4B implementation checkpoint (September 27):
 Run after `osgearth_shell.bat`, from `tests`:
 
 ```bat
-osgearth_imgui procedural2-canopy-osm.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
+osgearth_imgui procedural2-canopy-osm.earth --prestige-sky --shadows --nvgl --samples 4
 ```
 
 Use the `4B - Forest approach`, `middle distance`, and `far distance` viewpoints, and the trees panel's
@@ -651,8 +651,8 @@ Run the example from the `tests` directory after building with `build.bat`:
 
 ```bat
 call ..\osgearth_shell.bat
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --shadows
-osgearth_imgui procedural2.earth --samples 4 --sky2 --shadows --nvgl
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --shadows
+osgearth_imgui procedural2.earth --samples 4 --prestige-sky --shadows --nvgl
 ```
 
 Mouse navigation uses EarthManipulator. In `osgearth_procedural2`, keys 1-5 toggle trees, shrubs, grass, undergrowth,
@@ -662,22 +662,22 @@ including its EGM96 vertical datum. It requires network access for uncached elev
 is required. Earlier visual checkpoints used a flat ellipsoid. Synthetic populations also cover oceans until source
 masks are implemented. The vegetation's 10m sampling request does not add detail beyond the source elevation data.
 The ImGui Viewpoints panel includes ground, overview, distant forest, New Zealand, the antimeridian, high latitude, and orbit.
-The demo uses the selected sky's normal lighting and shadow reception. Use `--sky2` for a lit preview and
+The demo uses the selected sky's normal lighting and shadow reception. Use `--prestige-sky` for a lit preview and
 `--shadows` for cast shadows. The former fixed diagnostic light has been removed; production materials and wind
 remain later work.
 
 Capture actual rendering without opening a viewer window:
 
 ```bat
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --view ground --capture procedural2-ground.png
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --view overview --capture procedural2-overview.png
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --disable-group grass --capture procedural2-no-grass.png
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --terrain-sse 256 --capture procedural2-coarse-terrain.png
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --view ground --capture procedural2-ground.png
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --view overview --capture procedural2-overview.png
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --disable-group grass --capture procedural2-no-grass.png
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --terrain-sse 256 --capture procedural2-coarse-terrain.png
 osgearth_procedural2 procedural2.earth --paging-tour --frames 400 --capture procedural2-global.png --samples 4
 osgearth_procedural2 procedural2.earth --location 179.9999 -17 --capture procedural2-global-antimeridian.png --samples 4
 osgearth_procedural2 procedural2.earth --view orbit --capture procedural2-global-orbit.png --samples 4
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --capture procedural2-lit-no-shadows.png
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --shadows --capture procedural2-lit-shadows.png
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --capture procedural2-lit-no-shadows.png
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --shadows --capture procedural2-lit-shadows.png
 osgearth_tests "[procedural2]"
 ```
 
@@ -685,7 +685,7 @@ The capture tool prints resident instance counts, unique drawables, and labeled 
 if no populations load at a ground view, or if populations remain at an orbital checkpoint. It permits extra paging
 time with `--frames` (per checkpoint for `--paging-tour`). Counts describe loaded populations, not
 GPU-visible instances. Optional `--frame-stats` reports OSG's recent-frame CPU cull/draw and GPU draw diagnostics,
-excluding the fixture's paging sleep. The fixture also accepts `--sky2 --shadows` through the standard example setup.
+excluding the fixture's paging sleep. The fixture also accepts `--prestige-sky --shadows` through the standard example setup.
 Explicit group toggles in the standalone example use scene masks. The ImGui Vegetation2 panel can now rebuild
 one population without reopening the layer or rebuilding the other groups.
 `--terrain-sse` changes terrain detail independently, for comparison with the same population and camera.
@@ -862,11 +862,11 @@ reduce the full source-instance buffers retained by loaded batches. Bounded resi
 Runnable visual checks, from `tests` after `call ..\osgearth_shell.bat`:
 
 ```bat
-osgearth_imgui procedural2.earth --samples 4 --sky2 --shadows --nvgl
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --shadows --lod-tour
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --shadows --lod-debug --capture procedural2-lod-debug.png
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --shadows --view distant --capture procedural2-lod-distant.png
-osgearth_procedural2 procedural2.earth --samples 4 --sky2 --shadows --lod-tour --lod-debug --capture procedural2-lod-tour.png --sequence ..\build\procedural2-lod-tour
+osgearth_imgui procedural2.earth --samples 4 --prestige-sky --shadows --nvgl
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --shadows --lod-tour
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --shadows --lod-debug --capture procedural2-lod-debug.png
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --shadows --view distant --capture procedural2-lod-distant.png
+osgearth_procedural2 procedural2.earth --samples 4 --prestige-sky --shadows --lod-tour --lod-debug --capture procedural2-lod-tour.png --sequence ..\build\procedural2-lod-tour
 osgearth_tests "[procedural2],[chonk]"
 ```
 
@@ -910,7 +910,7 @@ Step 2B controls, September 26, 2026:
 
   ```bat
   call ..\osgearth_shell.bat
-  osgearth_imgui procedural2.earth --sky2 --shadows --nvgl --vegetation2
+  osgearth_imgui procedural2.earth --prestige-sky --shadows --nvgl
   ```
 
 - Select a layer and population tab. Controls cover enabled state, density, source/render cell levels, maximum
@@ -954,7 +954,7 @@ Density-thinning correction, September 26, 2026:
   Sky2/shadows captures reproduce the original bands and show their removal, with identical resident populations:
 
   ```bat
-  osgearth_procedural2 procedural2.earth --sky2 --shadows --view top --disable-group trees --capture procedural2-thinning-after.png
+  osgearth_procedural2 procedural2.earth --prestige-sky --shadows --view top --disable-group trees --capture procedural2-thinning-after.png
   ```
 
 [Before](../../tests/procedural2-thinning-before.png) | [After](../../tests/procedural2-thinning-after.png)
@@ -992,11 +992,11 @@ Run from `tests` after building:
 
 ```bat
 call ..\osgearth_shell.bat
-osgearth_imgui procedural2-grass.earth --samples 4 --sky2 --shadows --nvgl --vegetation2
-osgearth_procedural2 procedural2-grass.earth --samples 4 --sky2 --shadows --lod-tour
-osgearth_procedural2 procedural2-grass.earth --samples 4 --sky2 --shadows --capture procedural2-grass-ground.png
-osgearth_procedural2 procedural2-grass.earth --samples 4 --sky2 --shadows --view top --capture procedural2-grass-top.png
-osgearth_procedural2 procedural2-grass.earth --samples 4 --sky2 --shadows --asset-grass --capture procedural2-grass-assets.png
+osgearth_imgui procedural2-grass.earth --samples 4 --prestige-sky --shadows --nvgl
+osgearth_procedural2 procedural2-grass.earth --samples 4 --prestige-sky --shadows --lod-tour
+osgearth_procedural2 procedural2-grass.earth --samples 4 --prestige-sky --shadows --capture procedural2-grass-ground.png
+osgearth_procedural2 procedural2-grass.earth --samples 4 --prestige-sky --shadows --view top --capture procedural2-grass-top.png
+osgearth_procedural2 procedural2-grass.earth --samples 4 --prestige-sky --shadows --asset-grass --capture procedural2-grass-assets.png
 osgearth_tests "[procedural2]"
 ```
 
@@ -1114,9 +1114,9 @@ Step 3 implementation -- original art and simple asset residency (September 26, 
 Run from `tests` after building and calling `osgearth_shell.bat`:
 
 ```bat
-osgearth_imgui procedural2-art.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
-osgearth_imgui procedural2-canopy.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
-osgearth_procedural2 procedural2-art.earth --sky2 --shadows --nvgl --samples 4 --view ground --capture procedural2-art-ground.png
+osgearth_imgui procedural2-art.earth --prestige-sky --shadows --nvgl --samples 4
+osgearth_imgui procedural2-canopy.earth --prestige-sky --shadows --nvgl --samples 4
+osgearth_procedural2 procedural2-art.earth --prestige-sky --shadows --nvgl --samples 4 --view ground --capture procedural2-art-ground.png
 ```
 
 Validation so far: `build.bat` install passed. The parallel vcpkg app-local copy step repeatedly hit a Windows
@@ -1137,7 +1137,7 @@ Visual and globe-tour validation passed, all runs with `--samples 4`:
   A 60-frame moving-camera recording exercises tree representation changes from 24m to 6km and back.
 - Live ImGui check: deselect conifer and Apply -> five bundles / 11.97 MiB; Reset to loaded and Apply -> six / 17.89 MiB.
   Tree placement stays anchored, all other populations remain, and the reload action works. The original model mix
-  is restored and `osgearth_imgui procedural2-art.earth --sky2 --shadows --nvgl --samples 4 --vegetation2` is left open.
+  is restored and `osgearth_imgui procedural2-art.earth --prestige-sky --shadows --nvgl --samples 4` is left open.
 - Capture sidecars preserve camera settings, asset residency and paging results. Actual rendered PNG frames are
   encoded to GIF without retouching; the authoring atlas is unlit albedo, not a substitute for runtime screenshots.
 
@@ -1280,7 +1280,7 @@ Run from the repository root:
 ```bat
 call osgearth_shell.bat
 cd tests
-osgearth_imgui procedural2-osm.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
+osgearth_imgui procedural2-osm.earth --prestige-sky --shadows --nvgl --samples 4
 ```
 
 Visual checkpoint: [combined OSM and row overview](../../tests/procedural2-osm-rows-overview.png).
@@ -1338,7 +1338,7 @@ failures or budget denials; source OSM boundaries and road gaps remain visible. 
   tree instances**. All tiers shared three asset bundles totaling 12,591,708 bytes within the 64MiB art budget.
   These are resident scene counts, including parent fallback/other views, not visible draw counts or timings.
 - Full Sky2/shadow near capture: `procedural2-canopy-osm-near.png`. It shows detailed trees alongside shared OSM
-  forest gaps. The interactive ImGui demo was launched with `--sky2 --shadows --nvgl --samples 4 --vegetation2`,
+  forest gaps. The interactive ImGui demo was launched with `--prestige-sky --shadows --nvgl --samples 4`,
   and its approach/far viewpoints and canopy controls were inspected.
 - Mountain inspection: `procedural2-canopy-osm-mountain.png` shows terrain-following coverage, but its run logged
   a terrain-normal texture handle warning (`Terrain normals:0/1/0`, zero-sized texture at startup). Treat this

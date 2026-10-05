@@ -1,6 +1,6 @@
 <!-- Prestige prototype layer. -->
 <map name="Prestige prototype">
-  <libraries>osgEarthProcedural2</libraries>
+  <libraries>osgEarthPrestige</libraries>
   <XYZImage name="Google Imagery" open="true">
     <url>
       <![CDATA[ https://www.google.com/maps/vt?lyrs=s@189&gl=cn&x={x}&y={y}&z={z} ]]>
@@ -10,7 +10,7 @@
     <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
     <vdatum>egm96</vdatum>
   </TMSElevation>
-  <Prestige name="Prestige" enabled="true">
+  <prestige:prestige name="Prestige" enabled="true">
     <url>D:/data/prestige/Prestige_ktx/models/prestige/</url>
     <profile>spherical-mercator</profile>
     <additive>false</additive>
@@ -28,8 +28,8 @@
     <subdivide>true</subdivide>
     <!-- Set this to true if Prestige numbers tiles from the bottom up. -->
     <invert_y>false</invert_y>
-  </Prestige>
-  <Grime name="Building weathering">
+  </prestige:prestige>
+  <prestige:grime name="Building weathering">
     <visible>true</visible>
     <opacity>0.5</opacity>
     <model>Prestige</model>
@@ -49,7 +49,7 @@
     <smooth_threshold>0.2</smooth_threshold>
     <smooth_feather>0.15</smooth_feather>
     <smooth_amount>0.15</smooth_amount>
-  </Grime>
+  </prestige:grime>
   <XYZFeatures name="data:osm">
     <url>https://readymap.org/readymap/mbtiles/osm/{z}/{x}/{-y}.pbf</url>
     <min_level>14</min_level>
@@ -59,7 +59,7 @@
     <fid_attribute>@id</fid_attribute>
     <attribution>OpenStreetMap contributors</attribution>
   </XYZFeatures>
-  <Vegetation2 name="OSM land-use populations">
+  <prestige:vegetation name="OSM land-use populations">
     <sources>
         <source name="osm">
             <features>data:osm</features>
@@ -233,7 +233,7 @@
         </models>
       </group>
     </groups>
-  </Vegetation2>
+  </prestige:vegetation>
   <viewpoints home="0">
     <viewpoint>
       <heading>-103.549</heading>

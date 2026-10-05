@@ -91,6 +91,22 @@ namespace osgEarth
 #endif
         }
 
+        //! Keeps the existing window/settings name while grouping the editor in the Prestige menu.
+        const char* menuLabel() const override { return "Assets"; }
+
+        //! The asset editor needs a map but can author assets before a Prestige layer is installed.
+        bool isAvailable(osg::RenderInfo& ri) const override { return findNode<MapNode>(ri) != nullptr; }
+
+        //! Moves the editor attachment away from a replaced map; draw attaches it to the current map when opened.
+        void update(osg::RenderInfo& ri) override
+        {
+            auto* map = findNode<MapNode>(ri);
+            if (_mapNode.get() == map) return;
+            osg::ref_ptr<MapNode> previous;
+            if (_root && _mapNode.lock(previous)) previous->removeChild(_root.get());
+            _mapNode = map;
+        }
+
         void load(const Config& conf) override
         {
             conf.get("LastFile", _pathInput);

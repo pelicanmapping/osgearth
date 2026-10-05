@@ -32,6 +32,18 @@ set(TARGET_SRC
     CloudLayer.cpp
     GrimeLayer.cpp
     PrestigeLayer.cpp
+    AggregateCoverage.cpp
+    Canopy.cpp
+    CanopyTransition.cpp
+    TreeCards.cpp
+    FeaturePlacement.cpp
+    Scatter.cpp
+    PlaceholderAssets.cpp
+    Grass.cpp
+    AssetLighting.cpp
+    AssetCatalog.cpp
+    VegetationLayer.cpp
+    FeatureOverlay.cpp
     ${SHADERS_CPP})
 
 set(TARGET_H
@@ -41,12 +53,20 @@ set(TARGET_H
     Export
     GrimeLayer
     PrestigeLayer
-    PrestigeShaders)
+    PrestigeShaders
+    AggregateCoverage
+    Canopy
+    FeaturePlacement
+    FeatureOverlay
+    Scatter
+    AssetCatalog
+    VegetationLayer)
 
 add_osgearth_library(
     TARGET ${LIB_NAME}
     SOURCES ${TARGET_SRC}
-    HEADERS CloudLayerRenderer.h
+    HEADERS CloudLayerRenderer.h PlacementLimits.h TreeCards.h PlaceholderAssets.h
+        Grass.h AssetLighting.h CanopyTransition.h OverlayPager.h
     PUBLIC_HEADERS ${TARGET_H}
     SHADERS ${TARGET_GLSL}
     TEMPLATES ${TARGET_IN}

@@ -1,14 +1,17 @@
-# Vegetation2 Master Plan
+# Prestige Vegetation Master Plan
 
-Updated October 2, 2026. **Current checkpoint: Steps 4A/4B cleanup complete. Simulation placement-query API remains Later.**
+Updated October 5, 2026. **Current checkpoint: Steps 4A/4B cleanup complete. Simulation placement-query API remains Later.**
 The earlier experiments and visual checkpoints are retained in [development history](procedural2-plan-history.md).
 This document describes the current direction; historical examples are not a configuration reference.
 
 ## Architecture and feature set
 
-`osgEarthProcedural2` is a separate optional NodeKit (`OSGEARTH_BUILD_PROCEDURAL2_NODEKIT`).
-`VegetationLayer2`, registered as `Vegetation2`, consumes placement policy and renders through Chonk and SimplePager.
+`osgEarthPrestige` contains the vegetation implementation (`OSGEARTH_BUILD_PRESTIGE_NODEKIT`).
+`osgEarthPrestige::VegetationLayer`, registered as `prestige:vegetation`, consumes placement policy and renders through Chonk and SimplePager.
 Vegetation source cells and render pages are independent of terrain tiles. The current rendering path requires NVGL.
+Include `<osgEarthPrestige/VegetationLayer>` and link `osgEarthPrestige` for direct C++ use.
+Earth files load `<libraries>osgEarthPrestige</libraries>` and configure `<prestige:vegetation>`.
+The demo executable remains `osgearth_procedural2`; assets and example filenames retain their existing paths.
 
 - Independent trees, shrubs, grass, undergrowth, and rocks populations with density, scale, assets, and range.
 - Deterministic natural scatter, explicit source points, and registered land-use placement strategies (rows/grids today).
@@ -30,7 +33,7 @@ Vegetation source cells and render pages are independent of terrain tiles. The c
 Pipeline: **named inputs -> attribute rules / coverage field -> placement strategy -> final elevation attachment -> rendering**.
 
 Editable features are another named `PlacementFeatureProvider`, implemented by `EditableFeatureProvider` over a
-standalone `FeatureOverlay` document. `VegetationLayer2` neither owns an edit document nor exposes an editing API.
+standalone `FeatureOverlay` document. `VegetationLayer` neither owns an edit document nor exposes an editing API.
 The reusable `FeatureOverlayGUI` demo edits a document directly and can be used by another application.
 `OverlayStorage` owns persistence; GeoJSON is the initial adapter, not the production storage contract.
 
@@ -147,10 +150,10 @@ From `tests`, after the optimized build:
 
 ```bat
 call ..\osgearth_shell.bat
-osgearth_imgui a.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
+osgearth_imgui a.earth --prestige-sky --shadows --nvgl --samples 4
 ```
 
-`--vegetation2` opens the tuning/demo panel. It does not enable an otherwise absent vegetation layer.
+Open **Prestige > Vegetation** for the tuning panel. It is available when a Prestige vegetation layer is present.
 All commands follow the repository build scripts; the current optimized configuration is RelWithDebInfo.
 
 
@@ -165,7 +168,7 @@ failures or budget denials. The main view contained individual, medium, and far 
 reported missing external GLB building files. Captures are local build outputs (`build/cleanup-coverage.png` and
 `build/cleanup-forest.png`); no new render artwork is required by the source changes.
 
-Test-source cleanup, October 2, 2026: at the user's request, dedicated Vegetation2 regression source files and
+Test-source cleanup, October 2, 2026: at the user's request, dedicated Prestige vegetation regression source files and
 their helper/build registration were removed. Test counts above describe validation performed before removal;
 the application/demo, asset tools, and shared engine tests remain available.
 
@@ -210,7 +213,7 @@ rejected zero by polygon exclusion, and accepted all 310. Those counts cover dif
 one-to-one comparison. The close-view paging reproduction reported zero resident vegetation and:
 
 ```text
-[Vegetation2 coverage] Resource unavailable: Coverage query exceeds 100,000 features
+[Prestige vegetation coverage] Resource unavailable: Coverage query exceeds 100,000 features
 ```
 
 The failure is the geographic provider's retained-feature query safeguard, BEFORE accepted-placement limits.
@@ -244,11 +247,11 @@ implemented API. The primary consumer is a simulation backend performing collisi
 
 Use a public external `PlacementGenerator`, shared by detailed vegetation rendering and simulation queries.
 Keep `ScatterSource` responsible for source-space placement. Extract final asset selection, elevation attachment,
-and placement resolution from Vegetation2's rendering implementation into the generator. Detailed rendering
+and placement resolution from Prestige vegetation's rendering implementation into the generator. Detailed rendering
 consumes these same resolved records before building Chonk/GPU resources; do not duplicate placement logic.
 
 The backend can construct the generator from the placement configuration, geographic sources, and map elevation
-services without creating a VegetationLayer2, viewer, camera, or graphics context. The layer may expose its
+services without creating a VegetationLayer, viewer, camera, or graphics context. The layer may expose its
 configured generator as a convenience, but layer membership is not required by the query API.
 
 Initial contract:

@@ -24,7 +24,7 @@ namespace osgEarthPrestige
         {
             bool enabled = true;
             Quality quality = BALANCED;
-            float coverage = 0.55f;
+            float coverage = 0.35f;
             float density = 1.0f;
             float baseAltitude = 1500.0f;
             float topAltitude = 4500.0f;

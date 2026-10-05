@@ -64,6 +64,7 @@ layout(location = 7) in uint color_is_linear;
 #define NT_ZAXIS 1
 #define NT_HEMISPHERE 2 
 #define NT_BAKED 4
+#define NT_BAKED_VOLUME 5
 
 // stage global
 mat3 xform3;
@@ -185,6 +186,7 @@ flat in uint oe_color_is_linear;
 #define NT_ZAXIS 1
 #define NT_HEMISPHERE 2 
 #define NT_BAKED 4
+#define NT_BAKED_VOLUME 5
 
 const float oe_normal_attenuation = 0.65;
 
@@ -241,14 +243,15 @@ void oe_chonk_default_fragment(inout vec4 color)
     coverage = clamp(oe_chonk_coverage.y - oe_chonk_coverage.x, 0.0, 1.0);
     #endif
     // Baked cards carry independent front/back captures, including normals and cutout silhouettes.
-    if (oe_normal_technique == NT_BAKED && !gl_FrontFacing)
+    bool bakedNormals = oe_normal_technique == NT_BAKED || oe_normal_technique == NT_BAKED_VOLUME;
+    if (bakedNormals && !gl_FrontFacing)
         oe_tex_uv.t -= 0.5;
 
     #if defined(OE_CHONK_BAKED_CROWN) && !defined(OE_IS_SHADOW_CAMERA)
     mat3 crownFrame;
     vec3 crownView;
     float crownCoverage = 1.0;
-    if (oe_normal_technique == NT_BAKED)
+    if (bakedNormals)
     {
         // Derive the planar frame in view space even in depth-only programs without a normal-transform stage.
         vec3 cardNormal = normalize(cross(dFdx(oe_position_view), dFdy(oe_position_view))) *
@@ -260,6 +263,7 @@ void oe_chonk_default_fragment(inout vec4 color)
         // Keep the best-facing card at full coverage, suppressing edge-on slices through its crown.
         // Relative rather than absolute facing avoids holes between the horizontal and upright views.
         vec3 facing = abs(transpose(crownFrame) * crownView);
+        // Card visibility depends on its geometric frame, independently of the baked lighting normals.
         crownCoverage = smoothstep(0.45, 0.95, facing.z / max(max(facing.x, facing.y), facing.z));
     }
     #endif
@@ -325,7 +329,7 @@ void oe_chonk_default_fragment(inout vec4 color)
 #else // normal rendering path:
 
     #ifdef OE_CHONK_BAKED_CROWN
-    if (oe_normal_technique == NT_BAKED)
+    if (bakedNormals)
     {
         // Apply after mip compensation so distance cannot bring an edge-on card back into view.
         color.a = clamp(color.a, 0.0, 1.0) * crownCoverage;
@@ -409,12 +413,12 @@ void oe_chonk_default_fragment(inout vec4 color)
 
     mat3 TBN;
     #ifdef OE_CHONK_BAKED_CROWN
-    if (oe_normal_technique == NT_BAKED) TBN = crownFrame;
+    if (bakedNormals) TBN = crownFrame;
     else
     #endif
         TBN = make_tbn(normalize(normal_view), oe_position_view, oe_tex_uv);
 
-    if (oe_normal_technique == NT_BAKED)
+    if (bakedNormals)
     {
         // Bake coordinates are an orthonormal card frame, independent of atlas aspect or instance scale.
         // Derivative cotangents reverse on a back face; the stored frame and its normal must not.

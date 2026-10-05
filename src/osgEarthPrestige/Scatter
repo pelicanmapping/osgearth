@@ -1,0 +1,158 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarthPrestige/Export>
+#include <osgEarth/Config>
+#include <osgEarth/TileKey>
+#include <osgEarth/Progress>
+#include <osgEarth/Status>
+#include <cstdint>
+#include <memory>
+
+namespace osgEarthPrestige
+{
+    using namespace osgEarth;
+    class PlacementField;
+
+    //! Independent population policy. Configure before opening the owning layer.
+    struct OSGEARTHPRESTIGE_EXPORT ScatterGroup
+    {
+        std::string name = "trees";
+        std::string asset = "trees";
+        std::vector<std::string> models; // equal-weight catalog choices; empty retains the original built-in asset
+        bool enabled = true;
+        double density = 1200.0; // instances per square kilometer
+        float rowDensity = 1.0f; // retained structured slots; row spacing is independent of natural density
+        float rowSpacingScale = 1.0f, plantSpacingScale = 1.0f; // multipliers on feature/rule row layout
+        float maxRange = 3000.0f; // meters
+        unsigned cellLevel = 16u; // relative to the profile; defaults assume global-geodetic
+        unsigned renderCellLevel = 14u; // coarser paging/render batches; does not change source identity
+        unsigned maxPerCell = 65536u; // deterministic cap on accepted placements, after filtering
+        unsigned maxPerBatch = 262144u; // accepted placements across the render request
+        unsigned maxCandidatesPerCell = 2000000u; // separate pre-filter work/allocation safeguard
+        unsigned maxWorkPerRequest = 16000000u; // cumulative candidate generation/processing across a page
+        float placementRetention = 1.0f; // request-only filter; renderer supplies tier retention, never serialized
+        float minScale = 0.75f;
+        float maxScale = 1.25f;
+        float lodPixels = 32.0f; // threshold at an effective 25px budget; zero disables the coarse representation
+        float minPixels = 0.75f; // non-tree pixel floor; tree populations retain their final LOD to maxRange
+        float lodTransition = 0.15f; // relative screen-size overlap for representation changes
+        float densityStart = 0.0f; // non-tree distance thinning only; retired for tree populations
+        float densityEnd = 0.0f;
+        float farDensity = 1.0f; // retained fraction of the original population beyond densityEnd
+        bool canopy = false; // master switch: aggregate forest before detailed pages
+        std::string canopyMidStrategy = "exact"; // exact tree clusters or representative coverage cards
+        std::string canopyFarStrategy = "coverage"; // exact tree clusters or reusable coverage stands
+        float canopyMidRetention = 0.9f; // retained fraction of the full medium population, before clamping/packing
+        float canopyFarRetention = 0.5f; // independent far fraction; never multiplied by the medium fraction
+        bool canopyFar = true; // include the far tier; false retains only the medium tier
+        bool canopyMidGPUCulling = true; // false draws all medium instances in each CPU-visible page
+        bool canopyFarGPUCulling = true; // independent far-tier switch; instancing and page fades remain enabled
+        unsigned canopyMidClusterSize = 32u; // maximum individual tree cards per medium culling group
+        unsigned canopyFarClusterSize = 64u; // larger far groups reduce culling work without resizing trees
+        float qualityOffset = 128.0f; // pixels added to global SSE; zero inherits global, effective error is at least 1px
+        float canopyTransition = 0.25f; // fractional screen-error overlap; zero disables the distance blend
+        float canopyFadeSeconds = 0.4f; // minimum handover time for newly merged pages; zero disables arrival fading
+        bool proceduralGrass = false; // optional grass-only experiment; density counts patches when enabled
+        unsigned grassBlades = 64u; // blades per near patch; coarse uses ceil(count/4)
+        float grassRadius = 1.5f; // unscaled patch radius, meters
+        float grassHeight = 0.65f; // mean blade height, meters
+        float grassWidth = 0.025f; // mean blade half-width, meters
+        float grassWind = 0.15f; // bounded procedural tip displacement, meters; zero freezes wind
+
+        //! Constructs the default tree population; no assets or GL resources are allocated.
+        ScatterGroup() = default;
+        //! Reads one group; missing fields retain the defaults above.
+        explicit ScatterGroup(const Config&);
+        //! Whether any enabled aggregate tier requires a geographic coverage source.
+        bool usesCoverage() const
+        { return canopy && (canopyMidStrategy == "coverage" || (canopyFar && canopyFarStrategy == "coverage")); }
+        //! Combines finite global SSE and this population offset into one pixel budget, clamped to at least 1px.
+        float effectiveError(float globalSSE) const;
+        //! Serializes all population settings for reproducible scenes.
+        Config getConfig() const;
+        //! Rejects invalid ranges, densities, names, and unsafe cell/request limits.
+        Status validate() const;
+    };
+
+    //! One source-space placement, prior to elevation sampling and rendering.
+    struct OSGEARTHPRESTIGE_EXPORT ScatterPlacement
+    {
+        std::uint64_t id = 0;
+        osg::Vec3d point;
+        float scale = 1.0f;
+        float rotation = 0.0f; // radians about local up
+
+        //! Stable rank in [0,1) for density LOD; independent of request order, batching, and camera motion.
+        float densityRank() const;
+        //! Returns an exactly float-representable 24-bit seed independent of density rank and placement coordinates.
+        unsigned variationSeed() const;
+        //! Selects a catalog choice independently of position, thinning, and procedural blade variation.
+        unsigned modelIndex(unsigned count) const;
+    };
+
+    //! Compacts a stable ID-ranked subset in place, retaining order/transforms. Fraction is 0..1; 1 is identity.
+    //! Uses an independent hash from coverage/species selection. Invalid input or cancellation clears the vector.
+    OSGEARTHPRESTIGE_EXPORT Status retainAggregatePlacements(float fraction, std::vector<ScatterPlacement>&,
+        ProgressCallback* = nullptr);
+
+    //! Stateless or internally synchronized sources can serve multiple paging workers.
+    class OSGEARTHPRESTIGE_EXPORT ScatterSource
+    {
+    public:
+        //! Releases a source through its shared interface.
+        virtual ~ScatterSource() = default;
+        //! Source revision independent of rendering; immutable generators retain zero.
+        virtual std::uint64_t revision() const { return 0; }
+        //! Captures request-safe mutable source state; null means the source is already immutable.
+        virtual std::shared_ptr<const ScatterSource> snapshot() const { return {}; }
+        //! Reports changed regions against a previous snapshot; unknown changes invalidate the world.
+        virtual void changesSince(const ScatterSource*, std::vector<GeoExtent>& output) const
+        { output.emplace_back(SpatialReference::get("wgs84"), -180.0, -90.0, 180.0, 90.0); }
+        //! Replaces output on success with finite points in key's SRS, positive scales, and finite rotations.
+        //! Sources own cell boundaries and obey maxPerCell; errors/cancellation leave output empty.
+        //! Implementations must preserve IDs and positions across request order and reloads.
+        virtual Status generate(const TileKey& key, const ScatterGroup& group, unsigned seed,
+            std::vector<ScatterPlacement>& output, ProgressCallback* progress = nullptr) const = 0;
+        //! Whether this source supplies coverage independently of enumerating detailed placements.
+        virtual bool supportsCoverage() const { return false; }
+        //! Queries an immutable worker-owned field at any bounded page level; failure clears output.
+        virtual Status queryField(const TileKey&, const ScatterGroup&, unsigned,
+            std::shared_ptr<const PlacementField>& output, ProgressCallback* = nullptr) const
+        {
+            output.reset();
+            return Status(Status::ConfigurationError, "Source does not supply aggregate coverage");
+        }
+        //! Queries coverage with a meter halo for proxy footprints crossing page edges. Sources must explicitly support
+        //! nonzero halos; the default rejects them instead of silently accepting incomplete exclusion data.
+        virtual Status queryFieldBuffered(const TileKey& key, const ScatterGroup& group, unsigned seed, double buffer,
+            std::shared_ptr<const PlacementField>& output, ProgressCallback* progress = nullptr) const
+        {
+            if (buffer == 0.0) return queryField(key,group,seed,output,progress);
+            output.reset();
+            return Status(Status::ConfigurationError, "Source does not supply buffered aggregate coverage");
+        }
+        //! Aggregates original source cells inside one render-cell key without changing placement identity.
+        //! Worker-safe under the same contract as generate; errors/cancellation leave output empty.
+        //! Enforces both source-cell and aggregate limits, and checks cancellation between source requests.
+        virtual Status generateBatch(const TileKey& key, const ScatterGroup& group, unsigned seed,
+            std::vector<ScatterPlacement>& output, ProgressCallback* progress = nullptr) const;
+    };
+
+    //! Synthetic coverage for the first milestone. No files, GL calls, or mutable random state.
+    class OSGEARTHPRESTIGE_EXPORT UniformScatterSource : public ScatterSource
+    {
+    public:
+        //! Generates unfiltered candidates within maxCandidatesPerCell; no accepted-placement cap or retention.
+        //! Failure/cancellation clears output. Used by coverage/placement strategies before applying their masks.
+        Status generateCandidates(const TileKey&, const ScatterGroup&, unsigned seed,
+            std::vector<ScatterPlacement>&, ProgressCallback* progress = nullptr) const;
+        //! Uses a stable indexed sequence, so increasing density retains existing placements.
+        //! Cell levels/profile define population identity; changing either regenerates the population.
+        Status generate(const TileKey&, const ScatterGroup&, unsigned seed,
+            std::vector<ScatterPlacement>&, ProgressCallback* progress = nullptr) const override;
+    };
+}

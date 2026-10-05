@@ -1,9 +1,9 @@
 <!-- Synthetic land use: enlarged shrub and fern proxies make layout patterns visible. -->
 <map name="Procedural2 - pluggable land-use layouts">
-    <libraries>osgEarthProcedural2</libraries>
-    <sky2>
+    <libraries>osgEarthPrestige</libraries>
+    <prestige:sky>
         <hours>17.0</hours>
-    </sky2>
+    </prestige:sky>
     <options>
         <lighting>true</lighting>
         <terrain>
@@ -20,7 +20,7 @@
         <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
         <vdatum>egm96</vdatum>
     </TMSElevation>
-    <Vegetation2 name="Structured land use and natural cover">
+    <prestige:vegetation name="Structured land use and natural cover">
         <sources>
             <source name="fields">
                 <features>data:fields</features>
@@ -74,7 +74,7 @@
                 </models>
             </group>
         </groups>
-    </Vegetation2>
+    </prestige:vegetation>
     <viewpoints home="0" time="0" map_keys="false">
         <viewpoint name="Land-use layouts" lat="40.6501" long="-75" height="160" heading="-20" pitch="-65" range="850" />
         <viewpoint name="Vineyard rows" lat="40.6508" long="-74.9983" height="160" heading="-20" pitch="-25" range="180" />

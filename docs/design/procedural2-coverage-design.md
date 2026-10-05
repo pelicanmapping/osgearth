@@ -107,8 +107,8 @@ that population's queries; spatially scoped revisions and application-owned area
 Run from tests after building and calling osgearth_shell.bat:
 
 ```bat
-osgearth_imgui procedural2-osm.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
-osgearth_imgui procedural2-coverage.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
+osgearth_imgui procedural2-osm.earth --prestige-sky --shadows --nvgl --samples 4
+osgearth_imgui procedural2-coverage.earth --prestige-sky --shadows --nvgl --samples 4
 osgearth_tests "[procedural2]"
 osgearth_tests "[procedural2-osm]"
 ```
@@ -197,7 +197,7 @@ Run the synthetic multi-source demonstration:
 ```bat
 call osgearth_shell.bat
 cd tests
-osgearth_imgui procedural2-rows.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
+osgearth_imgui procedural2-rows.earth --prestige-sky --shadows --nvgl --samples 4
 ```
 
 The main `procedural2-osm.earth` demo now uses the live OSM source for agricultural parcels as well as woodland and explicit
@@ -210,7 +210,7 @@ exclusion source is loaded by this main demo. The original synthetic fixture rem
 ```bat
 call osgearth_shell.bat
 cd tests
-osgearth_imgui procedural2-osm.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
+osgearth_imgui procedural2-osm.earth --prestige-sky --shadows --nvgl --samples 4
 ```
 
 Structured checkpoint validation: all 28 Procedural2 cases passed (214,160 assertions), including row continuity,

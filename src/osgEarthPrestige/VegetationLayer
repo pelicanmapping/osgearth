@@ -1,0 +1,127 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarthPrestige/Scatter>
+#include <osgEarthPrestige/AssetCatalog>
+#include <osgEarthPrestige/FeaturePlacement>
+#include <osgEarthPrestige/AggregateCoverage>
+#include <osgEarth/VisibleLayer>
+#include <osgEarth/Profile>
+#include <osgEarth/SimplePager>
+#include <osg/Group>
+#include <memory>
+#include <atomic>
+
+namespace osgEarthPrestige
+{
+    using namespace osgEarth;
+    //! Session-only visualization; changes color without changing placement, visibility or saved configuration.
+    enum class ClusterDebugMode { OFF = 0, TIERS = 1, CLUSTERS = 2 };
+
+    //! Loaded scene counts for one population; cached parent/child pages can coexist, so these are not GPU-visible counts.
+    struct AggregateResidency
+    {
+        std::size_t midClumps = 0, farClumps = 0;
+        std::size_t midPieces = 0, farPieces = 0; // tree or stand proxies; includes retained parent/child pages
+    };
+
+    //! Independently paged populations with shared Chonk models, independent of terrain tiles.
+    //! Configure options/source before opening; use setGroup for live edits on the update thread.
+    class OSGEARTHPRESTIGE_EXPORT VegetationLayer : public VisibleLayer
+    {
+    public:
+        class OSGEARTHPRESTIGE_EXPORT Options : public VisibleLayer::Options
+        {
+        public:
+            META_LayerOptions(osgEarthPrestige, Options, VisibleLayer::Options);
+            OE_OPTION(ProfileOptions, profile);
+            OE_OPTION(unsigned, seed, 1u);
+            OE_OPTION(int, renderBinNumber, 3); // parent bin; choose a distinct value for each Prestige vegetation layer
+            OE_OPTION(Distance, elevationResolution, Distance(10.0, Units::METERS));
+            OE_PROPERTY(std::vector<ScatterGroup>, groups, {});
+            OE_PROPERTY(std::vector<ScatterAsset>, assets, {});
+            OE_PROPERTY(std::vector<FeatureInput>, sources, {});
+            OE_PROPERTY(std::vector<CoverageRule>, coverage, {});
+            OE_OPTION(unsigned, assetBudgetMB, 128u); // canonical mesh and image content, not total GPU memory
+
+            //! Serializes the bounded coverage profile, seed, and independent population policies.
+            Config getConfig() const override;
+        private:
+            //! Reads settings and supplies all five placeholder groups when groups are omitted.
+            void fromConfig(const Config&);
+        };
+
+        META_Layer(osgEarthPrestige, VegetationLayer, Options, VisibleLayer, prestige:vegetation);
+
+        //! Installs a worker-safe source before open; returns false if already open or source is null.
+        bool setSource(std::shared_ptr<const ScatterSource> source);
+        //! Registers/replaces a region algorithm before open. Names are selected by coverage rules, not source adapters.
+        //! The layer retains a worker-safe shared instance; null, empty, and reserved 'scatter' names are rejected.
+        bool registerPlacementStrategy(const std::string& name, std::shared_ptr<const RegionPlacementStrategy>);
+        //! Replaces the experimental coverage algorithm before open. The layer shares it with paging workers;
+        //! implementations must be immutable or synchronized. Exact mode never invokes this strategy.
+        bool setAggregateCoverageStrategy(std::shared_ptr<const AggregateCoverageStrategy>);
+        //! Updates a named population on the update thread. Quality-only edits retain its pages/assets; other edits
+        //! rebuild only its pager when attached.
+        //! Invalid policies leave options and scene unchanged. Disabled/zero-density groups release their pager.
+        //! Detached/closed layers retain the new policy for their next attachment; names cannot be added here.
+        Status setGroup(const ScatterGroup& group);
+        //! Updates live debug coloring on the update thread; tier bits are 1=medium, 2=far. Invalid modes become OFF.
+        //! Applies to existing/future pages without rebuilding them; not serialized in earth configuration.
+        void setClusterDebug(ClusterDebugMode mode, unsigned tiers = 3u);
+        //! Thread-safe snapshots for UI state; OFF by default, retained while this layer detaches/reopens.
+        ClusterDebugMode getClusterDebugMode() const;
+        //! Returns the selected medium/far bit mask; safe on GUI threads.
+        unsigned getClusterDebugTiers() const;
+        //! Returns model residency without waiting for worker I/O; call from the scene/update or GUI thread.
+        AssetResidency getAssetResidency() const;
+        //! Scans merged scene pages for the named population; update-thread only, no I/O or GPU readback.
+        //! Disabled, detached, or unknown populations return zero counts; unmerged worker results are excluded.
+        AggregateResidency getAggregateResidency(const std::string& population) const;
+
+    public:
+        //! Returns the stable scene root, including independently controlled group pagers.
+        osg::Node* getNode() const override;
+        //! Creates group pagers using a snapshot of configuration and shared asset residency.
+        void addedToMap(const Map*) override;
+        //! Cancels paging and detaches populations; in-flight jobs retain their own resource snapshot.
+        void removedFromMap(const Map*) override;
+        //! Checks the current Chonk rendering requirements before publishing the layer to a terrain engine.
+        void prepareForRendering(TerrainEngine*) override;
+
+    protected:
+        //! Constructs the stable root and default synthetic source without loading geometry.
+        void init() override;
+        //! Validates the explicit coverage profile and group settings; performs no GL operations.
+        Status openImplementation() override;
+        //! Cancels outstanding paging and releases the layer's ownership of its runtime.
+        Status closeImplementation() override;
+        //! Releases the layer after paging owners have detached.
+        ~VegetationLayer() override;
+
+    private:
+        //! Stops all group pagers before detaching the old graph. Update-thread only.
+        void clear();
+        //! Builds an unloaded pager with its own immutable runtime; disabled/zero-density groups return null.
+        osg::ref_ptr<osgEarth::Util::SimplePager> createPager(const ScatterGroup& group, unsigned index);
+        osg::ref_ptr<osg::Group> _root;
+        osg::ref_ptr<osg::Group> _content;
+        osg::observer_ptr<const Map> _map;
+        // Indexed like options().groups(); inactive populations retain a null slot and a stable render bin.
+        std::vector<osg::ref_ptr<osgEarth::Util::SimplePager>> _pagers;
+        osg::ref_ptr<const Profile> _profile;
+        std::shared_ptr<const ScatterSource> _source;
+        bool _customSource = false;
+        PlacementStrategies _strategies;
+        std::shared_ptr<const AggregateCoverageStrategy> _aggregateStrategy;
+        std::shared_ptr<AssetCatalog> _assets;
+        //! Responds to generic source revisions on update; no document editing or overlay ownership.
+        void updateSource();
+        std::shared_ptr<const ScatterSource> _sourceSnapshot;
+        std::uint64_t _sourceRevision = 0;
+        std::atomic<unsigned> _clusterDebug{12u}; // low two bits are mode, upper two select medium/far
+    };
+}

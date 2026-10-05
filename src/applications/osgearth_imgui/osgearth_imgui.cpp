@@ -25,13 +25,14 @@
 #include <osgEarthImGui/RenderingGUI>
 #include <osgEarthImGui/AnnotationsGUI>
 #include <osgEarthImGui/PickerGUI>
-#include <osgEarthImGui/PrestigeAssetsGUI>
 #include <osgEarthImGui/OpenEarthFileGUI>
 #include <osgEarthImGui/ResourceLibraryGUI>
 #include <osgEarthImGui/DecalsGUI>
 
-#ifdef OSGEARTH_HAVE_PROCEDURAL2_NODEKIT
-#include <osgEarthImGui/VegetationLayer2GUI>
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+#include <osgEarthImGui/PrestigeVegetationLayerGUI>
+#include <osgEarthImGui/PrestigeGrimeLayerGUI>
+#include <osgEarthImGui/PrestigeAssetsGUI>
 #endif
 
 #ifdef OSGEARTH_HAVE_GEOCODER
@@ -109,14 +110,13 @@ main(int argc, char** argv)
         ui->add("Tools", new CameraGUI());
         ui->add("Tools", new ContentBrowserGUI());
         ui->add("Tools", new DecalsGUI());
-        ui->add("Tools", new EnvironmentGUI());
+        ui->add("Tools", new EnvironmentGUI("Sky", false, true));
         ui->add("Tools", new ExternalAssetsGUI());
         ui->add("Tools", new NetworkMonitorGUI());
         ui->add("Tools", new NVGLInspectorGUI());
         ui->add("Tools", new AnnotationsGUI());
         ui->add("Tools", new LayersGUI());
         ui->add("Tools", new PickerGUI());
-        ui->add("Tools", new PrestigeAssetsGUI());
         ui->add("Tools", new RenderingGUI());
         ui->add("Tools", new ResourceLibraryGUI());
         ui->add("Tools", new SceneGraphGUI());
@@ -130,8 +130,11 @@ main(int argc, char** argv)
         ui->add("Tools", new ViewpointsGUI());
         ui->add("Tools", new LiveCamerasGUI());
 
-#ifdef OSGEARTH_HAVE_PROCEDURAL2_NODEKIT
-        ui->add("Procedural", new osgEarth::Procedural2::VegetationLayer2GUI(), arguments.read("--vegetation2"));
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+        ui->add("Prestige", new osgEarthPrestige::VegetationLayerGUI());
+        ui->add("Prestige", new EnvironmentGUI("Sky & Clouds", true));
+        ui->add("Prestige", new osgEarthPrestige::GrimeLayerGUI());
+        ui->add("Prestige", new PrestigeAssetsGUI());
 #endif
 
 #ifdef OSGEARTH_HAVE_CESIUM_NODEKIT

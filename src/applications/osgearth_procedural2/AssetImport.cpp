@@ -6,7 +6,7 @@
 #include <osgEarth/Chonk>
 #include <osgEarth/Registry>
 #include <osgEarth/JsonUtils>
-#include <osgEarthProcedural2/AssetCatalog>
+#include <osgEarthPrestige/AssetCatalog>
 #include <osgDB/ReadFile>
 #include <osgDB/WriteFile>
 #include <osg/ComputeBoundsVisitor>
@@ -104,8 +104,8 @@ int importVegetationAsset(osg::ArgumentParser& args)
         asset.set("near", input);
         asset.set("coarse", coarse);
         if (!canopy.empty()) asset.set("canopy", canopy);
-        Procedural2::AssetCatalog catalog({Procedural2::ScatterAsset(asset)}, 256u * 1024u * 1024u);
-        Procedural2::ScatterGroup group;
+        osgEarthPrestige::AssetCatalog catalog({osgEarthPrestige::ScatterAsset(asset)}, 256u * 1024u * 1024u);
+        osgEarthPrestige::ScatterGroup group;
         group.models = {"import-check"};
         auto individual = catalog.acquire(group, "import-check");
         auto aggregate = catalog.acquireStand(group, "import-check");

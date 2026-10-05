@@ -1,0 +1,49 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarthPrestige/FeaturePlacement>
+
+namespace osgEarthPrestige
+{
+    using namespace osgEarth;
+    //! Renderer-supplied physical art dimensions; coverage generation never reads models or creates GL objects.
+    struct AggregateArt
+    {
+        double radius = 1.0; // conservative horizontal footprint radius in meters, including off-center geometry
+        double trees = 1.0; // equivalent single-tree footprint coverage, not the number tightly packed into the bake
+    };
+
+    //! Estimates density weight from physical crown footprint areas, capped by the authored tree count.
+    //! Invalid/degenerate art falls back to one equivalent tree; this is not an alpha-coverage measurement.
+    OSGEARTHPRESTIGE_EXPORT double standCoverageWeight(double treeArea, double standArea, unsigned authoredTrees);
+
+    //! Worker-owned coarse placement. Stand proxies and boundary/single-tree proxies have separate shared catalogs.
+    struct AggregateCoverageResult
+    {
+        std::vector<ScatterPlacement> trees, stands;
+    };
+
+    //! Replaceable coarse-placement algorithm, independent of feature formats, elevation, and rendering.
+    class OSGEARTHPRESTIGE_EXPORT AggregateCoverageStrategy
+    {
+    public:
+        //! Releases a strategy through its interface; shared implementations must be worker-safe.
+        virtual ~AggregateCoverageStrategy() = default;
+        //! Emits bounded, deterministic page-owned roots from a field with an art-radius halo. Failure clears output.
+        //! Models correspond to the population's model order; far selects multi-tree stand art.
+        virtual Status generate(const TileKey&, const ScatterGroup&, unsigned seed, const PlacementField&,
+            const std::vector<AggregateArt>&, bool far, AggregateCoverageResult&, ProgressCallback* = nullptr) const = 0;
+    };
+
+    //! Samples geographic coverage directly. No detailed-source enumeration or persistent location-specific art.
+    class OSGEARTHPRESTIGE_EXPORT SampledAggregateCoverage : public AggregateCoverageStrategy
+    {
+    public:
+        //! Medium emits representative tree roots; far emits authored stands inside certified uniform coverage,
+        //! substituting smaller tree cards near mixed boundaries. Explicit source points remain individual cards.
+        Status generate(const TileKey&, const ScatterGroup&, unsigned, const PlacementField&,
+            const std::vector<AggregateArt>&, bool, AggregateCoverageResult&, ProgressCallback* = nullptr) const override;
+    };
+}

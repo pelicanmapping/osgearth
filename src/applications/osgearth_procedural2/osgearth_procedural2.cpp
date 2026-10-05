@@ -2,7 +2,7 @@
  * Copyright 2026 Pelican Mapping
  * MIT License
  */
-#include <osgEarthProcedural2/VegetationLayer2>
+#include <osgEarthPrestige/VegetationLayer>
 #include "AssetImport.h"
 #include <osgEarth/MapNode>
 #include <osgEarth/EarthManipulator>
@@ -31,7 +31,7 @@
 #include <fstream>
 
 using namespace osgEarth;
-using namespace osgEarth::Procedural2;
+using namespace osgEarthPrestige;
 
 namespace
 {
@@ -116,8 +116,8 @@ namespace
         //! Rewrites the legend to reflect which populations are currently traversed.
         void refresh()
         {
-            std::string caption = grass ? "OSGEARTH PROCEDURAL2  /  OPTIONAL GRASS EXPERIMENT\n" :
-                "OSGEARTH PROCEDURAL2  /  LANDSCAPE DEMO\n";
+            std::string caption = grass ? "OSGEARTH PRESTIGE  /  OPTIONAL GRASS EXPERIMENT\n" :
+                "OSGEARTH PRESTIGE  /  LANDSCAPE DEMO\n";
             caption += "[T] Camera tour  |  [L] LOD colors: cyan = detailed, orange = coarse\n";
             caption += grass ? (assetComparison ? "Asset grass at the same patch centers  |  Procedural mode OFF\n" :
                 "GPU-generated blades  |  CPU patch elevation/slope  |  Demonstration wind\n") :
@@ -258,7 +258,7 @@ int main(int argc, char** argv)
             << "  [--lod-tour] [--lod-debug] [--full-detail] [--full-density] [--sequence output-directory]\n"
             << "  [--cluster-debug off|tiers|clusters]  Color medium/far culling groups without changing visibility.\n"
             << "  [--asset-grass]  Replace experimental grass patches with asset clumps at the same centers.\n"
-            << "  [--sky2 --shadows] [--frame-stats]   Frame stats use OSG's viewer diagnostics.\n"
+            << "  [--prestige-sky --shadows] [--frame-stats]   Frame stats use OSG's viewer diagnostics.\n"
             << "  Keys 1-5 toggle populations; L toggles LOD colors; T toggles the camera tour.\n";
         return 0;
     }
@@ -272,10 +272,10 @@ int main(int argc, char** argv)
         return 1;
     }
     if (overrideSSE) mapNode->setScreenSpaceError(terrainSSE);
-    auto* layer = mapNode->getMap()->getLayer<VegetationLayer2>();
+    auto* layer = mapNode->getMap()->getLayer<VegetationLayer>();
     if (!layer || layer->getStatus().isError())
     {
-        std::cerr << "Vegetation2 did not open: " << (layer ? layer->getStatus().toString() : "missing layer") << '\n';
+        std::cerr << "Prestige vegetation did not open: " << (layer ? layer->getStatus().toString() : "missing layer") << '\n';
         return 1;
     }
     layer->setClusterDebug(clusterDebug == "clusters" ? ClusterDebugMode::CLUSTERS :
@@ -297,7 +297,7 @@ int main(int argc, char** argv)
     if (view != "orbit") focus = groundedFocus(mapNode->getMap(), focus);
     std::cout << "Demo focal elevation: " << focus.z() << " m in map SRS\n";
     Viewpoint viewpoint;
-    viewpoint.setName(grassExperiment ? "Optional grass experiment" : "Procedural2 landscape");
+    viewpoint.setName(grassExperiment ? "Optional grass experiment" : "Prestige landscape");
     viewpoint.setFocalPoint(focus);
     viewpoint.setHeading(Angle(-20, Units::DEGREES));
     viewpoint.setPitch(Angle(view == "orbit" || view == "top" ? -90 : view == "ground" ?
@@ -380,7 +380,7 @@ int main(int argc, char** argv)
     auto clip = new osgEarth::Util::AutoClipPlaneCullCallback(mapNode);
     clip->setMinNearFarRatio(0.000001);
     viewer.getCamera()->addCullCallback(clip);
-    if (args.find("--sky2") >= 0 || args.find("--shadows") >= 0)
+    if (args.find("--prestige-sky") >= 0 || args.find("--shadows") >= 0)
         osgEarth::Util::MapNodeHelper().parse(mapNode, args, &viewer, root);
     if (overrideTime)
     {

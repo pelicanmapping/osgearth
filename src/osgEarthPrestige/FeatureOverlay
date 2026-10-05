@@ -1,0 +1,145 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarthPrestige/FeaturePlacement>
+#include <deque>
+
+namespace osgEarthPrestige
+{
+    using namespace osgEarth;
+    //! Authoring vocabulary. Attributes select ordinary coverage rules; policy is not duplicated here.
+    struct OSGEARTHPRESTIGE_EXPORT OverlayType
+    {
+        std::string name, label, geometry = "polygon";
+        std::map<std::string, std::string> attributes;
+        //! Creates an empty catalog entry for application configuration.
+        OverlayType() = default;
+        //! Reads a type and its attribute assignments from the earth-file catalog.
+        explicit OverlayType(const Config&);
+        //! Serializes the authoring definition, without storage or renderer details.
+        Config getConfig() const;
+    };
+
+    //! Immutable, WGS84 features. Retained snapshots remain valid across edits and paging jobs.
+    struct OverlaySnapshot
+    {
+        std::uint64_t revision = 0;
+        std::vector<osg::ref_ptr<const Feature>> features;
+    };
+
+    //! Small local edit document; serialize mutations on an application thread, snapshot reads are worker-safe.
+    //! Features own their geometry, stable IDs, and p2:type attribute. History is bounded to 32 edits.
+    class OSGEARTHPRESTIGE_EXPORT FeatureOverlay
+    {
+    public:
+        //! Copies configuration; call validateCatalog before accepting edits.
+        FeatureOverlay(const std::vector<OverlayType>& types, const std::string& source);
+        //! Checks the document vocabulary independently of any consumer's placement rules.
+        Status validateCatalog() const;
+        //! Checks names, geometry, attributes, and an applicable exclusion rule for every type.
+        Status validateCatalog(const std::vector<CoverageRule>&, const std::vector<ScatterGroup>&) const;
+        //! Returns the immutable authoring catalog.
+        const std::vector<OverlayType>& types() const { return _types; }
+        //! Returns the source namespace used to match coverage rules.
+        const std::string& source() const { return _source; }
+        //! Resolves an authoring type; pointer remains valid for this document's lifetime.
+        const OverlayType* findType(const std::string&) const;
+        //! Returns a thread-safe retained snapshot without copying geometry.
+        std::shared_ptr<const OverlaySnapshot> snapshot() const;
+        //! Inserts (id=0) or replaces a feature; clones/transforms input and assigns catalog attributes.
+        //! Invalid geometry/type leaves the document and caller's ID unchanged.
+        Status put(const std::string& type, const Geometry*, const SpatialReference*, FeatureID& id);
+        //! Deletes one local feature; unknown IDs leave the document unchanged.
+        Status erase(FeatureID);
+        //! Validates and atomically replaces a document, e.g. after loading a storage adapter.
+        //! Rejects unknown types, changed catalog attributes, duplicate IDs, and unsupported geometry.
+        Status replace(const OverlaySnapshot&);
+        //! Restores the preceding edit as a new revision; returns an error if history is empty.
+        Status undo();
+        //! Reapplies an undone edit as a new revision; returns an error if history is empty.
+        Status redo();
+    private:
+        //! Clones and validates one feature before publication; accepts local simple polygons/lines only.
+        Status prepare(const std::string&, const Geometry*, const SpatialReference*, FeatureID,
+            osg::ref_ptr<const Feature>&) const;
+        //! Publishes a new revision and bounded history after a successful edit.
+        void publish(std::shared_ptr<OverlaySnapshot>);
+        std::vector<OverlayType> _types;
+        std::string _source;
+        std::shared_ptr<const OverlaySnapshot> _current;
+        std::deque<std::shared_ptr<const OverlaySnapshot>> _undo, _redo;
+        FeatureID _nextID = 1;
+    };
+
+    //! Persistence boundary: storage returns detached documents, never mutates live placement or history.
+    //! Blocking I/O belongs on application workers. Alternative database adapters implement this interface.
+    class OSGEARTHPRESTIGE_EXPORT OverlayStorage
+    {
+    public:
+        //! Releases a storage adapter through the interface.
+        virtual ~OverlayStorage() = default;
+        //! Reads a document transactionally; errors leave output unchanged.
+        virtual Status read(const std::string& location, OverlaySnapshot& output) const = 0;
+        //! Writes a stable snapshot; never changes the live document.
+        virtual Status write(const std::string& location, const OverlaySnapshot&) const = 0;
+    };
+
+    //! Local GeoJSON adapter; feature IDs are strings to preserve all 64 bits.
+    class OSGEARTHPRESTIGE_EXPORT GeoJSONOverlayStorage : public OverlayStorage
+    {
+    public:
+        //! Reads bounded local GeoJSON; FeatureOverlay::replace performs catalog/geometry validation.
+        Status read(const std::string&, OverlaySnapshot&) const override;
+        //! Writes via a sibling temporary file and renames on success, preserving an existing file on failure.
+        Status write(const std::string&, const OverlaySnapshot&) const override;
+    };
+
+    //! Editable geographic input; owns a document independently of any vegetation layer or renderer.
+    //! Edits remain update/application-thread operations; worker queries use immutable snapshots.
+    class OSGEARTHPRESTIGE_EXPORT EditableFeatureProvider : public PlacementFeatureProvider
+    {
+    public:
+        //! Configures an empty document with a stable namespace and authoring vocabulary; performs no I/O.
+        EditableFeatureProvider(const std::string& source, const Config& config);
+        //! Shares an application-owned document; caller serializes document mutations.
+        explicit EditableFeatureProvider(std::shared_ptr<FeatureOverlay> document);
+        //! Returns the public document for editing or storage adapters; no layer interaction is required.
+        std::shared_ptr<FeatureOverlay> document() const { return _document; }
+        //! Validates authoring vocabulary without requiring an exclusion-only consumer.
+        Status validate() const override;
+        //! Serializes the provider's vocabulary; document contents use the independent storage adapter.
+        Config getConfig() const override;
+        //! Returns the document revision or this worker snapshot's fixed revision.
+        std::uint64_t revision() const override;
+        //! Captures an immutable document version for concurrent worker queries.
+        std::shared_ptr<const PlacementFeatureProvider> snapshot() const override;
+        //! Finds changed old/new feature extents, preserving invalidation when an edit moves or is removed.
+        void changesSince(const PlacementFeatureProvider*, std::vector<GeoExtent>&) const override;
+        //! Returns owned features within the buffered extent, using ordinary composition namespaces/rules.
+        Status query(const TileKey&, double, std::vector<PlacementFeature>&, ProgressCallback*) const override;
+    private:
+        std::shared_ptr<FeatureOverlay> _document;
+        std::shared_ptr<const OverlaySnapshot> _snapshot;
+    };
+
+    //! Composes an immutable edit snapshot with a base provider. Ordinary coverage rules combine both.
+    class OSGEARTHPRESTIGE_EXPORT OverlayFeatureProvider : public PlacementFeatureProvider
+    {
+    public:
+        //! Retains the base provider and snapshot for concurrent page requests; base may be null.
+        OverlayFeatureProvider(std::shared_ptr<const PlacementFeatureProvider>,
+            std::shared_ptr<const OverlaySnapshot>, const std::string& source);
+        //! Queries base and local geometry within the page plus its metric rule halo.
+        Status query(const TileKey&, double, std::vector<PlacementFeature>&, ProgressCallback* = nullptr) const override;
+        //! Applies the compiler's rule filter before returning candidates; failure publishes no partial result.
+        Status queryFiltered(const TileKey&, double, const PlacementFeatureFilter&,
+            std::vector<PlacementFeature>&, ProgressCallback* = nullptr) const override;
+    private:
+        std::shared_ptr<const PlacementFeatureProvider> _base;
+        std::shared_ptr<const OverlaySnapshot> _snapshot;
+        std::string _source;
+    };
+}

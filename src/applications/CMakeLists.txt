@@ -19,7 +19,7 @@ if(NOT OSGEARTH_BUILD_PLATFORM_IPHONE)
         add_subdirectory(osgearth_clamp)
         add_subdirectory(osgearth_server)
 
-        if(OSGEARTH_BUILD_PROCEDURAL2_NODEKIT)
+        if(OSGEARTH_BUILD_PRESTIGE_NODEKIT)
             add_subdirectory(osgearth_procedural2)
         endif()
         

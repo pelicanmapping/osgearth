@@ -1,0 +1,68 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarthPrestige/Scatter>
+#include <osgEarth/Chonk>
+#include <osgEarth/URI>
+#include <memory>
+
+namespace osgEarthPrestige
+{
+    using namespace osgEarth;
+    //! Static, meter-scale, Z-up models with their root at the ground. No biome hierarchy.
+    struct OSGEARTHPRESTIGE_EXPORT ScatterAsset
+    {
+        std::string name;
+        URI nearModel, coarseModel;
+        URI canopyModel; // optional reusable source clump; absent uses coarseModel, never the detailed model
+        unsigned canopyTrees = 1u; // authored trees represented by canopyModel; used only by coverage aggregation
+        //! Constructs an empty catalog entry without reading any model data.
+        ScatterAsset() = default;
+        //! Resolves model URIs relative to the configuration's referrer.
+        explicit ScatterAsset(const Config&);
+        //! Serializes model references, preserving relative URI context.
+        Config getConfig() const;
+    };
+
+    //! Accounted model content, not total CPU/GPU usage: excludes transient decoding, instance and driver buffers.
+    struct AssetResidency
+    {
+        std::size_t bytes = 0, budget = 0;
+        unsigned assets = 0, failedLoads = 0, budgetDenials = 0;
+        std::string lastError;
+    };
+
+    //! Worker-safe weak cache. Live Chonk owners pin models; the final owner releases the accounting lease.
+    //! Near/coarse files form one lazily loaded bundle. Static geometry and standard textures only.
+    class OSGEARTHPRESTIGE_EXPORT AssetCatalog
+    {
+    public:
+        //! Copies immutable configuration; no model I/O or GL allocation occurs here.
+        AssetCatalog(const std::vector<ScatterAsset>&, std::size_t budget, const osgDB::Options* = nullptr);
+        //! Releases the cache; outstanding Chonks keep their resources and accounting leases alive.
+        ~AssetCatalog();
+        //! Reads/converts a bundle once across concurrent workers. Empty name requests the built-in fallback/grass.
+        //! Returns null on cancellation, invalid data or budget pressure; callers may request a fallback.
+        Chonk::Ptr acquire(const ScatterGroup&, const std::string& name, ProgressCallback* = nullptr);
+        //! Loads only the individual coarse asset, sharing it across pages without reading near or canopy art.
+        Chonk::Ptr acquireImpostor(const ScatterGroup&, const std::string& name, ProgressCallback* = nullptr);
+        //! Loads authored stand art at physical scale, falling back to the coarse tree if no stand is configured.
+        Chonk::Ptr acquireStand(const ScatterGroup&, const std::string& name, ProgressCallback* = nullptr);
+        //! Shares one card-slot mesh per species/count/source kind, retaining its source textures and budget lease.
+        Chonk::Ptr acquireTreeCards(const ScatterGroup&, const std::string& name, unsigned slots,
+            ProgressCallback* = nullptr, bool stands = false);
+        //! Returns a nonblocking content-count snapshot; brief error-text locking never waits for model I/O.
+        AssetResidency residency() const;
+        //! Arena shared by this catalog's Chonks; install above draws and update once per scene update.
+        TextureArena* textures() const;
+
+    private:
+        //! Loads either the individual LOD bundle or a single canopy proxy into the same bounded weak cache.
+        Chonk::Ptr acquireModel(const ScatterGroup&, const std::string&, bool canopySource, ProgressCallback*,
+            bool coarseOnly = false);
+        struct Impl;
+        std::unique_ptr<Impl> _impl;
+    };
+}

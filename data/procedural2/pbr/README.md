@@ -48,10 +48,15 @@ mips through 1x1, avoiding driver compression and mip generation during paging.
 
 ## Source-derived distance representations
 
-The offline baker rasterizes each textured near mesh from two sides and above, with depth and
-alpha coverage, into a 3-view atlas. It carries source color and PBR values into six-triangle
-proxies. Proxy normal maps contain only restrained detail on top of the existing runtime
-crown-volume normals, avoiding normals that reveal the carrier planes.
+The offline baker captures both faces of each of three crossed cards into a six-view atlas.
+It transfers source geometry normals and tangent normal maps along with unlit color, alpha,
+and PBR values. The six-triangle proxies use planar card frames and Chonk's baked-volume
+normal technique 5. The default foliage already has authored crown-volume normals, so its
+impostors preserve those directions and leaf detail without camera-facing normal rotation.
+Their cards still fade as they turn edge-on, using the geometric card normal independently
+of the lighting normals. Individual impostors and canopy pieces share this treatment;
+detailed meshes keep their existing normals. The VRV importer retains technique 4, including
+its view-conditioned source-surface normals and grazing-card fade.
 
 Broadleaf/conifer canopy pieces bake five source trees into six triangles each. The runtime's
 existing nine-piece templates therefore remain **54 triangles per aggregate**, for both tiers.
@@ -73,15 +78,15 @@ to rebuild from the saved sources.
 After `osgearth_shell.bat`, run from `tests`:
 
 ```text
-osgearth_imgui procedural2-art.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
-osgearth_imgui a.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
+osgearth_imgui procedural2-art.earth --prestige-sky --shadows --nvgl --samples 4
+osgearth_imgui a.earth --prestige-sky --shadows --nvgl --samples 4
 ```
 
 The first scene displays all five populations. `a.earth` keeps the user's population settings;
 `prestige.earth` includes the same OSM vegetation setup alongside its existing building and sky layers.
 Changing catalog paths back to `../data/procedural2/starter/` restores the original assets.
 
-Limitations: three-view proxies can reveal their planes at grazing angles, plants share one
+Limitations: crossed-card proxies can reveal their planes at grazing angles, plants share one
 texture/shape per type, and texture-based roughness/normal estimation needs artist refinement.
 Alpha-card overdraw still matters even with low triangle counts. Coverage/color matching through
 the aggregate transitions remains Step 4B work. No performance benchmark is claimed.

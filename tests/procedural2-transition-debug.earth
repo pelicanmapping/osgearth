@@ -1,8 +1,8 @@
 <!-- First Step 4B forest checkpoint. Uses the main demo's real OSM sources, rules, and asset catalog. -->
 <map name="Procedural2 - OSM canopy hierarchy">
-    <libraries>osgEarthProcedural2</libraries>
+    <libraries>osgEarthPrestige</libraries>
     <!-- Fixed UTC hour makes geographic coverage visible in this demo. -->
-    <sky2><hours>10.5</hours></sky2>
+    <prestige:sky><hours>10.5</hours></prestige:sky>
     <options>
         <lighting>true</lighting>
         <terrain>
@@ -19,7 +19,7 @@
         <profile>spherical-mercator</profile><format>pbf</format><fid_attribute>@id</fid_attribute>
         <attribution>OpenStreetMap contributors</attribution>
     </XYZFeatures>
-    <Vegetation2 name="OSM land-use populations">
+    <prestige:vegetation name="OSM land-use populations">
         <sources>
             <source name="osm"><features>data:osm</features></source>
         </sources>
@@ -143,7 +143,7 @@
                 <models><model>fern</model></models>
             </group>
         </groups>
-    </Vegetation2>
+    </prestige:vegetation>
     <!-- Step 4B: real OSM forests, two aggregate scales, 30km maximum range. -->
     <viewpoints home="0" time="0" map_keys="false">
         <viewpoint name="4B - Forest approach" lat="60.33" long="24.49" height="103.52"

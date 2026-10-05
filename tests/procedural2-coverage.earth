@@ -1,8 +1,8 @@
 <!-- Step 4A: synthetic GeoJSON fixture for geographic coverage and exclusions. -->
 <map name="Procedural2 - offline coverage fixture">
-    <libraries>osgEarthProcedural2</libraries>
+    <libraries>osgEarthPrestige</libraries>
     <!-- Fixed UTC hour makes geographic coverage visible in this demo. -->
-    <sky2><hours>17.0</hours></sky2>
+    <prestige:sky><hours>17.0</hours></prestige:sky>
     <options>
         <lighting>true</lighting>
         <terrain>
@@ -16,7 +16,7 @@
     <OGRFeatures name="data:osm">
         <url>../data/procedural2/coverage/fixture.geojson</url>
     </OGRFeatures>
-    <Vegetation2 name="OSM landscape populations">
+    <prestige:vegetation name="OSM landscape populations">
         <sources>
             <source name="osm">
                 <features>data:osm</features>
@@ -94,7 +94,7 @@
                 <models><model>boulder</model></models>
             </group>
         </groups>
-    </Vegetation2>
+    </prestige:vegetation>
     <viewpoints home="0" time="0" map_keys="false">
         <viewpoint name="Coverage and exclusions" lat="40.65" long="-75" height="160"
             heading="0" pitch="-90" range="2100"/>

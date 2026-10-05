@@ -1,6 +1,6 @@
 {
   "material_layout": "albedo RGBA; normal OpenGL RGB; DRAM = displacement, roughness, AO, metallic",
-  "normal_source": "approximate micro-height reconstruction; coarse normals retain runtime crown volume",
+  "normal_source": "near micro-height reconstruction; six-view proxies bake source geometry and normal maps",
   "assets": {
     "broadleaf": {
       "near_triangles": 944,
@@ -105,5 +105,5 @@
       "coarse_triangles": 6
     }
   },
-  "runtime_dds_bytes": 36358432
+  "runtime_dds_bytes": 48940624
 }

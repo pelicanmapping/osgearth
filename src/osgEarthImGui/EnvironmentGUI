@@ -148,6 +148,8 @@ namespace osgEarth
         float _sun_intensity = 10.0f;
         float _ground_reflectance = 0.15f;
         bool _first = true;
+        bool _prestigeOnly = false;
+        bool _excludePrestige = false;
         bool _shadows = false;
         float _haze_cutoff = 0.0f, _haze_strength = 16.0f;
         float _wind_power = 1.0f;
@@ -178,7 +180,41 @@ namespace osgEarth
         }
 
     public:
-        EnvironmentGUI() : ImGuiPanel("Sky") { }
+        //! Reuses the environment controls for either the general sky panel or the Prestige-only menu entry.
+        EnvironmentGUI(const char* name = "Sky", bool prestigeOnly = false, bool excludePrestige = false) :
+            ImGuiPanel(name), _prestigeOnly(prestigeOnly), _excludePrestige(excludePrestige) { }
+
+        //! Optionally routes Prestige skies to their menu; default standalone panels still support every sky.
+        bool isAvailable(osg::RenderInfo& ri) const override
+        {
+            if (!findNode<MapNode>(ri)) return false;
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+            const bool prestige = findNode<osgEarthPrestige::SkyNode>(ri) != nullptr;
+            return _prestigeOnly ? prestige : (!_excludePrestige || !prestige);
+#else
+            return !_prestigeOnly;
+#endif
+        }
+
+        //! Rebinds after scene replacement and detaches playback from the previous sky, including while closed.
+        void update(osg::RenderInfo& ri) override
+        {
+            auto* map = findNode<MapNode>(ri);
+            auto* sky = findNode<SkyNode>(ri);
+            if (_mapNode.get() == map && _skyNode.get() == sky) return;
+            if (_timeCycle)
+            {
+                _timeCycle->playing = false;
+                osg::ref_ptr<SkyNode> previous;
+                if (_skyNode.lock(previous)) previous->removeUpdateCallback(_timeCycle.get());
+                _timeCycle = nullptr;
+            }
+            _mapNode = map;
+            _skyNode = sky;
+            _shadowCaster = nullptr;
+            _windLayer = nullptr;
+            _first = true;
+        }
 
         ~EnvironmentGUI() override
         {

@@ -1,9 +1,9 @@
 <!-- Main Step 4A demo: real OSM woodland, trees, vineyards, orchards, and farmland.
      Planting details use approximate procedural defaults; source parcel boundaries are retained. -->
 <map name="Procedural2 - OSM and structured land use">
-    <libraries>osgEarthProcedural2</libraries>
+    <libraries>osgEarthPrestige</libraries>
     <!-- Fixed UTC hour makes geographic coverage visible in this demo. -->
-    <sky2><hours>10.5</hours></sky2>
+    <prestige:sky><hours>10.5</hours></prestige:sky>
     <options>
         <lighting>true</lighting>
         <terrain>
@@ -20,7 +20,7 @@
         <profile>spherical-mercator</profile><format>pbf</format><fid_attribute>@id</fid_attribute>
         <attribution>OpenStreetMap contributors</attribution>
     </XYZFeatures>
-    <Vegetation2 name="OSM land-use populations">
+    <prestige:vegetation name="OSM land-use populations">
         <sources>
             <source name="osm">
                 <features>data:osm</features>
@@ -165,7 +165,7 @@
                 <models><model>fern</model></models>
             </group>
         </groups>
-    </Vegetation2>
+    </prestige:vegetation>
     <viewpoints home="0" time="0" map_keys="false">
         <viewpoint name="Sion - OSM vineyards" lat="46.23799" long="7.35095" height="693"
             heading="-20" pitch="-55" range="350"/>

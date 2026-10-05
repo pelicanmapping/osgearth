@@ -45,8 +45,10 @@ set(STOCK_PANELS
     TextureSplattingLayerGUI
     VegetationLayerGUI
 
-    # osgEarthProcedural2
-    VegetationLayer2GUI
+    # osgEarthPrestige
+    PrestigeVegetationLayerGUI
+    PrestigeGrimeLayerGUI
+    PrestigeAssetsGUI
     FeatureOverlayGUI
     
     # osgEarthCesium

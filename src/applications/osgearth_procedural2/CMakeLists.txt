@@ -1,5 +1,5 @@
 add_osgearth_app(
     TARGET osgearth_procedural2
     SOURCES osgearth_procedural2.cpp AssetImport.cpp
-    LIBRARIES osgEarthProcedural2 ${OPENGL_LIBRARIES}
+    LIBRARIES osgEarthPrestige ${OPENGL_LIBRARIES}
     FOLDER Examples)

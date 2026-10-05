@@ -1,6 +1,6 @@
 <!-- Global synthetic coverage, including oceans; land/feature masks come in the source milestone. -->
 <map name="Procedural2 - textured PBR art">
-    <libraries>osgEarthProcedural2</libraries>
+    <libraries>osgEarthPrestige</libraries>
     <options>
         <lighting>true</lighting>
         <terrain>
@@ -11,7 +11,7 @@
         <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
         <vdatum>egm96</vdatum>
     </TMSElevation>
-    <Vegetation2 name="Landscape populations">
+    <prestige:vegetation name="Landscape populations">
         <seed>17</seed>
         <asset_budget_mb>64</asset_budget_mb>
         <assets>
@@ -55,7 +55,7 @@
                 <models><model>boulder</model></models>
             </group>
         </groups>
-    </Vegetation2>
+    </prestige:vegetation>
     <viewpoints home="0" time="0" map_keys="false">
         <viewpoint name="Textured woodland" lat="40.65" long="-75" height="159.90546"
             heading="-20" pitch="-12" range="65"/>

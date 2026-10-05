@@ -87,6 +87,8 @@ namespace osgEarth
         //! Six-view baked impostor: planar geometric normals and full-sphere tangent normal maps.
         //! UVs address the top half of an atlas; back faces sample the corresponding bottom half.
         static GLubyte NORMAL_TECHNIQUE_BAKED;
+        //! Six-view baked authored volume normals; preserves their orientation while retaining geometric card fading.
+        static GLubyte NORMAL_TECHNIQUE_BAKED_VOLUME;
 
         static unsigned MATERIAL_VERTEX_SLOT;
 

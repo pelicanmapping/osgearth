@@ -91,7 +91,7 @@ indirect sky lighting (default 1); zero skips its reads. `ambient` is a minimum
 night fill, default 0.033. Set it
 to zero for a physically dark night. `setExposure`, `setSunIntensity`,
 `setEnvironmentIntensity`, and `setAmbientIntensity` are runtime controls.
-EnvironmentGUI recognizes Prestige Sky and exposes these settings and solar color,
+Open **Prestige > Sky & Clouds** in ImGui for these settings and solar color,
 alongside the existing time, shadow, and celestial visibility controls. Opening
 the panel preserves the scene's lighting settings; edits run during update.
 The panel's Install button also creates Sky. Quality is selected at construction.

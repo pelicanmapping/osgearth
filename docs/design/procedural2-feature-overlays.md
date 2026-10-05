@@ -1,7 +1,10 @@
-# Vegetation2 editable feature overlays
+# Prestige vegetation editable feature overlays
 
 October 2, 2026: source-composition cleanup of Step 4A. Catalog-driven local hard exclusions now compose with base features.
 Density painting, feathering, parameter modifiers, and a catalog-definition editor remain Later.
+
+All vegetation and overlay APIs are in the `osgEarthPrestige` namespace. The demo panel is
+`osgEarthPrestige::VegetationLayerGUI` from `<osgEarthImGui/PrestigeVegetationLayerGUI>`.
 
 ## Modular boundaries
 
@@ -17,7 +20,7 @@ Density painting, feathering, parameter modifiers, and a catalog-definition edit
 | `FeatureOverlayGUI` | Picking, outline preview, catalog selection, history controls, and asynchronous storage I/O |
 
 The demo passes `FeatureOverlayGUI::draw(document, mapNode, view)` a shared document; mutations are serialized on the
-application/update thread. It can be embedded without a VegetationLayer2. Storage completion targets the document that
+application/update thread. It can be embedded without an `osgEarthPrestige::VegetationLayer`. Storage completion targets the document that
 started the operation, even if the user selects another source.
 
 Large databases can also implement `PlacementFeatureProvider` directly; they need not load a world's edits into the
@@ -74,9 +77,9 @@ Finer content replacement or an immediate GPU exclusion mask could reduce this t
 
 The main working scene is `tests/a.earth`; the portable forest scene is `tests/procedural2-canopy-osm.earth`. Its catalog offers clearing, building footprint,
 water area, and buffered path. The same catalog is in `tests/procedural2-osm.earth` and the offline geographic fixture
-`tests/procedural2-coverage.earth`. Launch ImGui with `--sky2 --shadows --nvgl --samples 4 --vegetation2`.
+`tests/procedural2-coverage.earth`. Launch ImGui with `--prestige-sky --shadows --nvgl --samples 4`.
 
-Under **Vegetation2 > Feature overlays**:
+Under **Prestige > Vegetation > Feature overlays**:
 
 - If several editable sources are configured, select the source document. Select a type; its assigned tags are shown.
   Coverage policy stays in the shared rules, outside the editor.

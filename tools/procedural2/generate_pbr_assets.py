@@ -72,6 +72,7 @@ class Part:
         """Copy a source into an offline cluster, preserving material-space UVs and normal orientation."""
         if getattr(other, 'baked_normals', False):
             self.baked_normals = True
+            self.baked_volume = getattr(other, 'baked_volume', False)
         rotation = np.array([[math.cos(angle), -math.sin(angle), 0],
                              [math.sin(angle), math.cos(angle), 0], [0, 0, 1]])
         self.v.extend(np.asarray(other.v) @ rotation.T * scale + offset)
@@ -281,7 +282,7 @@ def write_model(path, parts):
         text += 'ColorBinding PER_VERTEX\n' + array('ColorArray', 'Vec4Array', [(*c, 1) for c in part.c])
         text += array('TexCoordArray 0', 'Vec2Array', part.uv)
         if part.volume:
-            technique = 4 if getattr(part, 'baked_normals', False) else 3
+            technique = (5 if getattr(part, 'baked_volume', False) else 4) if getattr(part, 'baked_normals', False) else 3
             text += f'VertexAttribBinding 6 OVERALL\nVertexAttribArray 6 UByteArray 1 {{ {technique} }}\n'
         text += '}\n}\n'
     path.write_text(text+'}\n', encoding='utf-8', newline='\r\n')
@@ -375,11 +376,12 @@ def bake(parts, materials, size):
     return atlases, low, high
 
 
-def proxy_parts(low, high, size, material):
-    """Emit six triangles with planar frames and front-row UVs; Chonk selects each card's back capture."""
+def proxy_parts(low, high, size, material, volume_normals=False):
+    """Emit six-view cards; volume_normals preserves authored crown directions instead of relighting source surfaces."""
     mesh, uv = impostor(low, high, size)
     part = Part(material, True)
     part.baked_normals = True
+    part.baked_volume = volume_normals
     part.v, part.c, part.uv = mesh.v, mesh.c, [(u*4/3, 0.5+v*0.5) for u, v in uv]
     for i in range(0, len(mesh.v), 3):
         a, b, c = mesh.v[i:i+3]
@@ -420,7 +422,7 @@ def main():
         size = 512 if name in ('broadleaf', 'conifer') else 256
         maps, low, high = bake(parts, materials, size)
         export_material(output, f'{name}-proxy', maps)
-        proxies = proxy_parts(low, high, size, f'{name}-proxy')
+        proxies = proxy_parts(low, high, size, f'{name}-proxy', volume_normals=True)
         write_model(output/f'{name}-coarse.osg', proxies)
         materials[f'{name}-proxy'] = maps
         manifest['assets'][name] = {'near_triangles': triangles, 'coarse_triangles': 6,
@@ -430,17 +432,17 @@ def main():
         pieces = cluster([models[name]], 5)
         maps, low, high = bake(pieces, materials, 512)
         export_material(output, f'{name}-canopy', maps)
-        write_model(output/f'{name}-canopy.osg', proxy_parts(low, high, 512, f'{name}-canopy'))
+        write_model(output/f'{name}-canopy.osg', proxy_parts(low, high, 512, f'{name}-canopy', volume_normals=True))
         manifest['assets'][name]['canopy_triangles'] = 6
         print(f'{name} canopy: 5 textured trees -> 6 triangles', flush=True)
     pieces = cluster([models['broadleaf'], models['conifer']], 13)
     maps, low, high = bake(pieces, materials, 512)
     export_material(output, 'canopy-cluster-proxy', maps)
-    write_model(output/'canopy-cluster-coarse.osg', proxy_parts(low, high, 512, 'canopy-cluster-proxy'))
+    write_model(output/'canopy-cluster-coarse.osg', proxy_parts(low, high, 512, 'canopy-cluster-proxy', volume_normals=True))
     sources = []
     for name in ('broadleaf', 'conifer'):
         v = np.concatenate([p.v for p in models[name]])
-        sources.append(proxy_parts(v.min(0)-0.04, v.max(0)+0.04, 512, f'{name}-proxy'))
+        sources.append(proxy_parts(v.min(0)-0.04, v.max(0)+0.04, 512, f'{name}-proxy', volume_normals=True))
     write_model(output/'canopy-cluster-near.osg', cluster(sources, 13))
     manifest['assets']['canopy-cluster'] = {'near_triangles': 78, 'coarse_triangles': 6}
     manifest['runtime_dds_bytes'] = sum(p.stat().st_size for p in output.glob('*.dds'))

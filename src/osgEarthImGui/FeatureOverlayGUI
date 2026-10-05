@@ -4,7 +4,7 @@
  */
 #pragma once
 #include <osgEarthImGui/ImGuiPanel>
-#include <osgEarthProcedural2/FeatureOverlay>
+#include <osgEarthPrestige/FeatureOverlay>
 #include <osgEarth/FeatureNode>
 #include <osgEarth/Utils>
 #include <osgViewer/ViewerBase>
@@ -13,8 +13,9 @@
 #include <future>
 #include <mutex>
 
-namespace osgEarth { namespace Procedural2
+namespace osgEarthPrestige
 {
+    using namespace osgEarth;
     //! ImGui adapter for the edit document. Picking and preview are independent of storage and coverage policy.
     class FeatureOverlayGUI
     {
@@ -158,7 +159,7 @@ namespace osgEarth { namespace Procedural2
                     addOutline(group,feature,feature->getFID() == selected);
                 if (points.size() >= 2u)
                 {
-                    osg::ref_ptr<Geometry> geometry = polygon ? static_cast<Geometry*>(new Polygon()) : new LineString();
+                    osg::ref_ptr<Geometry> geometry = polygon ? static_cast<Geometry*>(new osgEarth::Polygon()) : new LineString();
                     geometry->assign(points.begin(),points.end());
                     osg::ref_ptr<Feature> feature = new Feature(geometry,SpatialReference::get("wgs84"));
                     addOutline(group,feature,true);
@@ -328,7 +329,7 @@ namespace osgEarth { namespace Procedural2
             if (finish && !_pending && !_io.valid())
             {
                 std::lock_guard<std::mutex> lock(_sketch->mutex);
-                osg::ref_ptr<Geometry> geometry = _sketch->polygon ? static_cast<Geometry*>(new Polygon()) : new LineString();
+                osg::ref_ptr<Geometry> geometry = _sketch->polygon ? static_cast<Geometry*>(new osgEarth::Polygon()) : new LineString();
                 geometry->assign(_sketch->points.begin(),_sketch->points.end());
                 const auto type = _sketch->type; const auto replaceID = _sketch->replaceID;
                 submit(view,document,[geometry,type,replaceID](FeatureOverlay& target,FeatureID& id)
@@ -338,4 +339,4 @@ namespace osgEarth { namespace Procedural2
             preview(view,snapshot);
         }
     };
-} }
+}

@@ -35,7 +35,7 @@ The original `REGISTER_OSGEARTH_LAYER` macro remains available for plugin loadin
 
 `GrimeLayer` is part of this nodekit. Include `<osgEarthPrestige/GrimeLayer>` and
 use `osgEarthPrestige::GrimeLayer`. Its shader is packaged with `osgEarthPrestige`.
-The ImGui layer panel exposes its controls when the nodekit is enabled.
+The **Prestige > Grime** panel and the ImGui layer properties expose its controls when the nodekit is enabled.
 
 Load `osgEarthPrestige` in the map's `<libraries>` list, then configure the effect
 with `<prestige:grime>`. For example,

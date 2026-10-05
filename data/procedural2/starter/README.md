@@ -52,8 +52,8 @@ or guarantee that all sources of frame stalls are eliminated.
 Run from `tests` after `osgearth_shell.bat`:
 
 ```text
-osgearth_imgui procedural2-art.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
-osgearth_imgui procedural2-canopy.earth --sky2 --shadows --nvgl --samples 4 --vegetation2
+osgearth_imgui procedural2-art.earth --prestige-sky --shadows --nvgl --samples 4
+osgearth_imgui procedural2-canopy.earth --prestige-sky --shadows --nvgl --samples 4
 ```
 
 The Vegetation2 demo earth files now select the textured PBR catalog in `../pbr`.

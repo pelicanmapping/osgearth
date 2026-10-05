@@ -48,6 +48,15 @@ namespace osgEarth
             return _name.c_str();
         }
 
+        //! Menu label; the panel name remains the stable window/settings identifier.
+        virtual const char* menuLabel() const { return name(); }
+
+        //! Whether the current scene supports this panel. Called on the GUI thread.
+        virtual bool isAvailable(osg::RenderInfo& ri) const { return true; }
+
+        //! Refresh scene bindings even while closed or unavailable; called on the GUI thread before drawing menus.
+        virtual void update(osg::RenderInfo& ri) { }
+
         //! render this GUI
         virtual void draw(osg::RenderInfo& ri) { }
 

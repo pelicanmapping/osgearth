@@ -349,6 +349,9 @@ Registry::releaseGLObjects(osg::State* state) const
 void
 Registry::release()
 {
+    // ensure that _defaultCache cleans up before weejobs shutdown
+    _defaultCache = nullptr;
+
     // shut down running jobs:
     WEEJOBS_NAMESPACE::instance().shutdown();
 

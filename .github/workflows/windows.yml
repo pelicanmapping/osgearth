@@ -45,6 +45,9 @@ jobs:
         cd vcpkg
         git checkout ${{env.VCPKG_VERSION}}
         cd ..
+        # Use Savannah's HTTPS endpoint; keep the tagged libgta archive and checksum.
+        sed -i 's|http://download.savannah.nongnu.org|https://download.savannah.nongnu.org|' \
+          ./vcpkg/ports/libgta/portfile.cmake
         ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
         ${{ matrix.VCPKG_WORKSPACE }}/vcpkg/vcpkg version
 

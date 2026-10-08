@@ -38,6 +38,9 @@ jobs:
         cd vcpkg
         git checkout ${{ env.VCPKG_VERSION }}
         cd ..
+        # Use Savannah's HTTPS endpoint; keep the tagged libgta archive and checksum.
+        sed -i 's|http://download.savannah.nongnu.org|https://download.savannah.nongnu.org|' \
+          ./vcpkg/ports/libgta/portfile.cmake
         ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
         echo "set(VCPKG_BUILD_TYPE release)" >> ./vcpkg/triplets/x64-windows.cmake
         echo "set(osg_OPENGL_PROFILE GL3)" >> ./vcpkg/triplets/x64-windows.cmake

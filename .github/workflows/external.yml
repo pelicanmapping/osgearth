@@ -37,6 +37,8 @@ jobs:
         git clone https://github.com/microsoft/vcpkg
         cd vcpkg
         git checkout ${{ env.VCPKG_VERSION }}
+        # libaec moved to GitHub; use the upstream fixed port while keeping the remaining dependency baseline.
+        git checkout 9942fb5f996ea431c5ed8fb8d2a53f31d08df62e -- ports/libaec
         cd ..
         ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
         echo "set(VCPKG_BUILD_TYPE release)" >> ./vcpkg/triplets/x64-windows.cmake

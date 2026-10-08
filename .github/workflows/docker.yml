@@ -31,8 +31,10 @@ jobs:
             # If we are in a tag use the tag name otherwise use latest
             # If the ref_name is master then use "latest"
             CONTAINER_TAG: ${{ github.ref_name == 'master' && 'latest' || github.ref_name }}
-            # Only the primary runner publishes; the 26.04 canary always builds locally.
-            SHOULD_PUSH: ${{ matrix.os == 'ubuntu-latest' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) }}
+            # Only the primary runner publishes; the 26.04 job never publishes.
+            SHOULD_PUSH: >-
+                ${{ matrix.os == 'ubuntu-latest' &&
+                    (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) }}
 
         steps:
         - name: Echo ref
@@ -67,4 +69,6 @@ jobs:
                 type=gha
               cache-to: ${{ env.SHOULD_PUSH == 'true' && 'type=gha,mode=max' || '' }}
               # PR refs and branch names can contain characters invalid in image tags.
-              tags: ${{ env.SHOULD_PUSH == 'true' && format('pelicanmapping/osgearth:{0}', env.CONTAINER_TAG) || '' }}
+              tags: >-
+                ${{ env.SHOULD_PUSH == 'true' &&
+                    format('pelicanmapping/osgearth:{0}', env.CONTAINER_TAG) || '' }}

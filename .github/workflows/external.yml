@@ -8,7 +8,7 @@ permissions:
 env:
   FEED_URL: https://nuget.pkg.github.com/gwaldron/index.json
   VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/gwaldron/index.json,readwrite"
-  VCPKG_VERSION: '2026.02.27'
+  VCPKG_VERSION: '2026.07.29'
 
 jobs:
 
@@ -37,8 +37,6 @@ jobs:
         git clone https://github.com/microsoft/vcpkg
         cd vcpkg
         git checkout ${{ env.VCPKG_VERSION }}
-        # Backport the upstream libaec GitHub source fix without changing other ports.
-        git checkout 9942fb5f996ea431c5ed8fb8d2a53f31d08df62e -- ports/libaec
         cd ..
         ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
         echo "set(VCPKG_BUILD_TYPE release)" >> ./vcpkg/triplets/x64-windows.cmake

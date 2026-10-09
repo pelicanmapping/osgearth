@@ -3,6 +3,8 @@
  * MIT License
  */
 #include <osgEarth/IntersectionPicker>
+#include <osgEarth/Math>
+#include <osgEarth/Utils>
 #include <osgEarth/Registry>
 
 #define LC "[Picker] "
@@ -42,12 +44,13 @@ IntersectionPicker::setBuffer(float value)
 bool
 IntersectionPicker::pick( float x, float y, Hits& results ) const
 {
-    float local_x, local_y = 0.0;
-    const osg::Camera* camera = _view->getCameraContainingPosition(x, y, local_x, local_y);
+    float local_x = x, local_y = y;
+    const osg::Camera* camera = Util::getCameraUnderMouse(_view, x, y, local_x, local_y);
     if ( !camera )
-        camera = _view->getCamera();
-
-    osg::ref_ptr<osgEarth::PrimitiveIntersector> picker;
+    {
+        results.clear();
+        return false;
+    }
 
     double buffer_x = _buffer, buffer_y = _buffer;
     if ( camera->getViewport() )
@@ -57,52 +60,57 @@ IntersectionPicker::pick( float x, float y, Hits& results ) const
         buffer_y /= aspectRatio;
     }
 
+    // Build the pick segment in the coordinate frame where the traversal starts: the root's parent
+    // frame, or the world when picking the camera's whole scene. Window z is 0..1 near to far; without
+    // a viewport the mouse position is in clip space, where the near plane is at z=-1.
     osg::Matrix windowMatrix;
+    double zNear = -1.0;
+    if (camera->getViewport())
+    {
+        windowMatrix = camera->getViewport()->computeWindowMatrix();
+        zNear = 0.0;
+    }
 
+    osg::Matrix localToWorld;
     if ( _root.valid() )
     {
-        osg::Matrix modelMatrix;
-
-        if (camera->getViewport())
-        {
-            windowMatrix = camera->getViewport()->computeWindowMatrix();
-            modelMatrix.preMult( windowMatrix );
-        }
-
-        modelMatrix.preMult( camera->getProjectionMatrix() );
-        modelMatrix.preMult( camera->getViewMatrix() );
-
         osg::NodePath prunedNodePath( _path.begin(), _path.end()-1 );
-        modelMatrix.preMult( osg::computeWorldToLocal(prunedNodePath) );
-
-        osg::Matrix modelInverse;
-        modelInverse.invert(modelMatrix);
-
-        osg::Vec3d startLocal(local_x, local_y, 0.0);
-        osg::Vec3d startModel = startLocal * modelInverse;
-
-        osg::Vec3d endLocal(local_x, local_y, 1.0);
-        osg::Vec3d endModel = endLocal * modelInverse;
-
-        osg::Vec3d bufferLocal(local_x + buffer_x, local_y + buffer_y, 0.0);
-        osg::Vec3d bufferModel = bufferLocal * modelInverse;
-
-        double buffer = std::max((bufferModel - startModel).length(), 5.0);  //TODO: Setting a minimum of 5.0 may need revisited
-
-        OE_DEBUG
-            << "local_x:" << local_x << ", local_y:" << local_y
-            << ", buffer_x:" << buffer_x << ", buffer_y:" << buffer_y
-            << ", bm.x:" << bufferModel.x() << ", bm.y:" << bufferModel.y()
-            << ", bm.z:" << bufferModel.z()
-            << ", BUFFER: " << buffer
-            << std::endl;
-
-        picker = new osgEarth::PrimitiveIntersector(osgUtil::Intersector::MODEL, startModel, endModel, buffer);
+        localToWorld = osg::computeLocalToWorld(prunedNodePath);
     }
-    else
+
+    osg::Matrix modelToWindow = localToWorld * camera->getViewMatrix() * camera->getProjectionMatrix() * windowMatrix;
+    osg::Matrix windowToModel;
+    windowToModel.invert(modelToWindow);
+
+    osg::Vec3d startModel = osg::Vec3d(local_x, local_y, zNear) * windowToModel;
+    osg::Vec3d endModel = osg::Vec3d(local_x, local_y, 1.0) * windowToModel;
+    osg::Vec3d bufferModel = osg::Vec3d(local_x + buffer_x, local_y + buffer_y, zNear) * windowToModel;
+
+    // The buffer only widens the test for points and lines (triangles are tested exactly), but it also
+    // pads every bounding sphere the visitor tests. OSG node bounds are normally single precision, so in
+    // geocentric coordinates a small object's bound can be off by about 0.5m and its radius can round to
+    // zero; the minimum keeps such objects from being culled before their geometry is tested.
+    double buffer = std::max((bufferModel - startModel).length(), 5.0);  //TODO: Setting a minimum of 5.0 may need revisited
+
+    // Start a perspective pick at the eye, not the near plane. OSG clamps the computed near plane to
+    // far * nearFarRatio (e.g. 0.0005 * 300km = 150m when looking toward the horizon), and the
+    // logarithmic depth buffer still draws anything in front of it, so a segment that starts at the
+    // near plane misses visible objects close to the camera.
+    if (ProjectionMatrix::isPerspective(camera->getProjectionMatrix()))
     {
-        picker = new osgEarth::PrimitiveIntersector(camera->getViewport() ? osgUtil::Intersector::WINDOW : osgUtil::Intersector::PROJECTION, local_x, local_y, _buffer);
+        startModel = camera->getInverseViewMatrix().getTrans() * osg::Matrix::inverse(localToWorld);
     }
+
+    OE_DEBUG
+        << "local_x:" << local_x << ", local_y:" << local_y
+        << ", buffer_x:" << buffer_x << ", buffer_y:" << buffer_y
+        << ", bm.x:" << bufferModel.x() << ", bm.y:" << bufferModel.y()
+        << ", bm.z:" << bufferModel.z()
+        << ", BUFFER: " << buffer
+        << std::endl;
+
+    osg::ref_ptr<osgEarth::PrimitiveIntersector> picker =
+        new osgEarth::PrimitiveIntersector(osgUtil::Intersector::MODEL, startModel, endModel, buffer);
 
     picker->setIntersectionLimit( (osgUtil::Intersector::IntersectionLimit)_limit );
     osgUtil::IntersectionVisitor iv(picker.get());
@@ -120,6 +128,8 @@ IntersectionPicker::pick( float x, float y, Hits& results ) const
 
     iv.setTraversalMask( _travMask );
 
+    // Without a root, the camera pushes its own matrices and an identity model matrix, so the
+    // segment is in world coordinates.
     if ( _root.valid() )
         _path.back()->accept(iv);
     else

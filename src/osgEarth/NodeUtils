@@ -12,6 +12,7 @@
 #include <osgUtil/LineSegmentIntersector>
 #include <osgEarth/Threading>
 #include <osgEarth/Math>
+#include <osgEarth/Utils>
 #include <set>
 #include <vector>
 
@@ -486,10 +487,10 @@ namespace osgEarth { namespace Util
         if (!view2 || !graph)
             return {};
 
-        float local_x, local_y = 0.0;
-        const osg::Camera* camera = view2->getCameraContainingPosition(x, y, local_x, local_y);
+        float local_x = x, local_y = y;
+        const osg::Camera* camera = getCameraUnderMouse(view2, x, y, local_x, local_y);
         if (!camera)
-            camera = view2->getCamera();
+            return {};
 
         // Build a matrix that transforms from the terrain/world space
         // to either clip or window space, depending on whether we have

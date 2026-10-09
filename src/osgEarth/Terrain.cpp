@@ -6,6 +6,7 @@
 #include "Terrain"
 #include "TerrainTileNode"
 #include "Math"
+#include "Utils"
 #include <osgViewer/View>
 
 #define LC "[Terrain] "
@@ -157,10 +158,10 @@ namespace
         if (!view2 || !graph)
             return false;
 
-        float local_x, local_y = 0.0;
-        const osg::Camera* camera = view2->getCameraContainingPosition(x, y, local_x, local_y);
+        float local_x = x, local_y = y;
+        const osg::Camera* camera = Util::getCameraUnderMouse(view2, x, y, local_x, local_y);
         if (!camera)
-            camera = view2->getCamera();
+            return false;
 
         // Build a matrix that transforms from the terrain/world space
         // to either clip or window space, depending on whether we have

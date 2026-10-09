@@ -273,6 +273,22 @@ namespace osgEarth { namespace Util
     };
 
     /**
+     * Finds the camera under a mouse position, like osgViewer::View::getCameraContainingPosition,
+     * and outputs the position in that camera's window coordinates. When no camera contains the
+     * position (for example when the event state has no graphics context, as in a pbuffer or other
+     * offscreen viewer), falls back on the view's master camera. OSG reports the position normalized
+     * to [-1..1] in that case, so this converts it to the master camera's window coordinates (or
+     * leaves it as clip coordinates if that camera has no viewport). Reads the view's current event
+     * state, so call it from the thread that handles the view's events.
+     * @param view   View whose cameras to search
+     * @param x, y   Mouse position, e.g. from osgGA::GUIEventAdapter::getX/getY
+     * @param out_x, out_y  Position in the returned camera's window (or clip) coordinates
+     * @return The camera under the position or the master camera; nullptr if view is null.
+     */
+    extern OSGEARTH_EXPORT const osg::Camera* getCameraUnderMouse(
+        const osgViewer::View* view, float x, float y, float& out_x, float& out_y);
+
+    /**
      * Adapts an osg::Callback (or derived class) to accept a lambda.
      */
     template<typename T = osg::Callback>

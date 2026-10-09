@@ -575,6 +575,33 @@ AllocateAndMergeBufferObjectsVisitor::apply(osg::Drawable& drawable)
     traverse(drawable);
 }
 
+//------------------------------------------------------------------------
+
+const osg::Camera*
+osgEarth::Util::getCameraUnderMouse(const osgViewer::View* view, float x, float y, float& out_x, float& out_y)
+{
+    out_x = x, out_y = y;
+    if (!view)
+        return nullptr;
+
+    // OSG outputs window coordinates when a camera contains the position. Otherwise it returns null and
+    // outputs the position normalized to [-1..1] over the event state's input range (y up), which it
+    // treats as the master camera's clip-space x/y. Using that as window coordinates puts every pick at
+    // the viewport origin.
+    const osg::Camera* camera = view->getCameraContainingPosition(x, y, out_x, out_y);
+    if (camera)
+        return camera;
+
+    camera = view->getCamera();
+    if (camera && camera->getViewport())
+    {
+        const osg::Viewport* viewport = camera->getViewport();
+        out_x = static_cast<float>(viewport->x() + 0.5 * (out_x + 1.0) * viewport->width());
+        out_y = static_cast<float>(viewport->y() + 0.5 * (out_y + 1.0) * viewport->height());
+    }
+    return camera;
+}
+
 
 //------------------------------------------------------------------------
 

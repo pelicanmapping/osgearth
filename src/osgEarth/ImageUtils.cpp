@@ -13,8 +13,12 @@
 
 #include <osg/GLU>
 #include <osg/ValueObject>
+#include <osg/Texture2D>
+#include <osg/GLExtensions>
+#include <osg/State>
 
 #include <algorithm>
+#include <mutex>
 
 // Flip to 0 to compare against the old OSG GLU scaler path.
 #ifndef OSGEARTH_USE_STB_IMAGE_RESIZE
@@ -999,25 +1003,165 @@ ImageUtils::compressImageInPlace(osg::Image* input, const std::string& method)
     }
 }
 
+#ifndef GL_COMPRESSED_SRGB_S3TC_DXT1_EXT
+#define GL_COMPRESSED_SRGB_S3TC_DXT1_EXT 0x8C4C
+#endif
+#ifndef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT
+#define GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT 0x8C4D
+#endif
+#ifndef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT
+#define GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT 0x8C4E
+#endif
+#ifndef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT
+#define GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT 0x8C4F
+#endif
+
 namespace
 {
+    //! True for the uncompressed sRGB internal formats, e.g. the glTF reader's base color textures.
+    bool isUncompressedSRGB(GLint format)
+    {
+        return format == GL_SRGB || format == GL_SRGB8 || format == GL_SRGB_ALPHA || format == GL_SRGB8_ALPHA8;
+    }
+
+    //! Returns the sRGB counterpart of a linear S3TC format, or 0 if there isn't one.
+    GLenum getSRGBCompressedFormat(GLenum format)
+    {
+        switch (format)
+        {
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:  return GL_COMPRESSED_SRGB_S3TC_DXT1_EXT;
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT: return GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT;
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT: return GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT;
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT: return GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT;
+        default: return 0;
+        }
+    }
+
+    //! Uploads an S3TC image into a Texture2D whose internal format is the sRGB variant of the image's format.
+    //! OSG 3.6 can't size sRGB S3TC formats (Texture::getCompressedSize), so each level is sized from the
+    //! image's linear pixel format and uploaded with the texture's sRGB internal format. OSG applies the texture
+    //! parameters (including GL_TEXTURE_MAX_LEVEL for a partial mip chain) before calling load().
+    //! Same approach as the glTF reader's CompressedSRGBUpload.
+    struct SRGBCompressedUpload : public osg::Texture2D::SubloadCallback
+    {
+        //! Number of levels the texture object holds: the image's own, or a full chain that glGenerateMipmap
+        //! fills when a mipmapping filter is set on an image without mipmaps.
+        static unsigned mipLevels(const osg::Texture2D& texture)
+        {
+            const osg::Image* image = texture.getImage();
+            const osg::Texture::FilterMode filter = texture.getFilter(osg::Texture::MIN_FILTER);
+            return !image->isMipmap() && filter != osg::Texture::LINEAR && filter != osg::Texture::NEAREST ?
+                osg::Image::computeNumberOfMipmapLevels(image->s(), image->t()) : image->getNumMipmapLevels();
+        }
+
+        //! The existing texture object can be reused if it still matches the image's size and level count.
+        bool textureObjectValid(const osg::Texture2D& texture, osg::State& state) const override
+        {
+            const osg::Image* image = texture.getImage();
+            osg::Texture::TextureObject* object = texture.getTextureObject(state.getContextID());
+            return image && object && object->match(GL_TEXTURE_2D, mipLevels(texture),
+                texture.getInternalFormat(), image->s(), image->t(), 1, 0);
+        }
+
+        //! Uploads every level of the image. Runs on the draw thread with the texture object bound.
+        void load(const osg::Texture2D& texture, osg::State& state) const override
+        {
+            const osg::Image* image = texture.getImage();
+            if (!image || !image->data())
+                return;
+
+            osg::GLExtensions* ext = state.get<osg::GLExtensions>();
+            if (!ext->glCompressedTexImage2D)
+                return;
+
+            state.unbindPixelBufferObject();
+            int width = image->s(), height = image->t();
+            for (unsigned level = 0; level < image->getNumMipmapLevels(); ++level)
+            {
+                GLint blockSize, size;
+                osg::Texture::getCompressedSize(image->getPixelFormat(), width, height, 1, blockSize, size);
+                ext->glCompressedTexImage2D(GL_TEXTURE_2D, level, texture.getInternalFormat(),
+                    width, height, 0, size, image->getMipmapData(level));
+                width = std::max(1, width / 2);
+                height = std::max(1, height / 2);
+            }
+
+            const unsigned levels = mipLevels(texture);
+            if (levels > image->getNumMipmapLevels() && ext->glGenerateMipmap)
+                ext->glGenerateMipmap(GL_TEXTURE_2D);
+
+            texture.setTextureSize(image->s(), image->t());
+            texture.setNumMipmapLevels(levels);
+            texture.getModifiedCount(state.getContextID()) = image->getModifiedCount();
+        }
+
+        //! Reloads the texture when its image changed.
+        void subload(const osg::Texture2D& texture, osg::State& state) const override
+        {
+            if (texture.getImage() && texture.isDirty(state.getContextID()))
+                load(texture, state);
+        }
+    };
+
+    //! Gives a Texture2D with an uncompressed sRGB internal format the matching sRGB S3TC format once its image
+    //! has been compressed, here or earlier by another texture that shares the image. Without this OSG uploads the
+    //! compressed image with the uncompressed sRGB format and the texture renders black. Does nothing if the
+    //! texture already has a subload callback or the image isn't S3TC. Serialized because loader threads can
+    //! process textures shared through the glTF reader's material cache at the same time.
+    void useSRGBCompressedFormat(osg::Texture2D& texture)
+    {
+        static std::mutex s_mutex;
+        std::lock_guard<std::mutex> lock(s_mutex);
+
+        const osg::Image* image = texture.getImage();
+        if (!image || !image->isCompressed() || texture.getSubloadCallback() ||
+            texture.getInternalFormatMode() != osg::Texture::USE_USER_DEFINED_FORMAT ||
+            !isUncompressedSRGB(texture.getInternalFormat()))
+        {
+            return;
+        }
+
+        const GLenum format = getSRGBCompressedFormat(image->getPixelFormat());
+        if (format != 0)
+        {
+            texture.setInternalFormat(format);
+            texture.setSubloadCallback(new SRGBCompressedUpload());
+        }
+    }
+
     struct CompressAndMipmapTextures : public TextureAndImageVisitor
     {
         void apply(osg::Texture& texture)
         {
+            // A texture with an explicit sRGB internal format can only keep its color space when compressed if it
+            // can be switched to sRGB S3TC, which takes a Texture2D that doesn't already have an upload callback.
+            // Other sRGB textures are left uncompressed (but still mipmapped).
+            const bool srgb = texture.getInternalFormatMode() == osg::Texture::USE_USER_DEFINED_FORMAT &&
+                isUncompressedSRGB(texture.getInternalFormat());
+            osg::Texture2D* texture2D = dynamic_cast<osg::Texture2D*>(&texture);
+            const bool compress = !srgb || (texture2D && !texture2D->getSubloadCallback());
+
             for (unsigned i = 0; i < texture.getNumImages(); ++i)
             {
                 // Only process textures with valid images.
                 osg::ref_ptr< osg::Image > image = texture.getImage(i);
                 if (image.valid())
                 {
-                    ImageUtils::compressImageInPlace(image.get());
+                    if (compress)
+                    {
+                        ImageUtils::compressImageInPlace(image.get());
+                    }
                     ImageUtils::mipmapImageInPlace(image.get());
                 }
                 else
                 {
                     OE_WARN << "Skipping null image in CompressAndMipmapTextures" << std::endl;
                 }
+            }
+
+            if (srgb && texture2D)
+            {
+                useSRGBCompressedFormat(*texture2D);
             }
         }
     };

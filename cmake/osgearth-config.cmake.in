@@ -32,6 +32,49 @@ set(osgEarth_SHARE_DIR "@PACKAGE_OSGEARTH_INSTALL_DATADIR@")
 include(CMakeFindDependencyMacro)
 find_dependency(OpenSceneGraph REQUIRED COMPONENTS osg osgDB osgGA osgUtil osgViewer OpenThreads)
 
+function(_osgearth_remove_legacy_osg_paths TARGET_NAME)
+    get_target_property(_MY_LINK_LIBS ${TARGET_NAME} INTERFACE_LINK_LIBRARIES)
+    if(NOT _MY_LINK_LIBS)
+        return()
+    endif()
+
+    set(_MY_FILTERED_LINK_LIBS)
+    set(_MY_LINK_KEYWORD "")
+
+    foreach(_MY_LINK_LIB IN LISTS _MY_LINK_LIBS)
+        if(_MY_LINK_LIB STREQUAL "optimized" OR _MY_LINK_LIB STREQUAL "debug" OR _MY_LINK_LIB STREQUAL "general")
+            set(_MY_LINK_KEYWORD "${_MY_LINK_LIB}")
+            continue()
+        endif()
+
+        set(_MY_DROP_LINK_LIB OFF)
+        set(_MY_LINK_CANDIDATE "${_MY_LINK_LIB}")
+        if(_MY_LINK_CANDIDATE MATCHES "^\\$<LINK_ONLY:(.*)>$")
+            set(_MY_LINK_CANDIDATE "${CMAKE_MATCH_1}")
+        endif()
+
+        if(IS_ABSOLUTE "${_MY_LINK_CANDIDATE}")
+            get_filename_component(_MY_LINK_NAME "${_MY_LINK_CANDIDATE}" NAME_WE)
+            string(REGEX REPLACE "^lib" "" _MY_LINK_NAME "${_MY_LINK_NAME}")
+            string(REGEX REPLACE "d$" "" _MY_LINK_NAME "${_MY_LINK_NAME}")
+            if(_MY_LINK_NAME MATCHES "^(osg|osgDB|osgGA|osgUtil|osgViewer|osgText|osgSim|osgShadow|osgManipulator|OpenThreads)$")
+                set(_MY_DROP_LINK_LIB ON)
+            endif()
+        endif()
+
+        if(NOT _MY_DROP_LINK_LIB)
+            if(_MY_LINK_KEYWORD)
+                list(APPEND _MY_FILTERED_LINK_LIBS "${_MY_LINK_KEYWORD}")
+            endif()
+            list(APPEND _MY_FILTERED_LINK_LIBS "${_MY_LINK_LIB}")
+        endif()
+
+        set(_MY_LINK_KEYWORD "")
+    endforeach()
+
+    set_property(TARGET ${TARGET_NAME} PROPERTY INTERFACE_LINK_LIBRARIES "${_MY_FILTERED_LINK_LIBS}")
+endfunction()
+
 # additional public dependencies
 foreach(MY_DEPENDENCY @OSGEARTH_PUBLIC_DEPENDENCIES@)
     find_dependency(${MY_DEPENDENCY} REQUIRED)
@@ -45,9 +88,13 @@ foreach(MY_COMPONENT @OSGEARTH_COMPONENTS@)
     if(NOT TARGET osgEarth::${MY_COMPONENT})
         include("${CMAKE_CURRENT_LIST_DIR}/${MY_COMPONENT}-targets.cmake")
     endif()
+    if(TARGET osgEarth::${MY_COMPONENT})
+        _osgearth_remove_legacy_osg_paths(osgEarth::${MY_COMPONENT})
+    endif()
 endforeach()
 
 target_include_directories(osgEarth::osgEarth INTERFACE "${OPENSCENEGRAPH_INCLUDE_DIR}")
+target_link_libraries(osgEarth::osgEarth INTERFACE ${OPENSCENEGRAPH_LIBRARIES})
 
 set(osgEarth_FOUND TRUE)
 set(OSGEARTH_FOUND TRUE)

@@ -675,9 +675,24 @@ void ThreeDTileNode::setParentTile(ThreeDTileNode* parentTile)
 {
     _parentTile = parentTile;
     // Inherit the parent's refine policy if this Tile's refine policy isn't set.
-    if (parentTile && !_tile->refine().isSet())
+    if (!parentTile || _tile->refine().isSet() || _refine == parentTile->getRefinePolicy())
     {
-        _refine = parentTile->getRefinePolicy();
+        return;
+    }
+    _refine = parentTile->getRefinePolicy();
+
+    // The children were built (and inherited) in the constructor, before this tile knew its parent,
+    // so pass the changed policy down to them.
+    if (_children.valid())
+    {
+        for (unsigned int i = 0; i < _children->getNumChildren(); i++)
+        {
+            ThreeDTileNode* childTile = dynamic_cast<ThreeDTileNode*>(_children->getChild(i));
+            if (childTile)
+            {
+                childTile->setParentTile(this);
+            }
+        }
     }
 }
 

@@ -11,6 +11,7 @@
 #include <osgEarth/SpatialReference>
 #include <osgEarth/StringUtils>
 #include <osg/Shape>
+#include <string>
 #include <vector>
 
 namespace osgEarth

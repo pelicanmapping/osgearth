@@ -24,6 +24,7 @@
 #include <osgEarth/Lighting>
 #include <osgEarth/PointDrawable>
 #include <osgEarth/TerrainEngineNode>
+#include <osgEarth/MapNode>
 
 #include <osg/MatrixTransform>
 #include <osg/ShapeDrawable>
@@ -48,6 +49,19 @@
 using namespace osgEarth;
 using namespace osgEarth::Util;
 using namespace osgEarth::SimpleSky;
+
+namespace
+{
+    // The terrain engine under the sky, found through its MapNode. Searching for the engine itself walks the
+    // whole map (every tile of a 3D Tiles layer, say) on each update while it isn't found, and a hidden terrain
+    // (node mask 0) is never found. Returns null for a hidden terrain, as that search did.
+    TerrainEngineNode* findVisibleTerrainEngine(osg::Node* sky)
+    {
+        MapNode* mapNode = osgEarth::findTopMostNodeOfType<MapNode>(sky);
+        TerrainEngineNode* terrain = mapNode ? dynamic_cast<TerrainEngineNode*>(mapNode->getTerrainEngine()) : nullptr;
+        return terrain && terrain->getNodeMask() != 0 ? terrain : nullptr;
+    }
+}
 
 //---------------------------------------------------------------------------
 
@@ -367,7 +381,7 @@ SimpleSkyNode::traverse(osg::NodeVisitor& nv)
         {
             if (!_environment.valid())
             {
-                auto terrain = osgEarth::findTopMostNodeOfType<TerrainEngineNode>(this);
+                auto terrain = findVisibleTerrainEngine(this);
                 if (terrain)
                 {
                     _environment = new SkyEnvironment;
@@ -396,7 +410,7 @@ SimpleSkyNode::traverse(osg::NodeVisitor& nv)
             auto eb = static_cast<Bruneton::ComputeDrawable*>(_eb_drawable.get());
             if (eb->isReady())
             {
-                TerrainEngineNode* terrain = osgEarth::findTopMostNodeOfType<TerrainEngineNode>(this);
+                TerrainEngineNode* terrain = findVisibleTerrainEngine(this);
                 if (terrain)
                 {
                     osg::StateSet* groundStateSet =
@@ -418,9 +432,11 @@ SimpleSkyNode::traverse(osg::NodeVisitor& nv)
                         OE_WARN << LC << "Bruneton lighting failed to initialize" << std::endl;
                         _eb_drawable = nullptr;
                     }
-                }
 
-                ADJUST_UPDATE_TRAV_COUNT(this, -1);
+                    // Only once, when initialization is done: without a terrain this runs every frame, and
+                    // repeated decrements would drop the sky and the map under it out of the update traversal.
+                    ADJUST_UPDATE_TRAV_COUNT(this, -1);
+                }
             }
         }
     }

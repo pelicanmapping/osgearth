@@ -16,6 +16,9 @@
 #include <osgDB/Options>
 #include <osgUtil/CullVisitor>
 #include <osgEarth/LoadableNode>
+#include <atomic>
+#include <memory>
+#include <vector>
 
 namespace osgUtil {
     class IncrementalCompileOperation;
@@ -52,6 +55,10 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         OE_OPTION(osg::BoundingBoxd, box);
         OE_OPTION(osg::BoundingBoxd, region);
         OE_OPTION(osg::BoundingSphere, sphere);
+
+        //! The box as authored: rows 0-2 hold the x, y and z half-axis vectors and row 3 the center, so the
+        //! matrix maps the cube [-1,1]^3 onto the oriented box. box() holds the axis-aligned bounds of its corners.
+        OE_OPTION(osg::Matrixd, orientedBox);
 
         BoundingVolume() { }
         BoundingVolume(const Json::Value& value) { fromJSON(value); }
@@ -146,8 +153,26 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
 
         void updateTracking(osgUtil::CullVisitor* cv);
 
-        void requestContent(osgUtil::IncrementalCompileOperation* ico);
+        //! Starts loading this tile's content in the 3D Tiles job pool, compiling it with the given ICO (if any)
+        //! before it is attached. Bypasses the tileset's request queue; returns false when nothing was started
+        //! because the content is loaded, already requested, absent, or waiting out a retry after a failure.
+        bool requestContent(osgUtil::IncrementalCompileOperation* ico);
 
+        //! Abandons an outstanding content request (canceling the download if it is still running) so the
+        //! tile can request it again later. Cull thread only.
+        void cancelContentRequest();
+
+        //! True while a content request has been made but its result has not been attached yet.
+        bool isContentRequestPending() const;
+
+        //! Called during cull by a parent that wants to draw this tile in its place. Touches the tile so it won't
+        //! expire, queues requests for any content it is missing (at the given priority, higher loads first), and
+        //! returns true once the tile can be drawn without leaving a hole: its content is loaded, the root of an
+        //! external tileset it points to is drawable, or, for a tile with no content, all of its children are.
+        bool prepareForRefine(osgUtil::CullVisitor* cv, double priority);
+
+        //! Distance from the eye to the closest point of the tile's bounding volume (box or region when it has
+        //! one, otherwise its sphere), scaled by the cull visitor's LOD scale; 0 when the eye is inside.
         double getDistanceToTile(osgUtil::CullVisitor* cv);
 
         double computeScreenSpaceError(osgUtil::CullVisitor* cv);
@@ -273,10 +298,19 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
 
         bool _firstVisit;
 
+        //! Load priority (higher first) for this tile's refinement: its screen-space error, weighted toward
+        //! tiles near the center of the view.
+        double computeLoadPriority(const osg::Matrixd& modelView, double error) const;
+
         osg::BoundingBoxd _boundingBox;
         osg::Matrixd _boundingBoxLocalToWorld;
 
-        osg::BoundingSphere _localBoundingSphere;
+        // Bounding sphere in the tile's (content) coordinate frame, in double precision for ECEF tiles.
+        osg::BoundingSphered _localBoundingSphere;
+
+        // Content load failures and when the content may be requested again (osg::Timer seconds).
+        unsigned _loadFailures = 0u;
+        double _retryTime = 0.0;
 
         osg::ref_ptr< osgDB::Options > _options;
 
@@ -338,6 +372,22 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         void setMaxAge(float maxAge);
 
         /**
+         * Gets/sets how many tile content loads (download, parse and texture preparation) may run at once.
+         * Defaults to 20, or the OSGEARTH_3DTILES_MAX_LOADS environment variable. The shared 3D Tiles job pool
+         * grows to at least this many threads.
+         */
+        unsigned int getMaxSimultaneousLoads() const;
+        void setMaxSimultaneousLoads(unsigned int value);
+
+        /**
+         * Asks for a tile's content to be loaded. During this tileset's cull traversal the request is queued;
+         * when the traversal finishes, the queued requests are ranked by priority (higher first) and only as many
+         * are started as there are free load slots. The rest are dropped and asked for again by the next frame,
+         * so the queue always reflects the current view. Outside a cull the load starts immediately.
+         */
+        void requestTileContent(ThreeDTileNode* node, double priority);
+
+        /**
          * Turns on/off bounding volume visualization.
          */
         bool getShowBoundingVolumes() const;
@@ -353,7 +403,19 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         void setOwnerName(const std::string& name);
 
     private:
+        friend class ThreeDTileNode;
+
         void expireTiles(const osg::NodeVisitor& nv);
+
+        //! A load slot, held by a content job for as long as it exists; releasing it frees the slot.
+        std::shared_ptr<void> acquireLoadSlot();
+
+        //! Cancels in-flight requests for tiles no culls have visited recently.
+        void cancelStaleRequests(double frameTime);
+
+        //! Ranks the requests queued by one cull traversal and starts as many as there are free load slots.
+        void dispatchRequests(std::vector<std::pair<double, ThreeDTileNode*>>& requests,
+            osgUtil::IncrementalCompileOperation* ico, double frameTime);
 
         osg::ref_ptr<Tileset> _tileset;
         osg::ref_ptr<osgDB::Options> _options;
@@ -365,6 +427,13 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
 
         unsigned int _maxTiles;
         float _maxAge;
+
+        unsigned int _maxSimultaneousLoads;
+        std::shared_ptr<std::atomic_uint> _loadsInFlight;
+
+        // Tiles whose loads were started from the request queue, so stale ones can be canceled.
+        std::mutex _loadingMutex;
+        std::vector<osg::observer_ptr<ThreeDTileNode>> _loading;
 
         bool _showBoundingVolumes;
         bool _showColorPerTile;

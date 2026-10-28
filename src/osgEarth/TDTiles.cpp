@@ -14,6 +14,11 @@
 #include <osgEarth/GLUtils>
 #include <osgEarth/LineDrawable>
 #include <osgEarth/Math>
+#include <osgEarth/Horizon>
+#include <osgEarth/MapNode>
+#include <osgEarth/Progress>
+
+#include <algorithm>
 
 #include <osgDB/FileNameUtils>
 #include <osgDB/Registry>
@@ -28,9 +33,53 @@ using namespace osgEarth::Contrib::ThreeDTiles;
 
 #define SENTRY_VALUE NULL
 
+// Job pool shared by every tileset's content loads.
+#define JOB_POOL_NAME "oe.3dtiles"
+
+// Content loads allowed in flight per tileset unless set otherwise (Cesium's maximumSimultaneousTileLoads).
+#define DEFAULT_MAX_SIMULTANEOUS_LOADS 20u
+
+// A queued load whose tile no cull has visited for this long (seconds) is canceled.
+#define STALE_REQUEST_AGE 0.25
+
+// The horizon test uses an ellipsoid this much (meters) smaller than the map's, so terrain below the
+// ellipsoid (the Dead Sea shore is ~430 m down) can't hide tiles that are actually visible.
+#define HORIZON_ELLIPSOID_MARGIN 1000.0
+
 //........................................................................
 
 using ICO = osgUtil::IncrementalCompileOperation;
+
+namespace
+{
+    // State shared by all tiles of one tileset during one cull traversal.
+    struct CullContext
+    {
+        osgEarth::Contrib::ThreeDTiles::ThreeDTilesetNode* tileset = nullptr;
+
+        // Eye-to-world matrix of the camera being culled.
+        osg::Matrixd inverseView;
+
+        // Occlusion by the planet, when the tileset is on a geocentric map.
+        bool horizonValid = false;
+        osgEarth::Horizon horizon;
+
+        // Content requests made during the traversal, with their priorities (higher first).
+        std::vector<std::pair<double, osgEarth::Contrib::ThreeDTiles::ThreeDTileNode*>> requests;
+    };
+
+    // The context of the tileset being culled on this thread. A cull traversal runs on a single thread and
+    // visits a tileset's tiles from inside its ThreeDTilesetNode::traverse, which installs and removes it.
+    thread_local CullContext* s_cullContext = nullptr;
+
+    // Holds one of a tileset's load slots for as long as it exists.
+    struct LoadSlot
+    {
+        explicit LoadSlot(std::shared_ptr<std::atomic_uint> counter) : _counter(std::move(counter)) { ++(*_counter); }
+        ~LoadSlot() { --(*_counter); }
+        std::shared_ptr<std::atomic_uint> _counter;
+    };
+}
 
 
 namespace osgEarth { namespace Contrib { namespace ThreeDTiles
@@ -150,19 +199,27 @@ BoundingVolume::fromJSON(const Json::Value& value)
                 values[index] = (*j).asDouble();
                 index++;
             }
-            Json::Value::const_iterator i = a.begin();
             osg::Vec3d center(values[0], values[1], values[2]);
             osg::Vec3d xvec(values[3], values[4], values[5]);
             osg::Vec3d yvec(values[6], values[7], values[8]);
             osg::Vec3d zvec(values[9], values[10], values[11]);
 
+            orientedBox() = osg::Matrixd(
+                xvec.x(), xvec.y(), xvec.z(), 0.0,
+                yvec.x(), yvec.y(), yvec.z(), 0.0,
+                zvec.x(), zvec.y(), zvec.z(), 0.0,
+                center.x(), center.y(), center.z(), 1.0);
+
+            // The axis-aligned bounds must take all eight corners: the face centers alone miss most of a
+            // tilted box, which made tiles get culled while they were still in view.
             auto& b = box().mutable_value();
-            b.expandBy(center+xvec);
-            b.expandBy(center-xvec);
-            b.expandBy(center+yvec);
-            b.expandBy(center-yvec);
-            b.expandBy(center+zvec);
-            b.expandBy(center-zvec);
+            for (int corner = 0; corner < 8; ++corner)
+            {
+                b.expandBy(center +
+                    xvec * ((corner & 1) ? 1.0 : -1.0) +
+                    yvec * ((corner & 2) ? 1.0 : -1.0) +
+                    zvec * ((corner & 4) ? 1.0 : -1.0));
+            }
         }
         else OE_WARN << "Invalid box array" << std::endl;
     }
@@ -192,6 +249,17 @@ BoundingVolume::getJSON() const
         a.append(sphere()->center().z());
         a.append(sphere()->radius());
         value["sphere"] = a;
+    }
+    else if (orientedBox().isSet())
+    {
+        const osg::Matrixd& m = orientedBox().get();
+        Json::Value a(Json::arrayValue);
+        for (int row : { 3, 0, 1, 2 })
+        {
+            for (int col = 0; col < 3; ++col)
+                a.append(m(row, col));
+        }
+        value["box"] = a;
     }
     else if (box().isSet())
     {
@@ -225,6 +293,19 @@ BoundingVolume::asBoundingSphere() const
     else if (sphere().isSet())
     {
         return sphere().get();
+    }
+
+    else if (orientedBox().isSet())
+    {
+        // The farthest corner from the center; the corners come in opposite pairs, so four suffice.
+        const osg::Matrixd& m = orientedBox().get();
+        osg::Vec3d x(m(0, 0), m(0, 1), m(0, 2));
+        osg::Vec3d y(m(1, 0), m(1, 1), m(1, 2));
+        osg::Vec3d z(m(2, 0), m(2, 1), m(2, 2));
+        double radius2 = std::max(
+            std::max((x + y + z).length2(), (x + y - z).length2()),
+            std::max((x - y + z).length2(), (x - y - z).length2()));
+        return osg::BoundingSphere(m.getTrans(), sqrt(radius2));
     }
 
     else if (box().isSet())
@@ -473,7 +554,7 @@ namespace
             _requestLayer = NetworkMonitor::getRequestLayer();
         }
 
-        osg::ref_ptr<osg::Node> loadTileSet(Cancelable* progress)
+        osg::ref_ptr<osg::Node> loadTileSet(ProgressCallback* progress)
         {
             NetworkMonitor::ScopedRequestLayer layerRequest(_requestLayer);
 
@@ -486,7 +567,7 @@ namespace
             if (_parentTileset.lock(parentTileset))
             {
                 // load the tile set:
-                ReadResult rr = _uri.readString(_options.get());
+                ReadResult rr = _uri.readString(_options.get(), progress);
 
                 if (rr.failed())
                 {
@@ -515,7 +596,51 @@ namespace
 
     using ReadTileData = osg::ref_ptr<osg::Node>;
     using ReadTileResult = Future<ReadTileData>;
-    //typedef Job<osg::ref_ptr<osg::Node>> AsyncTileJob;
+
+    // Runs a tile load in the 3D Tiles job pool and returns its result. The job holds the given load slot only
+    // while it reads; GL compilation is handed to the ICO (when there is one), which resolves the future once it
+    // is done, so the pool thread doesn't sit waiting for the draw thread. Abandoning the future cancels the job,
+    // or the download if it is already running. A null result means the load failed.
+    template<typename LOAD>
+    ReadTileResult dispatchTileLoad(
+        const std::string& name,
+        LOAD load,
+        osg::observer_ptr<ICO> ico,
+        std::shared_ptr<void> slot)
+    {
+        jobs::context context;
+        context.name = name;
+        context.pool = jobs::get_pool(JOB_POOL_NAME);
+
+        auto job = [name, load, ico, slot](auto& promise)
+        {
+            osg::ref_ptr<osg::Node> node;
+            try
+            {
+                osg::ref_ptr<ProgressCallback> progress = new ProgressCallback(&promise);
+                node = load(progress.get());
+            }
+            catch (const std::exception& e)
+            {
+                // An exception escaping a pool thread would terminate the application.
+                OE_WARN << LC << "Failed to load " << name << ": " << e.what() << std::endl;
+                node = nullptr;
+            }
+
+            if (node.valid() && !promise.canceled())
+            {
+                GLObjectsCompiler compiler;
+                osg::ref_ptr<osgUtil::StateToCompile> state = compiler.collectState(node.get());
+                compiler.requestIncrementalCompileWithICO(node, state.get(), ico, promise);
+                return;
+            }
+
+            promise.resolve(node);
+        };
+
+        ReadTileResult result;
+        return jobs::dispatch(job, result, context);
+    }
 
     osg::ref_ptr<osg::Node> readTilesetSync(
         ThreeDTilesetNode* parentTileset,
@@ -529,53 +654,44 @@ namespace
     ReadTileResult readTilesetAsync(
         ThreeDTilesetNode* parentTileset,
         const URI& uri,
-        osgDB::Options* options)
+        osgDB::Options* options,
+        osg::observer_ptr<ICO> ico,
+        std::shared_ptr<void> slot)
     {
         std::shared_ptr<LoadTilesetOperation> operation = std::make_shared<LoadTilesetOperation>(
             parentTileset, uri, options);
 
-        auto job = [operation](Cancelable& progress)
+        auto load = [operation](ProgressCallback* progress)
         {
-            return operation->loadTileSet(&progress);
+            return operation->loadTileSet(progress);
         };
 
-        return jobs::dispatch(job,
-            jobs::context{ uri.full(), jobs::get_pool("oe.3dtiles") });
+        return dispatchTileLoad(uri.full(), load, ico, slot);
     }
 
+    // Loads content without compiling it: the root tile of an external tileset loads this way while its
+    // tileset is read in a job, and that job compiles the whole tileset node afterwards.
     osg::ref_ptr<osg::Node> readTileContentSync(
         const URI& uri,
         osg::ref_ptr<const osgDB::Options> options)
     {
-        osg::ref_ptr<osg::Node> node = uri.getNode(options.get(), nullptr);
-        if (node.valid())
-        {
-            GLObjectsCompiler compiler;
-            compiler.compileNow(node.get(), options.get(), nullptr);
-        }
-        return node;
+        return uri.getNode(options.get(), nullptr);
     }
 
     ReadTileResult readTileContentAsync(
         const URI& uri,
-        osg::ref_ptr<const osgDB::Options> options)
+        osg::ref_ptr<const osgDB::Options> options,
+        const std::string& requestLayer,
+        osg::observer_ptr<ICO> ico,
+        std::shared_ptr<void> slot)
     {
-        jobs::context context;
-        context.name = uri.full();
-        context.pool = jobs::get_pool("oe.3dtiles");
+        auto load = [uri, options, requestLayer](ProgressCallback* progress)
+        {
+            NetworkMonitor::ScopedRequestLayer layerRequest(requestLayer);
+            return osg::ref_ptr<osg::Node>(uri.getNode(options.get(), progress));
+        };
 
-        return jobs::dispatch([uri, options](Cancelable& progress)
-            {
-                osg::ref_ptr<osg::Node> node = uri.getNode(options.get(), nullptr);
-                if (node.valid())
-                {
-                    GLObjectsCompiler compiler;
-                    compiler.compileNow(node.get(), options.get(), &progress);
-                }
-                return node;
-            },
-            context
-        );
+        return dispatchTileLoad(uri.full(), load, ico, slot);
     }
 }
 
@@ -615,8 +731,6 @@ ThreeDTileNode::ThreeDTileNode(ThreeDTilesetNode* tileset, Tile* tile, bool imme
     {
         _refine = *tile->refine();
     }
-
-    _localBoundingSphere = tile->boundingVolume()->asBoundingSphere();
 
     if (_immediateLoad && _tile->content().isSet())
     {
@@ -698,19 +812,23 @@ void ThreeDTileNode::setParentTile(ThreeDTileNode* parentTile)
 
 void ThreeDTileNode::computeBoundingVolume()
 {
-    if (_tile->boundingVolume()->region().isSet())
+    const BoundingVolume& volume = _tile->boundingVolume().get();
+
+    if (volume.region().isSet())
     {
         const SpatialReference* srs = SpatialReference::get("epsg:4326");
+        const osg::BoundingBoxd& region = volume.region().get();
 
         GeoExtent extent(srs,
-            osg::RadiansToDegrees(_tile->boundingVolume()->region()->xMin()),
-            osg::RadiansToDegrees(_tile->boundingVolume()->region()->yMin()),
-            osg::RadiansToDegrees(_tile->boundingVolume()->region()->xMax()),
-            osg::RadiansToDegrees(_tile->boundingVolume()->region()->yMax()));
+            osg::RadiansToDegrees(region.xMin()),
+            osg::RadiansToDegrees(region.yMin()),
+            osg::RadiansToDegrees(region.xMax()),
+            osg::RadiansToDegrees(region.yMax()));
 
         // For really large bounding regions just use the bounding sphere to avoid transformation issues.
         if (extent.width() >= 5.0 || extent.height() >= 5.0)
         {
+            _localBoundingSphere = extent.createWorldBoundingSphere(region.zMin(), region.zMax());
             return;
         }
 
@@ -720,24 +838,22 @@ void ThreeDTileNode::computeBoundingVolume()
         centroid.createWorldToLocal(worldToLocal);
         centroid.createLocalToWorld(localToWorld);
 
+        // Sample a 3x3 grid at both heights: the ellipsoid bulges up between the corners, so the corners alone
+        // would leave out the top of the region around its middle.
         osg::Vec3d world;
         osg::BoundingBoxd bb;
-
-        GeoPoint(srs, extent.west(), extent.south(), _tile->boundingVolume()->region()->zMin()).toWorld(world);
-        bb.expandBy(world * worldToLocal);
-        GeoPoint(srs, extent.east(), extent.south(), _tile->boundingVolume()->region()->zMin()).toWorld(world);
-        bb.expandBy(world * worldToLocal);
-        GeoPoint(srs, extent.east(), extent.north(), _tile->boundingVolume()->region()->zMin()).toWorld(world);
-        bb.expandBy(world * worldToLocal);
-        GeoPoint(srs, extent.west(), extent.north(), _tile->boundingVolume()->region()->zMin()).toWorld(world);
-
-        GeoPoint(srs, extent.west(), extent.south(), _tile->boundingVolume()->region()->zMax()).toWorld(world);
-        bb.expandBy(world * worldToLocal);
-        GeoPoint(srs, extent.east(), extent.south(), _tile->boundingVolume()->region()->zMax()).toWorld(world);
-        bb.expandBy(world * worldToLocal);
-        GeoPoint(srs, extent.east(), extent.north(), _tile->boundingVolume()->region()->zMax()).toWorld(world);
-        bb.expandBy(world * worldToLocal);
-        GeoPoint(srs, extent.west(), extent.north(), _tile->boundingVolume()->region()->zMax()).toWorld(world);
+        for (int i = 0; i < 3; ++i)
+        {
+            for (int j = 0; j < 3; ++j)
+            {
+                double lon = extent.west() + 0.5 * extent.width() * i;
+                double lat = extent.south() + 0.5 * extent.height() * j;
+                GeoPoint(srs, lon, lat, region.zMin()).toWorld(world);
+                bb.expandBy(world * worldToLocal);
+                GeoPoint(srs, lon, lat, region.zMax()).toWorld(world);
+                bb.expandBy(world * worldToLocal);
+            }
+        }
 
         // Bounding region culling and display are supposed to ignore the matrix transform of the tile, but b/c of the nested
         // nature of the ThreeDTileNode class the MatrixTransform is going to be applied already by the time
@@ -746,9 +862,75 @@ void ThreeDTileNode::computeBoundingVolume()
         _boundingBoxLocalToWorld = getInverseMatrix() * localToWorld;
         _boundingBox = bb;
     }
-    else if (_tile->boundingVolume()->box().isSet())
+    else if (volume.orientedBox().isSet())
     {
-        _boundingBox = _tile->boundingVolume()->box().get();
+        // Cull and measure distances against the box itself, in a frame aligned with its axes, rather than an
+        // axis-aligned box around it, which can be several times larger for a tilted box.
+        const osg::Matrixd& m = volume.orientedBox().get();
+        osg::Vec3d halfAxes[3] = {
+            osg::Vec3d(m(0, 0), m(0, 1), m(0, 2)),
+            osg::Vec3d(m(1, 0), m(1, 1), m(1, 2)),
+            osg::Vec3d(m(2, 0), m(2, 1), m(2, 2)) };
+
+        // Build an orthonormal frame from the two longest half-axes (a flat box has a zero-length one).
+        int longest = 0;
+        for (int i = 1; i < 3; ++i)
+        {
+            if (halfAxes[i].length2() > halfAxes[longest].length2())
+                longest = i;
+        }
+        int second = (longest + 1) % 3;
+        if (halfAxes[(longest + 2) % 3].length2() > halfAxes[second].length2())
+            second = (longest + 2) % 3;
+
+        osg::Vec3d frame[3];
+        frame[0] = halfAxes[longest];
+        double length0 = frame[0].normalize();
+        frame[1] = halfAxes[second] - frame[0] * (halfAxes[second] * frame[0]);
+        double length1 = frame[1].normalize();
+
+        if (length0 > 0.0 && length1 > 0.0)
+        {
+            frame[2] = frame[0] ^ frame[1];
+
+            // The extent along each frame axis is the sum of the half-axes' projections onto it: exactly the
+            // box when its axes are orthogonal, and still enclosing it if they are slightly skewed.
+            double extents[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                extents[k] = 0.0;
+                for (int i = 0; i < 3; ++i)
+                    extents[k] += std::abs(halfAxes[i] * frame[k]);
+            }
+
+            _boundingBoxLocalToWorld.set(
+                frame[0].x(), frame[0].y(), frame[0].z(), 0.0,
+                frame[1].x(), frame[1].y(), frame[1].z(), 0.0,
+                frame[2].x(), frame[2].y(), frame[2].z(), 0.0,
+                m(3, 0), m(3, 1), m(3, 2), 1.0);
+            _boundingBox.set(-extents[0], -extents[1], -extents[2], extents[0], extents[1], extents[2]);
+        }
+        else
+        {
+            // A degenerate box (a line or a point): use its axis-aligned bounds, kept relative to the center.
+            _boundingBoxLocalToWorld.makeTranslate(m.getTrans());
+            _boundingBox.set(
+                volume.box()->_min - m.getTrans(),
+                volume.box()->_max - m.getTrans());
+        }
+    }
+    else if (volume.box().isSet())
+    {
+        _boundingBox = volume.box().get();
+    }
+
+    if (_boundingBox.valid())
+    {
+        _localBoundingSphere.set(_boundingBox.center() * _boundingBoxLocalToWorld, _boundingBox.radius());
+    }
+    else if (volume.sphere().isSet())
+    {
+        _localBoundingSphere.set(volume.sphere()->center(), volume.sphere()->radius());
     }
 }
 
@@ -817,10 +999,9 @@ void ThreeDTileNode::createDebugBounds()
 {
     if (_tile->boundingVolume()->sphere().isSet())
     {
-        osg::BoundingSphere bs = _localBoundingSphere;
         osg::MatrixTransform* mt = new osg::MatrixTransform;
-        mt->setMatrix(osg::Matrixd::translate(bs.center()));
-        mt->addChild(buildSphere(bs.radius(), 20, 20, _debugColor));
+        mt->setMatrix(osg::Matrixd::translate(_localBoundingSphere.center()));
+        mt->addChild(buildSphere(_localBoundingSphere.radius(), 20, 20, _debugColor));
         _boundsDebug = mt;
     }
     else if (_boundingBox.valid())
@@ -885,8 +1066,21 @@ void ThreeDTileNode::resolveContent()
     {
         _content = _contentFuture.value();
 
-        if (_content.valid())
+        if (!_content.valid())
         {
+            // The load failed, maybe because the server is throttling requests. Allow another request after a
+            // backoff that doubles with each failure (up to 30 s), rather than leaving this tile, and any parent
+            // waiting to refine to it, stuck for good.
+            _requestedContent = false;
+            _contentFuture.abandon();
+            double backoff = std::min(30.0, 0.5 * (double)(1u << std::min(_loadFailures, 6u)));
+            ++_loadFailures;
+            _retryTime = osg::Timer::instance()->time_s() + backoff;
+        }
+        else
+        {
+            _loadFailures = 0u;
+
             // Assign the parent node if we just loaded a tileset
             ThreeDTilesetContentNode* tilesetContentNode = dynamic_cast<ThreeDTilesetContentNode*>(_content.get());
             if (tilesetContentNode)
@@ -907,51 +1101,132 @@ void ThreeDTileNode::resolveContent()
 }
 
 
-void ThreeDTileNode::requestContent(ICO* ico)
+bool ThreeDTileNode::requestContent(ICO* ico)
 {
-    if (!_content.valid() && !_requestedContent && hasContent())
+    if (_content.valid() || _requestedContent || !hasContent())
     {
-        // if there's an ICO, install it:
-        osg::ref_ptr<osgDB::Options> localOptions;
-        if (ico)
-        {
-            localOptions = Registry::instance()->cloneOrCreateOptions(_options.get());
-            ObjectStorage::set(localOptions.get(), ico);
-        }
-        else
-        {
-            localOptions = _options.get();
-        }
-
-        URIContext context = _tile->content()->uri()->context();
-        if (!_tileset->getAuthorizationHeader().empty())
-        {
-            context.addHeader("authorization", _tileset->getAuthorizationHeader());
-        }
-
-        URI uri(_tile->content()->uri()->base(), context);
-
-        NetworkMonitor::ScopedRequestLayer layerRequest(_tileset->getOwnerName());
-        
-        if (osgEarth::Strings::endsWith(osgEarth::removeQueryParams(_tile->content()->uri()->base()), ".json"))
-        {
-            // "json" extension = external tileset:
-            _contentFuture = readTilesetAsync(_tileset, uri, localOptions.get());
-        }
-        else
-        {
-            // else, actual content:
-            _contentFuture = readTileContentAsync(uri, localOptions);
-        }
-
-        _requestedContent = true;
+        return false;
     }
+
+    // After a failed load, wait out the backoff before trying again.
+    if (_loadFailures > 0u && osg::Timer::instance()->time_s() < _retryTime)
+    {
+        return false;
+    }
+
+    URIContext context = _tile->content()->uri()->context();
+    if (!_tileset->getAuthorizationHeader().empty())
+    {
+        context.addHeader("authorization", _tileset->getAuthorizationHeader());
+    }
+
+    URI uri(_tile->content()->uri()->base(), context);
+
+    std::shared_ptr<void> slot = _tileset->acquireLoadSlot();
+
+    if (osgEarth::Strings::endsWith(osgEarth::removeQueryParams(_tile->content()->uri()->base()), ".json"))
+    {
+        // "json" extension = external tileset:
+        NetworkMonitor::ScopedRequestLayer layerRequest(_tileset->getOwnerName());
+        _contentFuture = readTilesetAsync(_tileset, uri, _options.get(), ico, slot);
+    }
+    else
+    {
+        // else, actual content:
+        _contentFuture = readTileContentAsync(uri, _options, _tileset->getOwnerName(), ico, slot);
+    }
+
+    _requestedContent = true;
+    return true;
+}
+
+void ThreeDTileNode::cancelContentRequest()
+{
+    if (isContentRequestPending())
+    {
+        _contentFuture.abandon();
+        _requestedContent = false;
+    }
+}
+
+bool ThreeDTileNode::isContentRequestPending() const
+{
+    return _requestedContent && !_content.valid() && !_contentFuture.available();
+}
+
+bool ThreeDTileNode::prepareForRefine(osgUtil::CullVisitor* cv, double priority)
+{
+    // Touch the tile even when it's outside the view and won't be traversed: its parent can't refine until it
+    // is ready, so it must not expire while the parent needs it.
+    updateTracking(cv);
+
+    if (hasContent())
+    {
+        if (!isContentReady())
+        {
+            _tileset->requestTileContent(this, priority);
+            return false;
+        }
+
+        // An external tileset is drawn through its root tile, so that has to be drawable as well.
+        ThreeDTilesetContentNode* tilesetContent = dynamic_cast<ThreeDTilesetContentNode*>(_content.get());
+        ThreeDTileNode* root = tilesetContent ? tilesetContent->getTileNode() : nullptr;
+        return root == nullptr || root->prepareForRefine(cv, priority);
+    }
+
+    // A tile without content draws its children instead, so all of them have to be ready.
+    bool ready = true;
+    if (_children.valid())
+    {
+        for (unsigned int i = 0; i < _children->getNumChildren(); i++)
+        {
+            ThreeDTileNode* childTile = dynamic_cast<ThreeDTileNode*>(_children->getChild(i));
+            if (childTile && !childTile->prepareForRefine(cv, priority))
+            {
+                ready = false;
+            }
+        }
+    }
+    return ready;
 }
 
 double ThreeDTileNode::getDistanceToTile(osgUtil::CullVisitor* cv)
 {
-    osg::BoundingSphere bs = _localBoundingSphere;
-    return (double)cv->getDistanceToViewPoint(bs.center(), true) - bs.radius();
+    osg::Matrixd modelView(*cv->getModelViewMatrix());
+    double distance;
+
+    if (_boundingBox.valid())
+    {
+        // Find the eye in the box's frame; the closest point of the box is the eye clamped to it.
+        osg::Matrixd viewToBox;
+        viewToBox.invert(_boundingBoxLocalToWorld * modelView);
+        osg::Vec3d eye = viewToBox.getTrans();
+        osg::Vec3d closest(
+            osg::clampBetween(eye.x(), _boundingBox.xMin(), _boundingBox.xMax()),
+            osg::clampBetween(eye.y(), _boundingBox.yMin(), _boundingBox.yMax()),
+            osg::clampBetween(eye.z(), _boundingBox.zMin(), _boundingBox.zMax()));
+        distance = (eye - closest).length();
+    }
+    else
+    {
+        osg::Matrixd viewToLocal;
+        viewToLocal.invert(modelView);
+        distance = osg::maximum(
+            (viewToLocal.getTrans() - _localBoundingSphere.center()).length() - _localBoundingSphere.radius(),
+            0.0);
+    }
+
+    return distance * cv->getLODScale();
+}
+
+double ThreeDTileNode::computeLoadPriority(const osg::Matrixd& modelView, double error) const
+{
+    // Like Cesium's foveated priority, favor tiles toward the center of the view: the weight runs from 1
+    // straight ahead down to 0.25 directly behind the eye (or 1 when the eye is inside the tile's sphere).
+    osg::Vec3d center = _localBoundingSphere.center() * modelView;
+    double length = center.length();
+    double cosAngle = length > _localBoundingSphere.radius() ? -center.z() / length : 1.0;
+    return error * (0.25 + 0.375 * (1.0 + cosAngle));
 }
 
 double ThreeDTileNode::computeScreenSpaceError(osgUtil::CullVisitor* cv)
@@ -983,9 +1258,11 @@ bool ThreeDTileNode::unloadContent()
 
     if (_content.valid())
     {
+        // Don't call releaseGLObjects() here. This runs in the update traversal, possibly while the draw thread is
+        // still rendering, and tile content shares state with the tiles that stay loaded (every glTF tile uses
+        // the one PBRTexture program), so releasing it would delete GL objects that are in use. Dropping the node
+        // is enough: OSG queues the GL objects it alone owned for deletion on the draw thread.
         removeChild(_content.get());
-
-        _content->releaseGLObjects();
         _content = nullptr;
     }
 
@@ -993,6 +1270,7 @@ bool ThreeDTileNode::unloadContent()
     _content = 0;
     _requestedContent = false;
     _contentFuture.abandon(); // = Future<osg::ref_ptr<osg::Node>>();
+    _loadFailures = 0u;
 
     return true;
 }
@@ -1056,6 +1334,20 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
     if (nv.getVisitorType() == nv.CULL_VISITOR)
     {
         osgUtil::CullVisitor* cv = static_cast<osgUtil::CullVisitor*>(&nv);
+        osg::Matrixd modelView(*cv->getModelViewMatrix());
+
+        // Skip tiles hidden behind the planet. Besides saving their loads, this stops tiles on the far side of
+        // the globe from stretching the computed far plane so far that the near plane clips the ground under
+        // the camera.
+        CullContext* context = s_cullContext;
+        if (context && context->horizonValid && _localBoundingSphere.valid())
+        {
+            osg::Vec3d worldCenter = _localBoundingSphere.center() * modelView * context->inverseView;
+            if (!context->horizon.isVisible(worldCenter, _localBoundingSphere.radius()))
+            {
+                return;
+            }
+        }
 
         if (_boundingBox.valid())
         {
@@ -1071,16 +1363,6 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
             }
         }
 
-        // Get the ICO so we can do incremental compiliation
-        ICO* ico = 0;
-        osgViewer::View* osgView = dynamic_cast<osgViewer::View*>(cv->getCurrentCamera()->getView());
-        if (osgView)
-        {
-            ico = osgView->getDatabasePager()->getIncrementalCompileOperation();
-        }
-
-        // This allows nodes to reload themselves
-        requestContent(ico);
         resolveContent();
 
         // Compute the SSE
@@ -1088,36 +1370,39 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
 
         updateTracking(cv);
 
+        // Loads for this tile and its children are ranked by how far it is from meeting the error target.
+        double priority = computeLoadPriority(modelView, error);
+
+        // A drawn tile's content is normally loaded already, but a tileset's root, or a tile drawn by a parent
+        // without content of its own, may still be waiting for it (and this lets unloaded nodes reload).
+        if (hasContent() && !_content.valid())
+        {
+            _tileset->requestTileContent(this, priority);
+        }
+
         // Children are only needed once this tile wants to refine. Requests start a little before the
         // refinement threshold so the children are usually ready by the time it is crossed. Children of a
         // tile below that point are neither requested nor touched, so the tileset's expiry can unload them.
+        // A tile without content has nothing of its own to draw, so it always draws its children.
         const double maxSSE = _tileset->getMaximumScreenSpaceError();
         const double requestChildrenSSE = 0.8 * maxSSE;
+        const bool empty = !hasContent();
         bool refine = false;
 
-        if (_children.valid() && _children->getNumChildren() > 0 && error > requestChildrenSSE)
+        if (_children.valid() && _children->getNumChildren() > 0 && (empty || error > requestChildrenSSE))
         {
             bool areChildrenReady = true;
             for (unsigned int i = 0; i < _children->getNumChildren(); i++)
             {
-                osg::ref_ptr< ThreeDTileNode > childTile = dynamic_cast<ThreeDTileNode*>(_children->getChild(i));
-                if (childTile.valid())
+                ThreeDTileNode* childTile = dynamic_cast<ThreeDTileNode*>(_children->getChild(i));
+                if (childTile && !childTile->prepareForRefine(cv, priority))
                 {
-                    // Touch every child, even ones outside the view frustum that won't be traversed: this
-                    // tile can't refine until all of them are ready, so none may expire while it needs them.
-                    childTile->updateTracking(cv);
-
-                    // Can we traverse the child?
-                    if (childTile->hasContent() && !childTile->isContentReady())
-                    {
-                        childTile->requestContent(ico);
-                        areChildrenReady = false;
-                    }
+                    areChildrenReady = false;
                 }
             }
 
             // Keep drawing this tile until every child is ready, so refining never leaves a hole.
-            refine = areChildrenReady && error > maxSSE;
+            refine = empty || (areChildrenReady && error > maxSSE);
         }
 
         if (refine)
@@ -1174,7 +1459,8 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
             areChildrenReady = false;
         }
 
-        if (areChildrenReady && _children.valid() && _children->getNumChildren() > 0)
+        // As in the cull, a tile without content of its own always stands in for its children.
+        if ((areChildrenReady || !hasContent()) && _children.valid() && _children->getNumChildren() > 0)
         {
             if (_content.valid() && _refine == REFINE_ADD)
             {
@@ -1218,6 +1504,8 @@ ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& author
     _showBoundingVolumes(false),
     _showColorPerTile(false),
     _maxAge(5.0f),
+    _maxSimultaneousLoads(0u),
+    _loadsInFlight(std::make_shared<std::atomic_uint>(0u)),
     _lastExpiredFrame(0),
     _authorizationHeader(authorizationHeader),
     _sgCallbacks(sceneGraphCallbacks),
@@ -1235,6 +1523,9 @@ ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& author
     {
         setMaxAge((float)atof(c));
     }
+
+    c = ::getenv("OSGEARTH_3DTILES_MAX_LOADS");
+    setMaxSimultaneousLoads(c ? (unsigned)atoi(c) : DEFAULT_MAX_SIMULTANEOUS_LOADS);
 
     _tracker.push_back(0);
     // Pointer to last element
@@ -1299,6 +1590,99 @@ float ThreeDTilesetNode::getMaxAge() const
 void ThreeDTilesetNode::setMaxAge(float maxAge)
 {
     _maxAge = maxAge;
+}
+
+unsigned int ThreeDTilesetNode::getMaxSimultaneousLoads() const
+{
+    return _maxSimultaneousLoads;
+}
+
+void ThreeDTilesetNode::setMaxSimultaneousLoads(unsigned int value)
+{
+    _maxSimultaneousLoads = std::max(value, 1u);
+
+    // Every load needs a pool thread to itself, or it would wait behind the others regardless of priority.
+    jobs::jobpool* pool = jobs::get_pool(JOB_POOL_NAME);
+    if (pool->concurrency() < _maxSimultaneousLoads)
+    {
+        pool->set_concurrency(_maxSimultaneousLoads);
+    }
+}
+
+std::shared_ptr<void> ThreeDTilesetNode::acquireLoadSlot()
+{
+    return std::make_shared<LoadSlot>(_loadsInFlight);
+}
+
+void ThreeDTilesetNode::requestTileContent(ThreeDTileNode* node, double priority)
+{
+    CullContext* context = s_cullContext;
+    if (context && context->tileset == this)
+    {
+        context->requests.emplace_back(priority, node);
+    }
+    else if (node)
+    {
+        node->requestContent(nullptr);
+    }
+}
+
+void ThreeDTilesetNode::cancelStaleRequests(double frameTime)
+{
+    std::lock_guard<std::mutex> lock(_loadingMutex);
+    for (auto i = _loading.begin(); i != _loading.end(); )
+    {
+        osg::ref_ptr<ThreeDTileNode> tile;
+        if (!i->lock(tile) || !tile->isContentRequestPending())
+        {
+            i = _loading.erase(i);
+        }
+        else if (frameTime - tile->getLastCulledFrameTime() > STALE_REQUEST_AGE)
+        {
+            // No longer wanted (out of view, or its parent no longer refines), so free the slot.
+            tile->cancelContentRequest();
+            i = _loading.erase(i);
+        }
+        else
+        {
+            ++i;
+        }
+    }
+}
+
+void ThreeDTilesetNode::dispatchRequests(
+    std::vector<std::pair<double, ThreeDTileNode*>>& requests, ICO* ico, double frameTime)
+{
+    cancelStaleRequests(frameTime);
+
+    unsigned int inFlight = *_loadsInFlight;
+    if (requests.empty() || inFlight >= _maxSimultaneousLoads)
+    {
+        return;
+    }
+
+    unsigned int slots = _maxSimultaneousLoads - inFlight;
+    std::sort(requests.begin(), requests.end(),
+        [](const std::pair<double, ThreeDTileNode*>& lhs, const std::pair<double, ThreeDTileNode*>& rhs)
+        {
+            return lhs.first > rhs.first;
+        });
+
+    std::lock_guard<std::mutex> lock(_loadingMutex);
+    for (auto& request : requests)
+    {
+        if (slots == 0u)
+        {
+            break;
+        }
+
+        // A tile can be queued more than once per frame; only the first request starts a load.
+        if (request.second->requestContent(ico))
+        {
+            _loading.emplace_back(request.second);
+            --slots;
+        }
+    }
 }
 
 float ThreeDTilesetNode::getMaximumScreenSpaceError() const
@@ -1465,10 +1849,40 @@ void ThreeDTilesetNode::traverse(osg::NodeVisitor& nv)
 	{
 		osgUtil::CullVisitor* cv = static_cast<osgUtil::CullVisitor*>(&nv);
 		const osg::Matrix& proj = cv->getCurrentCamera()->getProjectionMatrix();
-		double height = cv->getCurrentCamera()->getViewport()->height();
 		double fovy, ar, zn, zf;
         ProjectionMatrix::getPerspective(proj, fovy, ar, zn, zf);
 		_sseDenominator = 2.0 * tan(0.5 * deg2rad(fovy));
+
+        CullContext context;
+        context.tileset = this;
+        context.inverseView = cv->getCurrentCamera()->getInverseViewMatrix();
+
+        // Horizon culling only applies to a tileset on a geocentric map.
+        osg::ref_ptr<MapNode> mapNode;
+        if (ObjectStorage::get(&nv, mapNode) && mapNode->isGeocentric())
+        {
+            const Ellipsoid& ellipsoid = mapNode->getMapSRS()->getEllipsoid();
+            context.horizon.setEllipsoid(Ellipsoid(
+                ellipsoid.getRadiusEquator() - HORIZON_ELLIPSOID_MARGIN,
+                ellipsoid.getRadiusPolar() - HORIZON_ELLIPSOID_MARGIN));
+            context.horizon.setEye(context.inverseView.getTrans(), cv->getProjectionMatrix());
+            context.horizonValid = true;
+        }
+
+        CullContext* outerContext = s_cullContext;
+        s_cullContext = &context;
+        osg::Group::traverse(nv);
+        s_cullContext = outerContext;
+
+        // Start the most important loads this traversal asked for.
+        ICO* ico = nullptr;
+        osgViewer::View* osgView = dynamic_cast<osgViewer::View*>(cv->getCurrentCamera()->getView());
+        if (osgView && osgView->getDatabasePager())
+        {
+            ico = osgView->getDatabasePager()->getIncrementalCompileOperation();
+        }
+        dispatchRequests(context.requests, ico, nv.getFrameStamp()->getReferenceTime());
+        return;
 	}
 
     osg::Group::traverse(nv);

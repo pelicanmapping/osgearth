@@ -6,6 +6,7 @@
 #include <osgEarth/PBRMaterial>
 #include <osgEarth/ImageUtils>
 #include <osgEarth/JsonUtils>
+#include <osgEarth/Lighting>
 #include <osgEarth/ShaderLoader>
 #include <osgEarth/Shaders>
 #include <osgDB/ConvertBase64>
@@ -206,6 +207,51 @@ TEST_CASE("glTF factor-only and plain materials preserve their defaults", "[pbr]
     source = Util::Json::Value(Util::Json::objectValue);
     auto plain = fixture.load();
     REQUIRE_FALSE(material(plain[0])->pbr.valid());
+}
+
+// KHR_materials_unlit keeps base color and alpha mode only, turns lighting off on its
+// primitives, and needs no normals; lit materials stay lit with every map.
+TEST_CASE("glTF unlit materials bind base color only and disable lighting", "[pbr][gltf]")
+{
+    GLTFFixture fixture;
+    auto lit = fixture.load();
+    auto skipped = fixture.load("gltfSkipPBRTextures");
+    auto& source = fixture.json["materials"][0u];
+    source["extensions"]["KHR_materials_unlit"] = Util::Json::Value(Util::Json::objectValue);
+    source["alphaMode"] = "BLEND";
+    source["doubleSided"] = true;
+    fixture.json["extensionsUsed"].append("KHR_materials_unlit");
+    fixture.json["extensionsRequired"].append("KHR_materials_unlit");
+    auto unlit = fixture.load();
+
+    REQUIRE(lit[0]->getStateSet()->getDefinePair(OE_LIGHTING_DEFINE) == nullptr);
+    REQUIRE(lit[0]->getNormalArray() != nullptr);
+    REQUIRE(material(lit[0])->normal.valid());
+    REQUIRE(material(lit[0])->pbr.valid());
+
+    auto* state = unlit[0]->getStateSet();
+    const auto* lighting = state->getDefinePair(OE_LIGHTING_DEFINE);
+    REQUIRE(lighting != nullptr);
+    REQUIRE((lighting->second & osg::StateAttribute::ON) == 0);
+    REQUIRE(unlit[0]->getNormalArray() == nullptr);
+
+    auto* texture = material(unlit[0]);
+    REQUIRE(material(unlit[1]) == texture);
+    REQUIRE(texture != material(lit[0]));
+    REQUIRE(texture->albedo->getInternalFormat() == GL_SRGB8_ALPHA8);
+    REQUIRE(pixel(texture->albedo).r() == Approx(64/255.0f));
+    REQUIRE_FALSE(texture->normal.valid());
+    REQUIRE_FALSE(texture->pbr.valid());
+    REQUIRE_FALSE(texture->occlusion.valid());
+    int flags = -1;
+    REQUIRE(state->getUniform("oe_pbr_texture_flags")->get(flags));
+    REQUIRE(flags == 0);
+    // Base color alone is the same texture gltfSkipPBRTextures builds, so they share.
+    REQUIRE(texture == material(skipped[0]));
+
+    REQUIRE(state->getMode(GL_BLEND) == osg::StateAttribute::ON);
+    REQUIRE(state->getRenderingHint() == osg::StateSet::TRANSPARENT_BIN);
+    REQUIRE(state->getMode(GL_CULL_FACE) == osg::StateAttribute::OFF);
 }
 
 TEST_CASE("glTF embedded images remain local to each loaded model", "[pbr][gltf]")

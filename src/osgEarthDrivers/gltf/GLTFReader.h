@@ -33,9 +33,14 @@
  *
  * Supported extensions: KHR_mesh_quantization, KHR_texture_basisu,
  * EXT_texture_webp, EXT_meshopt_compression, EXT_mesh_gpu_instancing,
- * KHR_draco_mesh_compression (when built with Draco), and the glTF 2.1 core
- * externalAssets / files properties. Skins, animations, morph targets,
- * cameras and lights are ignored.
+ * KHR_materials_unlit, KHR_draco_mesh_compression (when built with Draco),
+ * and the glTF 2.1 core externalAssets / files properties. Skins,
+ * animations, morph targets, cameras and lights are ignored.
+ *
+ * Unlit materials (KHR_materials_unlit) bind only their base color texture
+ * and turn OE_LIGHTING off on their primitives, so they draw base color times
+ * vertex color with no scene lighting; their primitives get no generated
+ * normals.
  *
  * Known limitations: every PBR map samples TEXCOORD_0 (texCoord indices and
  * KHR_texture_transform are ignored); normal maps are sampled as authored
@@ -82,6 +87,7 @@
 #include <osgUtil/SmoothingVisitor>
 
 #include <osgEarth/ExternalNode>
+#include <osgEarth/GLUtils>
 #include <osgEarth/InstanceBuilder>
 #include <osgEarth/InstancedExternalNode>
 #include <osgEarth/Notify>
@@ -351,7 +357,8 @@ public:
                     continue;
                 }
                 if (std::strcmp(name, "KHR_mesh_quantization") == 0 || std::strcmp(name, "KHR_texture_basisu") == 0 ||
-                    std::strcmp(name, "EXT_texture_webp") == 0 || std::strcmp(name, "EXT_mesh_gpu_instancing") == 0)
+                    std::strcmp(name, "EXT_texture_webp") == 0 || std::strcmp(name, "EXT_mesh_gpu_instancing") == 0 ||
+                    std::strcmp(name, "KHR_materials_unlit") == 0)
                     continue;
                 OE_WARN << LC << location << " requires the unsupported extension " << name << "; loading it anyway" << std::endl;
             }
@@ -1044,8 +1051,10 @@ public:
             geometry->setColorArray(arrays.color.get(), osg::Array::BIND_PER_VERTEX);
             geometry->addPrimitiveSet(arrays.primitive.get());
 
+            // Unlit materials never read normals, so don't pay to generate them.
             const bool triangles = mode == GL_TRIANGLES || mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN;
-            if (!arrays.normal.valid() && triangles && !_flags.skipNormals)
+            const bool unlit = primitive.material && primitive.material->unlit;
+            if (!arrays.normal.valid() && triangles && !unlit && !_flags.skipNormals)
                 osgUtil::SmoothingVisitor::smooth(*geometry);
 
             geode->addDrawable(geometry.get());
@@ -1377,6 +1386,11 @@ public:
             if (material.double_sided)
                 stateSet->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
 
+            // KHR_materials_unlit: the PBRTexture program's output (base color
+            // times vertex color) is final; every lighting stage honors OE_LIGHTING.
+            if (material.unlit)
+                osgEarth::GLUtils::setLighting(stateSet, osg::StateAttribute::OFF);
+
             if (material.has_pbr_metallic_roughness)
             {
                 const cgltf_float* factor = material.pbr_metallic_roughness.base_color_factor;
@@ -1452,6 +1466,13 @@ public:
             return !mr.has_transform || std::memcmp(&mr.transform, &ao.transform, sizeof(mr.transform)) == 0;
         }
 
+        //! Whether the normal, metallic-roughness and occlusion maps and factors apply;
+        //! KHR_materials_unlit ignores everything but the base color and alpha.
+        bool usesPBRMaps(const cgltf_material& material) const
+        {
+            return !_flags.skipPBRTextures && !material.unlit;
+        }
+
         //! Factors explicitly differing from the glTF defaults enable the PBR factor path.
         static bool hasExplicitFactors(const cgltf_material& material)
         {
@@ -1480,16 +1501,19 @@ public:
          */
         std::string materialKey(const cgltf_material& material)
         {
+            // An unlit material builds the same base-color-only texture as gltfSkipPBRTextures,
+            // so the two may share; unlit-ness itself lives on the primitive's stateset.
+            const bool maps = usesPBRMaps(material);
             std::ostringstream key;
             key.precision(9);
-            key << "gltf-pbr-v3:" << _flags.prepareTextures << ':' << !_flags.skipPBRTextures << ':' << _basisRequired << ':';
+            key << "gltf-pbr-v3:" << _flags.prepareTextures << ':' << maps << ':' << _basisRequired << ':';
             if (_options) key << _options->getPluginStringData("BASIS_FORMAT");
             const cgltf_pbr_metallic_roughness& pbr = material.pbr_metallic_roughness;
             const cgltf_texture* textures[] = {
                 material.has_pbr_metallic_roughness ? pbr.base_color_texture.texture : nullptr,
-                _flags.skipPBRTextures ? nullptr : material.normal_texture.texture,
-                _flags.skipPBRTextures || !material.has_pbr_metallic_roughness ? nullptr : pbr.metallic_roughness_texture.texture,
-                _flags.skipPBRTextures ? nullptr : material.occlusion_texture.texture };
+                maps ? material.normal_texture.texture : nullptr,
+                maps && material.has_pbr_metallic_roughness ? pbr.metallic_roughness_texture.texture : nullptr,
+                maps ? material.occlusion_texture.texture : nullptr };
             for (const cgltf_texture* texture : textures)
             {
                 key << '|';
@@ -1562,8 +1586,9 @@ public:
                 description.colorImage->setColor(osg::Vec4(1.0f, 1.0f, 1.0f, 1.0f), 0, 0);
             }
 
+            const bool maps = usesPBRMaps(material);
             osg::ref_ptr<osg::Image> normal, mr, ao;
-            if (!_flags.skipPBRTextures)
+            if (maps)
             {
                 normal = textureImage(material.normal_texture.texture);
                 mr = textureImage(mrTexture);
@@ -1571,7 +1596,7 @@ public:
             }
             if (!error.empty()) return {};
 
-            const bool factors = !_flags.skipPBRTextures && (mr.valid() || ao.valid() || hasExplicitFactors(material));
+            const bool factors = maps && (mr.valid() || ao.valid() || hasExplicitFactors(material));
             description.normalImage = normal;
             if (factors)
             {

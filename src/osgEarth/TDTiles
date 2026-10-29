@@ -169,7 +169,8 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         //! Called during cull by a parent that wants to draw this tile in its place. Touches the tile so it won't
         //! expire, queues requests for any content it is missing (at the given priority, higher loads first), and
         //! returns true once the tile can be drawn without leaving a hole: its content is loaded, the root of an
-        //! external tileset it points to is drawable, or, for a tile with no content, all of its children are.
+        //! external tileset it points to is drawable, or, for a tile with no content, its error is high enough for
+        //! it to refine and all of its children are drawable.
         bool prepareForRefine(osgUtil::CullVisitor* cv, double priority);
 
         //! Distance from the eye to the closest point of the tile's bounding volume (box or region when it has

@@ -1169,33 +1169,47 @@ bool ThreeDTileNode::prepareForRefine(osgUtil::CullVisitor* cv, double priority)
     // is ready, so it must not expire while the parent needs it.
     updateTracking(cv);
 
+    if (hasContent() && !isContentReady())
+    {
+        _tileset->requestTileContent(this, priority);
+        return false;
+    }
+
+    // The parent calls this from its own frame; measure this tile and its descendants in theirs.
+    osg::ref_ptr<osg::RefMatrix> matrix = new osg::RefMatrix(*cv->getModelViewMatrix());
+    computeLocalToWorldMatrix(*matrix, cv);
+    cv->pushModelViewMatrix(matrix.get(), getReferenceFrame());
+
+    bool ready = true;
     if (hasContent())
     {
-        if (!isContentReady())
-        {
-            _tileset->requestTileContent(this, priority);
-            return false;
-        }
-
         // An external tileset is drawn through its root tile, so that has to be drawable as well.
         ThreeDTilesetContentNode* tilesetContent = dynamic_cast<ThreeDTilesetContentNode*>(_content.get());
         ThreeDTileNode* root = tilesetContent ? tilesetContent->getTileNode() : nullptr;
-        return root == nullptr || root->prepareForRefine(cv, priority);
+        ready = root == nullptr || root->prepareForRefine(cv, priority);
     }
-
-    // A tile without content draws its children instead, so all of them have to be ready.
-    bool ready = true;
-    if (_children.valid())
+    else if (_children.valid() && _children->getNumChildren() > 0)
     {
-        for (unsigned int i = 0; i < _children->getNumChildren(); i++)
+        // A tile without content draws its children instead, but only once its own error calls for it (see
+        // traverse); until then it draws nothing, so it isn't ready and the parent keeps drawing. Its children
+        // are requested from the same point as any other tile's, so nothing out of range is loaded or kept.
+        const double maxSSE = _tileset->getMaximumScreenSpaceError();
+        const double error = computeScreenSpaceError(cv);
+        ready = error > maxSSE;
+        if (error > 0.8 * maxSSE)
         {
-            ThreeDTileNode* childTile = dynamic_cast<ThreeDTileNode*>(_children->getChild(i));
-            if (childTile && !childTile->prepareForRefine(cv, priority))
+            for (unsigned int i = 0; i < _children->getNumChildren(); i++)
             {
-                ready = false;
+                ThreeDTileNode* childTile = dynamic_cast<ThreeDTileNode*>(_children->getChild(i));
+                if (childTile && !childTile->prepareForRefine(cv, priority))
+                {
+                    ready = false;
+                }
             }
         }
     }
+
+    cv->popModelViewMatrix();
     return ready;
 }
 
@@ -1392,13 +1406,15 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
         // Children are only needed once this tile wants to refine. Requests start a little before the
         // refinement threshold so the children are usually ready by the time it is crossed. Children of a
         // tile below that point are neither requested nor touched, so the tileset's expiry can unload them.
-        // A tile without content has nothing of its own to draw, so it always draws its children.
+        // A tile without content has nothing of its own to draw, so it refines without waiting for its children,
+        // but still only once its error calls for it: empty tiles are how a tileset holds back content until the
+        // camera comes within range.
         const double maxSSE = _tileset->getMaximumScreenSpaceError();
         const double requestChildrenSSE = 0.8 * maxSSE;
         const bool empty = !hasContent();
         bool refine = false;
 
-        if (_children.valid() && _children->getNumChildren() > 0 && (empty || error > requestChildrenSSE))
+        if (_children.valid() && _children->getNumChildren() > 0 && error > requestChildrenSSE)
         {
             bool areChildrenReady = true;
             for (unsigned int i = 0; i < _children->getNumChildren(); i++)
@@ -1410,8 +1426,10 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
                 }
             }
 
-            // Keep drawing this tile until every child is ready, so refining never leaves a hole.
-            refine = empty || (areChildrenReady && error > maxSSE);
+            // Keep drawing this tile until every child is ready, so refining never leaves a hole. An additive tile
+            // keeps drawing its own content when it refines, so it doesn't wait: each child shows once it's ready,
+            // even while a sibling isn't (an empty one out of range may not be for a long time).
+            refine = error > maxSSE && (empty || _refine == REFINE_ADD || areChildrenReady);
         }
 
         if (refine)

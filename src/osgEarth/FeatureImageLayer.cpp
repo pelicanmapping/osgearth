@@ -70,12 +70,14 @@ void
 FeatureImageLayer::init()
 {
     ImageLayer::init();
+#ifdef OSGEARTH_HAVE_SLUGHORN
     if (options().mode() == "vector")
     {
         setUseCreateTexture();
         // Atlas inheritance remains raster-like; analytic vector coverage needs no imagery crossfade.
         setMorphImagery(false);
     }
+#endif
 
     // Do not set the profile here. We will try to deduce the profile
     // once we can open the underlying feature source.
@@ -94,7 +96,7 @@ FeatureImageLayer::openImplementation()
     if (options().mode() == "vector")
     {
 #ifndef OSGEARTH_HAVE_SLUGHORN
-        return Status(Status::ServiceUnavailable, "Vector FeatureImage requires OSGEARTH_ENABLE_SLUGHORN");
+        OE_WARN << LC << "Vector mode requires OSGEARTH_ENABLE_SLUGHORN; falling back to raster" << std::endl;
 #else
         if (!Registry::capabilities().supportsGLSL(330u))
             return Status(Status::ServiceUnavailable, "Vector FeatureImage requires GLSL 3.30");
@@ -351,7 +353,7 @@ FeatureImageLayer::createImageImplementation(const TileKey& key, ProgressCallbac
 }
 
 #ifndef OSGEARTH_HAVE_SLUGHORN
-// Vector mode cannot open in this build; retain the public virtual entry point.
+// Builds without Slughorn use raster image requests; retain the public virtual entry point.
 TextureWindow
 FeatureImageLayer::createTexture(const TileKey&, ProgressCallback*) const
 {

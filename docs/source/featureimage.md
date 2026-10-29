@@ -83,9 +83,10 @@ Vector fills use exact analytic boundaries, without the rasterizer's implicit
 one-pixel seam-covering stroke. Non-vector symbols (including text/icons),
 material fills, stippling, and tiles exceeding SDK/GPU capacity use the existing
 rasterizer for that tile. Raster fallbacks are reported at DEBUG notify level
-and can coexist with vector parent or child tiles. Opening an explicitly
-requested vector layer fails with an explanatory status if Slughorn or the
-required GLSL support is unavailable. The default raster mode is unchanged.
+and can coexist with vector parent or child tiles. If Slughorn support is not
+compiled in, a vector layer logs a warning and uses the normal raster pipeline.
+With Slughorn enabled, missing required GLSL support still prevents the layer
+from opening. The default raster mode is unchanged.
 
 The pinned Slughorn Blend2D adapter consumes BLPath objects, rather than
 intercepting BLContext operations, and targets a newer Blend2D API than this

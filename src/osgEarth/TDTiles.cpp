@@ -1417,8 +1417,10 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
                 }
             }
 
-            // Keep drawing this tile until every child is ready, so refining never leaves a hole.
-            refine = error > maxSSE && (empty || areChildrenReady);
+            // Keep drawing this tile until every child is ready, so refining never leaves a hole. An additive tile
+            // keeps drawing its own content when it refines, so it doesn't wait: each child shows once it's ready,
+            // even while a sibling isn't (an empty one out of range may not be for a long time).
+            refine = error > maxSSE && (empty || _refine == REFINE_ADD || areChildrenReady);
         }
 
         if (refine)

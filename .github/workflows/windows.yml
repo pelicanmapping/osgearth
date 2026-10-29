@@ -69,8 +69,11 @@ jobs:
           -Source "${{ env.FEED_URL }}"
 
     - name: Create Build Environment
+      shell: pwsh
       run: |
-        cmake -E make_directory ${{ github.workspace }}/../build
+        $buildDirectory = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) build
+        New-Item -ItemType Directory -Force -Path $buildDirectory | Out-Null
+        Add-Content -LiteralPath $env:GITHUB_ENV -Value "OSGEARTH_CI_BUILD_DIR=$buildDirectory"
 
     - name: Cache cesium-native
       id: cesium-cache
@@ -101,17 +104,17 @@ jobs:
 
     - name: Configure CMake
       shell: pwsh
-      working-directory: ${{ github.workspace }}/../build
+      working-directory: ${{ env.OSGEARTH_CI_BUILD_DIR }}
       # Ninja supports compiler launchers; keep MSVC and the existing Release build options.
       run: |
         cmake "$env:GITHUB_WORKSPACE" -G Ninja `
-          -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe `
-          -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
-          -DOSGEARTH_BUILD_LEGACY_SPLAT_NODEKIT=OFF -DOSGEARTH_BUILD_PROCEDURAL_NODEKIT=ON `
-          -DOSGEARTH_BUILD_CESIUM_NODEKIT=ON -DOSGEARTH_ENABLE_S3=ON `
-          -DCESIUM_NATIVE_DIR=C:/cesium-native -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
-          -DCMAKE_TOOLCHAIN_FILE=${{ matrix.VCPKG_WORKSPACE }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
-          -DVCPKG_MANIFEST_DIR="$env:GITHUB_WORKSPACE" -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+          "-DCMAKE_C_COMPILER=cl.exe" "-DCMAKE_CXX_COMPILER=cl.exe" `
+          "-DCMAKE_C_COMPILER_LAUNCHER=sccache" "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache" `
+          "-DOSGEARTH_BUILD_LEGACY_SPLAT_NODEKIT=OFF" "-DOSGEARTH_BUILD_PROCEDURAL_NODEKIT=ON" `
+          "-DOSGEARTH_BUILD_CESIUM_NODEKIT=ON" "-DOSGEARTH_ENABLE_S3=ON" `
+          "-DCESIUM_NATIVE_DIR=C:/cesium-native" "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE" `
+          "-DCMAKE_TOOLCHAIN_FILE=${{ matrix.VCPKG_WORKSPACE }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+          "-DVCPKG_MANIFEST_DIR=$env:GITHUB_WORKSPACE" "-DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}"
 
     - name: 'Upload cmake configure log artifact'
       uses: actions/upload-artifact@v4
@@ -119,11 +122,11 @@ jobs:
       with:
         name: cmake-log
         path: |
-          ${{ github.workspace }}/../build/CMakeCache.txt
+          ${{ env.OSGEARTH_CI_BUILD_DIR }}/CMakeCache.txt
         retention-days: 1
 
     - name: Build
-      working-directory: ${{ github.workspace }}/../build
+      working-directory: ${{ env.OSGEARTH_CI_BUILD_DIR }}
       shell: pwsh
       run: |
         sccache --zero-stats

@@ -23,7 +23,7 @@ set(OSGEARTH_PATCH_VERSION 1)
 set(OSGEARTH_VERSION ${OSGEARTH_MAJOR_VERSION}.${OSGEARTH_MINOR_VERSION}.${OSGEARTH_PATCH_VERSION})
 
 # Increment this each time the ABI changes
-set(OSGEARTH_SOVERSION 198)
+set(OSGEARTH_SOVERSION 199)
 
 # Forces a build that complies with the C++14 API and uses polyfills to do so
 # for C++17 types like variant, optional, and string_view.
@@ -94,6 +94,9 @@ option(OSGEARTH_BUILD_IMGUI_NODEKIT "Build the osgEarth ImGui nodekit and ImGui-
 option(OSGEARTH_BUILD_CESIUM_NODEKIT "Build the Cesium nodekit (osgEarthCesium)" OFF)
 option(OSGEARTH_BUILD_TRITON_NODEKIT "Build support for SunDog Triton SDK" OFF)
 option(OSGEARTH_BUILD_SILVERLINING_NODEKIT "Build support for SunDog SilverLining SDK" OFF)
+option(OSGEARTH_ENABLE_SLUGHORN
+    "Enable GPU vector FeatureImageLayer rendering (private C++20 implementation)" OFF)
+
 option(OSGEARTH_ENABLE_GEOCODER "Enable the geocoder (GDAL/OGR must be built with geocoder support)" OFF)
 
 option(OSGEARTH_BUILD_DOCS "Include the documentation folder" ON)

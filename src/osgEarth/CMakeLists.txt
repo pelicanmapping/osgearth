@@ -71,6 +71,7 @@ SET(LIB_NAME osgEarth)
 
 
 set(TARGET_GLSL
+    FeatureImageLayer.Slug.glsl
     CascadeDraping.glsl
     Chonk.glsl
     Chonk.Culling.glsl
@@ -878,6 +879,20 @@ add_osgearth_library(
     SHADERS ${TARGET_GLSL}
     TEMPLATES ${TARGET_IN} )
 
+
+# Slughorn stays private: only this implementation file and the SDK use C++20.
+if(OSGEARTH_ENABLE_SLUGHORN)
+    include(${PROJECT_SOURCE_DIR}/cmake/Slughorn.cmake)
+    target_sources(${LIB_NAME} PRIVATE FeatureImageLayer_Slughorn.cpp)
+    target_include_directories(${LIB_NAME} PRIVATE "${osgearth_slughorn_SOURCE_DIR}")
+    target_compile_definitions(${LIB_NAME} PRIVATE OSGEARTH_HAVE_SLUGHORN)
+    target_link_libraries(${LIB_NAME} PRIVATE osgEarthSlughorn)
+    if(MSVC)
+        set_source_files_properties(FeatureImageLayer_Slughorn.cpp PROPERTIES COMPILE_OPTIONS "/std:c++20")
+    else()
+        set_source_files_properties(FeatureImageLayer_Slughorn.cpp PROPERTIES COMPILE_OPTIONS "-std=c++20")
+    endif()
+endif()
 
 # google protocol buffers
 if(Protobuf_FOUND AND Protobuf_PROTOC_EXECUTABLE)

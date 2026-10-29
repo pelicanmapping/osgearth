@@ -13,7 +13,7 @@
 namespace osgEarth
 {
     /**
-     * Rasterizes feature data into an image layer.
+     * Renders feature data as raster imagery or GPU vector atlases (mode="vector").
      * Styles will render in their order of appearance in the stylesheet;
      * e.g. features matching the last style will render on top.
      */
@@ -28,6 +28,8 @@ namespace osgEarth
             OE_OPTION_LAYER(StyleSheet, styleSheet);
             OE_OPTION(Distance, bufferWidth, {});
             OE_OPTION(Color, backgroundColor, Color::Transparent);
+            //! "raster" (default), or "vector" for Slug atlases sampled directly on terrain.
+            OE_OPTION(std::string, mode, "raster");
             virtual Config getConfig() const;
         private:
             void fromConfig( const Config& conf );
@@ -53,6 +55,10 @@ namespace osgEarth
         virtual GeoImage createImageImplementation(
             const TileKey& key, 
             ProgressCallback* progress) const override;
+
+        //! Builds a tile-local vector atlas in vector mode. Children inherit its texture and matrix.
+        //! Returns an empty window on cancellation/failure; unsupported styles use a raster tile.
+        virtual TextureWindow createTexture(const TileKey& key, ProgressCallback* progress) const override;
 
     protected: // Layer
 

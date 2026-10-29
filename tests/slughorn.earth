@@ -1,0 +1,86 @@
+<!-- Slug GPU vector imagery. Build with OSGEARTH_ENABLE_SLUGHORN=ON.
+     OSM is available only at LOD 14; zoom past that level to exercise atlas inheritance.
+     max_data_level caps loading while leaving higher terrain LODs visible.
+     Requires network access and an osgEarth build with MVT/Protobuf support. -->
+<map name="Slughorn - OpenStreetMap vector imagery">
+    <XYZFeatures name="osm">
+        <url>https://readymap.org/readymap/mbtiles/osm/{z}/{x}/{-y}.pbf</url>
+        <min_level>14</min_level>
+        <max_level>14</max_level>
+        <profile>spherical-mercator</profile>
+        <format>pbf</format>
+        <fid_attribute>@id</fid_attribute>
+    </XYZFeatures>
+
+    <FeatureImage name="OSM land use" mode="vector" min_level="14" max_data_level="14">
+        <features>osm</features>
+        <background_color>#eee9df</background_color>
+        <attribution>OpenStreetMap contributors (ODbL)</attribution>
+        <styles><style type="text/css"><![CDATA[
+            green {
+                select: feature.properties.leisure === 'park' || feature.properties.landuse === 'forest' ||
+                    feature.properties.natural === 'wood';
+                fill: #b9ce9b;
+            }
+        ]]></style></styles>
+    </FeatureImage>
+
+    <FeatureImage name="OSM water" mode="vector" min_level="14" max_data_level="14">
+        <features>osm</features>
+        <styles><style type="text/css"><![CDATA[
+            water {
+                select: feature.properties.natural === 'water' || feature.properties.waterway === 'riverbank';
+                fill: #87bdd8;
+            }
+            streams {
+                select: feature.properties.waterway === 'stream' || feature.properties.waterway === 'river';
+                stroke: #87bdd8;
+                stroke-width: 5m;
+                stroke-linecap: round;
+            }
+        ]]></style></styles>
+    </FeatureImage>
+
+    <FeatureImage name="OSM buildings" mode="vector" min_level="14" max_data_level="14" opacity="0.85">
+        <features>osm</features>
+        <styles><style type="text/css"><![CDATA[
+            buildings {
+                select: 'building' in feature.properties;
+                fill: #bb9a85;
+                stroke: #846b5d;
+                stroke-width: 0.6m;
+            }
+        ]]></style></styles>
+    </FeatureImage>
+
+    <FeatureImage name="OSM roads" mode="vector" min_level="14" max_data_level="14" buffer_width="20m">
+        <features>osm</features>
+        <styles><style type="text/css"><![CDATA[
+            minor {
+                select: ['residential', 'unclassified', 'service', 'tertiary'].indexOf(feature.properties.highway) >= 0;
+                stroke: #ffffff;
+                stroke-width: 5m;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+            }
+            major {
+                select: ['motorway', 'trunk', 'primary', 'secondary'].indexOf(feature.properties.highway) >= 0;
+                stroke: #ffd88a;
+                stroke-width: 10m;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+            }
+        ]]></style></styles>
+    </FeatureImage>
+
+    <options>
+        <profile>spherical-mercator</profile>
+        <terrain color="#d5e4ec"/>
+    </options>
+    <viewpoints home="0" time="0">
+        <viewpoint name="Honolulu - overview" lat="21.29353" long="-157.83265" heading="0" pitch="-65" range="4500m"/>
+        <viewpoint name="Honolulu - inherited atlas detail" lat="21.29353" long="-157.83265"
+            heading="0" pitch="-75" range="350m"/>
+        <viewpoint name="Helsinki" lat="60.17156" long="24.91931" heading="0" pitch="-65" range="4500m"/>
+    </viewpoints>
+</map>

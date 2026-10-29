@@ -1,0 +1,89 @@
+<!-- Slug GPU vector imagery. Build with OSGEARTH_ENABLE_SLUGHORN=ON.
+     OSM is available only at LOD 14; zoom past that level to exercise atlas inheritance.
+     max_data_level caps loading while leaving higher terrain LODs visible.
+     Requires network access and an osgEarth build with MVT/Protobuf support. -->
+<map name="Slughorn - Single-layer OSM selectors">
+    <XYZFeatures name="osm">
+        <url>https://readymap.org/readymap/mbtiles/osm/{z}/{x}/{-y}.pbf</url>
+        <min_level>14</min_level>
+        <max_level>14</max_level>
+        <profile>spherical-mercator</profile>
+        <format>pbf</format>
+        <fid_attribute>@id</fid_attribute>
+    </XYZFeatures>
+    <TMSImage name="ReadyMap Imagery">
+        <url>https://readymap.org/readymap/tiles/1.0.0/7</url>
+    </TMSImage>
+    <!-- All six select symbols share one FeatureImageLayer and one atlas per source tile.
+         Styles paint in stylesheet order: land use, water, buildings, then roads. -->
+    <FeatureImage name="OSM selected features" mode="vector" min_level="14" max_data_level="14" buffer_width="20m">
+        <features>osm</features>
+        <!-- <background_color>#eee9df</background_color> -->
+        <attribution>OpenStreetMap contributors (ODbL)</attribution>
+        <styles>
+            <style type="text/css">
+                <![CDATA[
+            water {
+                select: feature.properties.natural === 'water' || feature.properties.waterway === 'riverbank';
+                fill: #87bdd8;
+            }
+            streams {
+                select: feature.properties.waterway === 'stream' || feature.properties.waterway === 'river';
+                stroke: #87bdd8;
+                stroke-width: 5m;
+                stroke-linecap: round;
+            }
+
+            buildings {
+                select: 'building' in feature.properties;
+                fill: #bb9a85;
+                fill-opacity: 0.85;
+                stroke: #846b5d;
+                stroke-opacity: 0.85;
+                stroke-width: 0.6m;
+            }
+
+            minor {
+                select: ['residential', 'unclassified', 'service', 'tertiary'].indexOf(feature.properties.highway) >= 0;
+                stroke: #404040;
+                stroke-width: 5m;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+                stroke-outline: #ffffff;
+                stroke-outline-width: 0.5m;
+            }
+            major {
+                select: ['motorway', 'trunk', 'primary', 'secondary'].indexOf(feature.properties.highway) >= 0;
+                stroke: #ffd88a;
+                stroke-width: 10m;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+            }
+        ]]>
+            </style>
+        </styles>
+    </FeatureImage>
+    <options>
+        <terrain color="#87bdd8"/>
+    </options>
+    <viewpoints home="0" time="0">
+        <viewpoint name="Honolulu">
+            <heading>-0.206162</heading>
+            <pitch>-89.9</pitch>
+            <range>7764.05m</range>
+            <long>-157.8327649343271</long>
+            <lat>21.29626496396804</lat>
+            <height>-0.02048836834728718</height>
+            <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+        </viewpoint>
+        <viewpoint name="Annandale">
+            <heading>2.48738e-07</heading>
+            <pitch>-88.9987</pitch>
+            <range>7146.65m</range>
+            <long>-77.19481952051895</long>
+            <lat>38.83325130835141</lat>
+            <height>-0.4578634602949023</height>
+            <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+        </viewpoint>
+    </viewpoints>
+</map>

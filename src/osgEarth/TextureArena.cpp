@@ -130,6 +130,11 @@ Texture::Texture(osg::Texture* input) :
     if (input->getInternalFormatMode() != osg::Texture::USE_IMAGE_DATA_FORMAT)
         internalFormat() = input->getInternalFormat();
 
+    // Explicit floating-point/integer textures carry data (e.g. vector atlases).
+    // Lossy color compression would destroy both their values and addressing.
+    if (input->getInternalFormatType() != osg::Texture::NORMALIZED)
+        compress() = false;
+
     // pick a name.
     name() = input->getName();
     if (name().empty() && hasImage())

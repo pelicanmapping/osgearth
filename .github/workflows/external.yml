@@ -1,6 +1,15 @@
 name: windows-external-project
 
-on: [push, workflow_dispatch]
+on:
+    push:
+        branches: [master]
+        tags: ['**']
+    pull_request:
+    workflow_dispatch:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+    cancel-in-progress: true
 
 permissions:
   packages: write

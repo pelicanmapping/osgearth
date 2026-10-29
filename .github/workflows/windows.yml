@@ -20,6 +20,9 @@ env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Release
   VCPKG_VERSION: '2026.07.29'
+  CESIUM_NATIVE_PACKAGE: cesium-native-v0.37.0-vs2019
+  SCCACHE_GHA_ENABLED: 'true'
+  SCCACHE_GHA_VERSION: osgearth-windows-v1
 
 jobs:
 
@@ -71,21 +74,52 @@ jobs:
           -Source "${{ env.FEED_URL }}"
 
     - name: Create Build Environment
+      shell: pwsh
       run: |
-        cmake -E make_directory ${{runner.workspace}}/build
+        $buildDirectory = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) build
+        New-Item -ItemType Directory -Force -Path $buildDirectory | Out-Null
+        Add-Content -LiteralPath $env:GITHUB_ENV -Value "OSGEARTH_CI_BUILD_DIR=$buildDirectory"
+
+    - name: Cache cesium-native
+      id: cesium-cache
+      uses: actions/cache@v6
+      with:
+        path: C:/cesium-native
+        # No restore prefix: the libraries must match the requested package exactly.
+        key: ${{ runner.os }}-${{ runner.arch }}-${{ env.CESIUM_NATIVE_PACKAGE }}-v1
 
     - name: Download cesium-native
-      shell: powershell
+      if: steps.cesium-cache.outputs.cache-hit != 'true'
+      shell: pwsh
       run: |
-        Invoke-WebRequest -Uri "https://pelican-public.s3.us-east-1.amazonaws.com/cesium-native-v0.37.0-vs2019.zip" -OutFile "C:\cesium-native.zip"
-        Expand-Archive -Path "C:\cesium-native.zip" -DestinationPath "C:\cesium-native"    
-        
+        $archive = Join-Path $env:RUNNER_TEMP "$env:CESIUM_NATIVE_PACKAGE.zip"
+        $url = "https://pelican-public.s3.us-east-1.amazonaws.com/$env:CESIUM_NATIVE_PACKAGE.zip"
+        Invoke-WebRequest -Uri $url -OutFile $archive
+        Expand-Archive -LiteralPath $archive -DestinationPath C:/cesium-native
+
+    - name: Set up MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@v0.0.11
+      with:
+        version: v0.19.0
+
     - name: Configure CMake
-      shell: bash
-      working-directory: ${{ runner.workspace }}/build
-      # Add the following for vcpkg install debugging: -DVCPKG_INSTALL_OPTIONS=--debug  
+      shell: pwsh
+      working-directory: ${{ env.OSGEARTH_CI_BUILD_DIR }}
+      # Ninja supports compiler launchers; keep MSVC and the existing Release build options.
       run: |
-        cmake $GITHUB_WORKSPACE -DOSGEARTH_BUILD_LEGACY_SPLAT_NODEKIT=OFF -DOSGEARTH_BUILD_PROCEDURAL_NODEKIT=ON -DOSGEARTH_BUILD_CESIUM_NODEKIT=ON -DOSGEARTH_ENABLE_S3=ON -DCESIUM_NATIVE_DIR=C:/cesium-native -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DCMAKE_TOOLCHAIN_FILE=${{ matrix.VCPKG_WORKSPACE }}/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_MANIFEST_DIR=$GITHUB_WORKSPACE -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+        cmake "$env:GITHUB_WORKSPACE" -G Ninja `
+          "-DCMAKE_C_COMPILER=cl.exe" "-DCMAKE_CXX_COMPILER=cl.exe" `
+          "-DCMAKE_C_COMPILER_LAUNCHER=sccache" "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache" `
+          "-DOSGEARTH_BUILD_LEGACY_SPLAT_NODEKIT=OFF" "-DOSGEARTH_BUILD_PROCEDURAL_NODEKIT=ON" `
+          "-DOSGEARTH_BUILD_CESIUM_NODEKIT=ON" "-DOSGEARTH_ENABLE_S3=ON" `
+          "-DCESIUM_NATIVE_DIR=C:/cesium-native" "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE" `
+          "-DCMAKE_TOOLCHAIN_FILE=${{ matrix.VCPKG_WORKSPACE }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+          "-DVCPKG_MANIFEST_DIR=$env:GITHUB_WORKSPACE" "-DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}"
 
     - name: 'Upload cmake configure log artifact'
       uses: actions/upload-artifact@v4
@@ -93,10 +127,13 @@ jobs:
       with:
         name: cmake-log
         path: |
-          ${{ runner.workspace }}/build/CMakeCache.txt
+          ${{ env.OSGEARTH_CI_BUILD_DIR }}/CMakeCache.txt
         retention-days: 1
 
     - name: Build
-      working-directory: ${{ runner.workspace }}/build
-      shell: bash
-      run: cmake --build . --config $BUILD_TYPE --parallel
+      working-directory: ${{ env.OSGEARTH_CI_BUILD_DIR }}
+      shell: pwsh
+      run: |
+        sccache --zero-stats
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cmake --build . --config $env:BUILD_TYPE --parallel $env:NUMBER_OF_PROCESSORS

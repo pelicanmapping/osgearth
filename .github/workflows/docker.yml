@@ -3,13 +3,15 @@ name: Build Docker Image
 
 on:
     push:
-      paths-ignore:
-        - 'docs/**'
+        branches: [master]
+        tags: ['**']
+        paths-ignore:
+            - 'docs/**'
     pull_request:
-      branches:
-        - master
-      paths-ignore:
-      - 'docs/**'
+        branches:
+            - master
+        paths-ignore:
+            - 'docs/**'
     # Allow manual running of this workflow.
     workflow_dispatch:
 

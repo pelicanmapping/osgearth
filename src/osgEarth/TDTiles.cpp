@@ -1160,33 +1160,47 @@ bool ThreeDTileNode::prepareForRefine(osgUtil::CullVisitor* cv, double priority)
     // is ready, so it must not expire while the parent needs it.
     updateTracking(cv);
 
+    if (hasContent() && !isContentReady())
+    {
+        _tileset->requestTileContent(this, priority);
+        return false;
+    }
+
+    // The parent calls this from its own frame; measure this tile and its descendants in theirs.
+    osg::ref_ptr<osg::RefMatrix> matrix = new osg::RefMatrix(*cv->getModelViewMatrix());
+    computeLocalToWorldMatrix(*matrix, cv);
+    cv->pushModelViewMatrix(matrix.get(), getReferenceFrame());
+
+    bool ready = true;
     if (hasContent())
     {
-        if (!isContentReady())
-        {
-            _tileset->requestTileContent(this, priority);
-            return false;
-        }
-
         // An external tileset is drawn through its root tile, so that has to be drawable as well.
         ThreeDTilesetContentNode* tilesetContent = dynamic_cast<ThreeDTilesetContentNode*>(_content.get());
         ThreeDTileNode* root = tilesetContent ? tilesetContent->getTileNode() : nullptr;
-        return root == nullptr || root->prepareForRefine(cv, priority);
+        ready = root == nullptr || root->prepareForRefine(cv, priority);
     }
-
-    // A tile without content draws its children instead, so all of them have to be ready.
-    bool ready = true;
-    if (_children.valid())
+    else if (_children.valid() && _children->getNumChildren() > 0)
     {
-        for (unsigned int i = 0; i < _children->getNumChildren(); i++)
+        // A tile without content draws its children instead, but only once its own error calls for it (see
+        // traverse); until then it draws nothing, so it isn't ready and the parent keeps drawing. Its children
+        // are requested from the same point as any other tile's, so nothing out of range is loaded or kept.
+        const double maxSSE = _tileset->getMaximumScreenSpaceError();
+        const double error = computeScreenSpaceError(cv);
+        ready = error > maxSSE;
+        if (error > 0.8 * maxSSE)
         {
-            ThreeDTileNode* childTile = dynamic_cast<ThreeDTileNode*>(_children->getChild(i));
-            if (childTile && !childTile->prepareForRefine(cv, priority))
+            for (unsigned int i = 0; i < _children->getNumChildren(); i++)
             {
-                ready = false;
+                ThreeDTileNode* childTile = dynamic_cast<ThreeDTileNode*>(_children->getChild(i));
+                if (childTile && !childTile->prepareForRefine(cv, priority))
+                {
+                    ready = false;
+                }
             }
         }
     }
+
+    cv->popModelViewMatrix();
     return ready;
 }
 

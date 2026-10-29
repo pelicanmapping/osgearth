@@ -80,7 +80,7 @@ namespace osgEarth
         //! Outline color
         OE_OPTION(Color, outlineColor, Color::White);
 
-        //! Outline stroke width (pixels)
+        //! Outline thickness on each side of the stroke; defaults to pixels unless units are specified.
         OE_OPTION(Expression<Distance>, outlineWidth, { "1px" });
 
     public:

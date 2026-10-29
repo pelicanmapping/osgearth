@@ -6,6 +6,7 @@ namespace osgEarth { namespace Util
 {
     Shaders::Shaders()
     {
+        _sources["FeatureImageLayer.Slug.glsl"] = @FeatureImageLayer.Slug.glsl@;
         PBRMaterial = "PBRMaterial.glsl";
         _sources[PBRMaterial] = @PBRMaterial.glsl@;
         PBRTexture = "PBRTexture.glsl";

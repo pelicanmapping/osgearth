@@ -891,6 +891,10 @@ FeatureRasterizer::render_blend2d(
         auto& widthExpr = masterLine->stroke()->width();
         auto& outlineWidthExpr = masterLine->stroke()->outlineWidth();
 
+        // Retain evaluated widths until all outlines are drawn; features own these geometries for this call.
+        std::vector<std::pair<const Geometry*, double>> strokes;
+        if (outlineWidthExpr.isSet()) strokes.reserve(features.size());
+
         for (auto& feature : features)
         {
             if (feature->getGeometry() == nullptr)
@@ -970,22 +974,25 @@ FeatureRasterizer::render_blend2d(
                 }
             }
 
-            // Rasterize the outlines:
+            // Outline width is the border thickness on each side of the center stroke.
             if (outlineWidth_px > 0.0f)
             {
                 rasterizeLines(
                     feature->getGeometry(),
                     masterLine->stroke()->outlineColor().get(),
-                    outlineWidth_px,
+                    lineWidth_px + 2.0 * outlineWidth_px,
                     frame, ctx);
             }
 
-            rasterizeLines(
-                feature->getGeometry(),
-                masterLine->stroke()->color(),
-                lineWidth_px,
-                frame, ctx);
+            if (outlineWidthExpr.isSet())
+                strokes.emplace_back(feature->getGeometry(), lineWidth_px);
+            else
+                rasterizeLines(feature->getGeometry(), masterLine->stroke()->color(), lineWidth_px, frame, ctx);
         }
+
+        // Complete this style's core pass before later symbols or selector styles are rendered.
+        for (const auto& stroke : strokes)
+            rasterizeLines(stroke.first, masterLine->stroke()->color(), stroke.second, frame, ctx);
     }
 
     if (masterPoint)

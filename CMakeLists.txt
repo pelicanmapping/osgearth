@@ -94,6 +94,9 @@ option(OSGEARTH_BUILD_IMGUI_NODEKIT "Build the osgEarth ImGui nodekit and ImGui-
 option(OSGEARTH_BUILD_CESIUM_NODEKIT "Build the Cesium nodekit (osgEarthCesium)" OFF)
 option(OSGEARTH_BUILD_TRITON_NODEKIT "Build support for SunDog Triton SDK" OFF)
 option(OSGEARTH_BUILD_SILVERLINING_NODEKIT "Build support for SunDog SilverLining SDK" OFF)
+option(OSGEARTH_ENABLE_SLUGHORN
+    "Enable GPU vector FeatureImageLayer rendering (private C++20 implementation)" OFF)
+
 option(OSGEARTH_ENABLE_GEOCODER "Enable the geocoder (GDAL/OGR must be built with geocoder support)" OFF)
 
 option(OSGEARTH_BUILD_DOCS "Include the documentation folder" ON)

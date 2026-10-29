@@ -1383,13 +1383,15 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
         // Children are only needed once this tile wants to refine. Requests start a little before the
         // refinement threshold so the children are usually ready by the time it is crossed. Children of a
         // tile below that point are neither requested nor touched, so the tileset's expiry can unload them.
-        // A tile without content has nothing of its own to draw, so it always draws its children.
+        // A tile without content has nothing of its own to draw, so it refines without waiting for its children,
+        // but still only once its error calls for it: empty tiles are how a tileset holds back content until the
+        // camera comes within range.
         const double maxSSE = _tileset->getMaximumScreenSpaceError();
         const double requestChildrenSSE = 0.8 * maxSSE;
         const bool empty = !hasContent();
         bool refine = false;
 
-        if (_children.valid() && _children->getNumChildren() > 0 && (empty || error > requestChildrenSSE))
+        if (_children.valid() && _children->getNumChildren() > 0 && error > requestChildrenSSE)
         {
             bool areChildrenReady = true;
             for (unsigned int i = 0; i < _children->getNumChildren(); i++)
@@ -1402,7 +1404,7 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
             }
 
             // Keep drawing this tile until every child is ready, so refining never leaves a hole.
-            refine = empty || (areChildrenReady && error > maxSSE);
+            refine = error > maxSSE && (empty || areChildrenReady);
         }
 
         if (refine)

@@ -78,33 +78,6 @@ namespace
         if (closed) path.closePath();
     }
 
-    // Appends an ordered spatial index. A full-cell margin covers half-pixel analytic
-    // coverage whenever the shader selects this grid (pixel footprint <= cell size).
-    unsigned appendGrid(std::vector<osg::Vec4f>& data, const std::vector<osg::Vec4f>& bounds, unsigned size)
-    {
-        std::vector<std::vector<unsigned>> grid(size * size);
-        for (unsigned i = 0; i < bounds.size(); ++i)
-        {
-            const auto& b = bounds[i];
-            if (b.z() < -1.0f || b.w() < -1.0f || b.x() > 2.0f || b.y() > 2.0f) continue;
-            int x0 = std::max(0, int(std::floor(std::max(-1.0f, b.x()) * size)) - 1);
-            int y0 = std::max(0, int(std::floor(std::max(-1.0f, b.y()) * size)) - 1);
-            int x1 = std::min(int(size) - 1, int(std::floor(std::min(2.0f, b.z()) * size)) + 1);
-            int y1 = std::min(int(size) - 1, int(std::floor(std::min(2.0f, b.w()) * size)) + 1);
-            for (int y = y0; y <= y1; ++y)
-                for (int x = x0; x <= x1; ++x)
-                    grid[y * size + x].push_back(3u + i * 4u);
-        }
-        unsigned base = unsigned(data.size());
-        data.resize(data.size() + grid.size());
-        for (unsigned i = 0; i < grid.size(); ++i)
-        {
-            data[base + i] = osg::Vec4f(float(data.size()), float(grid[i].size()), 0, 0);
-            for (unsigned address : grid[i]) data.emplace_back(float(address), 0, 0, 0);
-        }
-        return base;
-    }
-
     // Reads one RG16UI SDK band texel without imposing alignment on its byte storage.
     // Malformed addresses throw and send this tile through the existing raster fallback.
     osg::Vec2ui readBand(const Atlas::TextureData& bands, std::size_t address)
@@ -158,7 +131,21 @@ namespace
     {
         Atlas atlas{ atlasWidth };
         Canvas canvas{ atlas, slughorn::KeyIterator{ "osgearth" } };
-        std::vector<slughorn::Layer> layers;
+        // A paint operation is either an SDK curve shape or a round stroke over shared centerline segments.
+        struct Draw : slughorn::Layer
+        {
+            unsigned first = 0u, count = 0u;
+            float radius = 0.0f;
+            osg::Vec4f bounds;
+
+            // Creates an unpopulated centerline record; zero segments means there is nothing to draw.
+            Draw() = default;
+
+            // Retains SDK shape metadata for fills and strokes requiring curve expansion.
+            Draw(const slughorn::Layer& layer) : slughorn::Layer(layer) { }
+        };
+        std::vector<Draw> layers;
+        std::vector<osg::Vec4f> segments;
         GeoExtent extent;
         unsigned tileSize;
 
@@ -176,14 +163,64 @@ namespace
         }
 
         // Records a committed shape in paint order. The pinned SDK checks actual 16-bit band capacity in build().
-        void append(const slughorn::Layer& layer)
+        void append(const Draw& layer)
         {
-            auto shape = atlas.getShape(layer.key);
-            if (!shape || shape->curves.empty())
+            if (layer.count == 0u)
+            {
+                auto shape = atlas.getShape(layer.key);
+                if (!shape || shape->curves.empty()) return;
+            }
+            else if (layer.radius <= 0.0f)
                 return;
             if (layers.size() >= 65535u)
                 throw std::runtime_error("tile exceeds Slug shape capacity");
             layers.push_back(layer);
+        }
+
+        // Packs one path once for both outline and core; repeated vertices produce no zero-length segments.
+        // Coordinates are rebased in double precision before narrowing. Invalid input requests raster fallback.
+        Draw centerline(const Geometry& geometry)
+        {
+            Draw draw;
+            if (geometry.size() < (geometry.isRing() ? 3u : 2u)) return draw;
+            draw.first = unsigned(segments.size());
+            osg::Vec2f first, previous;
+            for (std::size_t i = 0; i < geometry.size(); ++i)
+            {
+                const auto& vertex = geometry[i];
+                osg::Vec2f point(float((vertex.x() - extent.xMin()) / extent.width()),
+                    float((vertex.y() - extent.yMin()) / extent.height()));
+                if (!std::isfinite(point.x()) || !std::isfinite(point.y()))
+                    throw std::runtime_error("non-finite centerline geometry");
+                if (i == 0u)
+                {
+                    first = point;
+                    draw.bounds = osg::Vec4f(point.x(), point.y(), point.x(), point.y());
+                }
+                else if (point != previous)
+                    segments.emplace_back(previous.x(), previous.y(), point.x(), point.y());
+                draw.bounds.x() = std::min(draw.bounds.x(), point.x());
+                draw.bounds.y() = std::min(draw.bounds.y(), point.y());
+                draw.bounds.z() = std::max(draw.bounds.z(), point.x());
+                draw.bounds.w() = std::max(draw.bounds.w(), point.y());
+                previous = point;
+            }
+            if (geometry.isRing() && previous != first)
+                segments.emplace_back(previous.x(), previous.y(), first.x(), first.y());
+            draw.count = unsigned(segments.size()) - draw.first;
+            return draw;
+        }
+
+        // Creates a separate paint operation over the same segments, expanding its bounds by the stroke radius.
+        Draw roundStroke(Draw draw, double width, const Color& color) const
+        {
+            draw.radius = float(width * 0.5 / tileSize);
+            if (!std::isfinite(draw.radius)) throw std::runtime_error("non-finite stroke width");
+            draw.color = slugColor(color);
+            draw.bounds += osg::Vec4f(-draw.radius, -draw.radius, draw.radius, draw.radius);
+            for (unsigned i = 0; i < 4u; ++i)
+                if (!std::isfinite(draw.bounds[i])) throw std::runtime_error("non-finite stroke bounds");
+            return draw;
         }
 
         // Adds the supported 2D style passes in rasterizer order; unsupported symbols request raster fallback.
@@ -239,7 +276,7 @@ namespace
             {
                 const Stroke& stroke = line->stroke().get();
                 // Defer core layers so every outline in this style stays below every road interior.
-                std::vector<slughorn::Layer> strokes;
+                std::vector<Draw> strokes;
                 if (stroke.outlineWidth().isSet()) strokes.reserve(local.size());
                 auto cap = stroke.lineCap() == Stroke::LINECAP_FLAT ? slughorn::canvas::LineCap::Butt :
                     stroke.lineCap() == Stroke::LINECAP_SQUARE ? slughorn::canvas::LineCap::Square :
@@ -266,6 +303,23 @@ namespace
                         const Geometry* g = iter.next();
                         if (g->isPointSet() || g->size() < 2u || (g->isRing() && poly && !poly->outline().get()))
                             continue;
+                        // Round joins and caps are the union of segment capsules. Other styles retain SDK curves.
+                        if (stroke.lineJoin() == Stroke::LINEJOIN_ROUND &&
+                            (g->isRing() || stroke.lineCap() == Stroke::LINECAP_ROUND))
+                        {
+                            if (width <= 0.0 && outline <= 0.0) continue;
+                            Draw path = centerline(*g);
+                            if (path.count == 0u) continue;
+                            if (outline > 0.0)
+                                append(roundStroke(path, width + 2.0 * outline, stroke.outlineColor().get()));
+                            if (width > 0.0)
+                            {
+                                Draw core = roundStroke(path, width, stroke.color());
+                                if (stroke.outlineWidth().isSet()) strokes.push_back(core);
+                                else append(core);
+                            }
+                            continue;
+                        }
                         Path path;
                         contour(path, *g, extent, g->isRing());
                         // Expand the underlying stroke by the border thickness on both sides.
@@ -309,7 +363,77 @@ namespace
             }
         }
 
-        // Packs metadata, spatial shape lists, curves, and compact bands into one RGBA32F texture.
+        // Indexes paint operations and long-path segments in tile UVs, preserving path and segment order.
+        // A full-cell AA margin is conservative while the shader's pixel footprint fits this grid.
+        // Short paths keep direct scans; segment geometry is shared, and references are packed four per texel.
+        unsigned appendGrid(std::vector<osg::Vec4f>& data, const std::vector<osg::Vec4f>& bounds,
+            unsigned size, unsigned segmentBase) const
+        {
+            struct Entry
+            {
+                unsigned address;
+                std::vector<unsigned> references;
+            };
+            std::vector<std::vector<Entry>> grid(size * size);
+            // Visits cells intersecting an expanded bound; clamps before integer conversion for remote geometry.
+            auto visit = [&](const osg::Vec4f& b, unsigned address, unsigned segment, bool indexed)
+            {
+                if (b.z() < -1.0f || b.w() < -1.0f || b.x() > 2.0f || b.y() > 2.0f) return;
+                int x0 = std::max(0, int(std::floor(std::max(-1.0f, b.x()) * size)) - 1);
+                int y0 = std::max(0, int(std::floor(std::max(-1.0f, b.y()) * size)) - 1);
+                int x1 = std::min(int(size) - 1, int(std::floor(std::min(2.0f, b.z()) * size)) + 1);
+                int y1 = std::min(int(size) - 1, int(std::floor(std::min(2.0f, b.w()) * size)) + 1);
+                for (int y = y0; y <= y1; ++y)
+                    for (int x = x0; x <= x1; ++x)
+                    {
+                        auto& cell = grid[y * size + x];
+                        if (cell.empty() || cell.back().address != address)
+                            cell.push_back({ address, {} });
+                        if (indexed) cell.back().references.push_back(segment);
+                    }
+            };
+            for (unsigned i = 0; i < layers.size(); ++i)
+            {
+                const auto& layer = layers[i];
+                unsigned address = 3u + i * 4u;
+                if (layer.count <= 4u)
+                {
+                    visit(bounds[i], address, 0u, false);
+                    continue;
+                }
+                for (unsigned j = 0; j < layer.count; ++j)
+                {
+                    const auto& segment = segments[layer.first + j];
+                    osg::Vec4f b(std::min(segment.x(), segment.z()) - layer.radius,
+                        std::min(segment.y(), segment.w()) - layer.radius,
+                        std::max(segment.x(), segment.z()) + layer.radius,
+                        std::max(segment.y(), segment.w()) + layer.radius);
+                    visit(b, address, segmentBase + layer.first + j, true);
+                }
+            }
+            unsigned base = unsigned(data.size());
+            data.resize(data.size() + grid.size());
+            for (unsigned i = 0; i < grid.size(); ++i)
+            {
+                const auto& cell = grid[i];
+                unsigned entries = unsigned(data.size());
+                data[base + i] = osg::Vec4f(float(entries), float(cell.size()), 0, 0);
+                data.resize(data.size() + cell.size());
+                for (unsigned j = 0; j < cell.size(); ++j)
+                {
+                    const auto& entry = cell[j];
+                    unsigned first = unsigned(data.size());
+                    data[entries + j] = osg::Vec4f(float(entry.address), float(first),
+                        float(entry.references.size()), 0);
+                    data.resize(data.size() + (entry.references.size() + 3u) / 4u);
+                    for (unsigned k = 0; k < entry.references.size(); ++k)
+                        data[first + k / 4u][k % 4u] = float(entry.references[k]);
+                }
+            }
+            return base;
+        }
+
+        // Packs ordered curve/stroke records, spatial lists, shared centerlines, curves, and bands into one texture.
         // Integer addresses remain exact below 2^24; dimensions and address counts are checked before upload.
         osg::ref_ptr<osg::Texture2D> finish(const Color& background)
         {
@@ -325,9 +449,18 @@ namespace
             for (unsigned i = 0; i < layers.size(); ++i)
             {
                 const auto& layer = layers[i];
-                const auto shape = atlas.getShape(layer.key);
                 unsigned address = 3u + i * 4u;
                 data[address] = osg::Vec4f(layer.color.r, layer.color.g, layer.color.b, layer.color.a);
+                if (layer.count > 0u)
+                {
+                    // Use the same carrier coordinates as curves so bounds rejection precedes metadata fetches.
+                    bounds[i] = layer.bounds;
+                    data[address + 1u] = osg::Vec4f(32.0f / std::max(layer.bounds.z() - layer.bounds.x(), 1e-9f),
+                        32.0f / std::max(layer.bounds.w() - layer.bounds.y(), 1e-9f), 0, 0);
+                    data[address + 3u] = osg::Vec4f(layer.bounds.x(), layer.bounds.y(), 0, 0);
+                    continue;
+                }
+                const auto shape = atlas.getShape(layer.key);
                 data[address + 1u] = osg::Vec4f(shape->bandScaleX, shape->bandScaleY,
                     shape->bandOffsetX, shape->bandOffsetY);
                 data[address + 3u] = osg::Vec4f(layer.transform.x, layer.transform.y, 0, 0);
@@ -341,15 +474,24 @@ namespace
             }
             // Dense city tiles need short candidate lists at high magnification.
             // Retain a coarse grid so minification does not jump straight to every shape.
-            unsigned gridBase = appendGrid(data, bounds, gridSize);
-            unsigned coarseBase = appendGrid(data, bounds, coarseGridSize);
+            unsigned segmentBase = unsigned(data.size());
+            data.insert(data.end(), segments.begin(), segments.end());
+            unsigned gridBase = appendGrid(data, bounds, gridSize, segmentBase);
+            unsigned coarseBase = appendGrid(data, bounds, coarseGridSize, segmentBase);
             std::size_t curveBase = data.size();
             std::size_t curveCount = curves.bytes.size() / sizeof(osg::Vec4f);
             data.resize(data.size() + curveCount);
             if (curveCount) std::memcpy(data.data() + curveBase, curves.bytes.data(), curves.bytes.size());
             for (unsigned i = 0; i < layers.size(); ++i)
             {
-                const auto shape = atlas.getShape(layers[i].key);
+                const auto& layer = layers[i];
+                if (layer.count > 0u)
+                {
+                    data[3u + i * 4u + 2u] = osg::Vec4f(float(segmentBase + layer.first),
+                        float(layer.count), layer.radius, 1.0f);
+                    continue;
+                }
+                const auto shape = atlas.getShape(layer.key);
                 unsigned base = appendBands(data, bands, shape->bandTexY * atlasWidth + shape->bandTexX,
                     shape->bandMaxY + 1u, shape->bandMaxX + 1u, unsigned(curveBase), unsigned(curveCount));
                 data[3u + i * 4u + 2u] = osg::Vec4f(float(base), 0, 0, 0);

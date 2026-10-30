@@ -2,7 +2,8 @@
 
 FeatureImage renders styled feature data as terrain imagery. Its default `raster`
 mode uses the existing feature rasterizer. Optional `vector` mode evaluates
-Slughorn curves on the GPU, preserving smooth edges when zooming past the source LOD.
+Slughorn curves and centerline strokes on the GPU, preserving smooth edges when
+zooming past the source LOD.
 
 Enable `OSGEARTH_ENABLE_SLUGHORN` in CMake (default: OFF) to build Slughorn
 statically and enable `FeatureImage` layers with `mode="vector"`. Use the normal
@@ -56,7 +57,8 @@ at the source tile latitude using the rasterizer's distance policy.
 Each paging request owns a private Slughorn atlas. Curves retain 32-bit float
 precision; coordinates are rebased against the tile origin in double precision
 first. Shape metadata, ordered 64-by-64 and 16-by-16 spatial indexes, curves, and
-compact band data are packed into one immutable RGBA32F texture. Band lookup
+compact band data and shared centerline segments are packed into one immutable
+RGBA32F texture. Band lookup
 indirection is resolved during packing, and each list texel holds four linear
 curve addresses. Curve coordinates and their evaluation order are unchanged.
 Integer addresses are exactly representable in this format, and address/dimension limits are
@@ -69,6 +71,41 @@ parent texture/matrix inheritance remains unchanged. No offscreen rasterization
 is involved for supported vector tiles. Shape evaluation runs front to back and stops at exactly opaque coverage; transparent shapes retain
 their paint order. The finer spatial index shortens candidate lists when zoomed in,
 while the coarse index preserves antialiasing support when zoomed out.
+
+Round-joined strokes with round caps use compact centerlines instead of CPU-expanded
+outline curves. Closed round-joined rings also use this path. The FIL fragment shader
+evaluates the union of segment capsules and applies color/opacity once per path,
+so overlapping segments within a path do not darken translucent joins. Outlines
+and cores share their centerline data. Coverage uses a derivative-based distance
+filter, including both edges for subpixel strokes; edge pixels can differ from
+Slug's curve-coverage filter, especially under strong minification. Flat/square
+caps and miter joins retain CPU-expanded Slughorn curves. Polygon fills, holes,
+and point symbols retain the Slug curve evaluator. Both kinds of paint operation
+share the existing spatial indexes, style order, and inherited texture matrix.
+Long round strokes use cell-local segment lists in 64x64 and 16x16 tile grids,
+so fragments search nearby segments rather than the entire path. Segment bounds
+include stroke width and an antialiasing margin; segment order and one blend per
+path are preserved. Minified vector layers fade out instead of scanning complete paths.
+
+`vector_min_tile_pixels` controls this visibility cutoff (default `16`, minimum `16`).
+The layer is fully visible at twice this projected source-tile size, fades smoothly
+as it shrinks, and becomes transparent at the cutoff. For example,
+`<vector_min_tile_pixels>32</vector_min_tile_pixels>` fades between approximately
+64 and 32 pixels across the source tile. Evaluation uses the largest source-UV
+pixel footprint per fragment, so oblique views can fade earlier in the compressed
+direction. Inherited atlases use their original source UVs, not child-tile UVs.
+The fade includes the layer background and raster fallback tiles; normal raster-mode
+layers are unaffected. No atlas data is read beyond the cutoff. This is a render-only
+configuration value, retained when serializing the layer, and does not change data LODs.
+
+In `osgearth_imgui`, expand the vector layer in the Map panel to adjust **Vector
+fade start (px)** and **Vector fade cutoff (px)** live. These controls update the
+uniform immediately, without rebuilding tiles. Cutoff stays at least 16 pixels
+and below fade start. **Reset fade** restores the configured values. Live changes
+last until the layer is reopened.
+
+This is a layer-local fragment implementation, with no separate stroke geometry
+or compute pass, and it does not use osgSlug's PathDrawable.
 
 Supported styling includes solid polygon fills with holes, solid line strokes
 and outlines with cap/join settings and width expressions, and point fills.

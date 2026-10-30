@@ -8,6 +8,9 @@
 
 #define SLUG_INDIRECTION_SIZE 32
 
+// Source-UV footprint at fade start/end. Layer configuration can request an earlier cutoff.
+uniform vec2 oe_featureimage_vector_fade = vec2(1.0 / 32.0, 1.0 / 16.0);
+
 // Reads linear addresses from the tile's combined metadata/curve/band texture.
 vec4 oe_slug_read(sampler2D atlas, int address)
 {
@@ -190,19 +193,79 @@ float slug_Render(
 }
 
 
+// Updates the nearest capsule in original segment order, retaining deterministic join gradients.
+void oe_slug_nearest(vec4 segment, vec2 uv, inout float closest2, inout vec2 nearest, inout vec2 tangent)
+{
+    vec2 edge = segment.zw - segment.xy, relative = uv - segment.xy;
+    float t = clamp(dot(relative, edge) / max(dot(edge, edge), 1e-30), 0.0, 1.0);
+    vec2 delta = relative - t * edge;
+    float d2 = dot(delta, delta);
+    if (d2 < closest2)
+    {
+        closest2 = d2;
+        nearest = delta;
+        tangent = edge;
+    }
+}
+
+// Evaluates a round-capped, round-joined path as a union of capsules, blending the path only once.
+// Cell-local segment references preserve nearest-segment order and one blend per path.
+// Derivatives are supplied before divergent branches and remain in the inherited source-tile frame.
+float oe_slug_stroke(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy, vec4 stroke, vec2 segmentList)
+{
+    float closest2 = 1e30;
+    vec2 nearest = vec2(0.0), tangent = vec2(1.0, 0.0);
+    // Keep the full-path fallback loop free of per-segment indirection branches.
+    if (segmentList.y > 0.0)
+    {
+        vec4 references = vec4(0.0);
+        for (int i = 0; i < int(segmentList.y); ++i)
+        {
+            if ((i & 3) == 0) references = oe_slug_read(atlas, int(segmentList.x) + (i >> 2));
+            vec4 segment = oe_slug_read(atlas, int(references[i & 3]));
+            oe_slug_nearest(segment, uv, closest2, nearest, tangent);
+        }
+    }
+    else
+    {
+        for (int i = 0; i < int(stroke.y); ++i)
+        {
+            vec4 segment = oe_slug_read(atlas, int(stroke.x) + i);
+            oe_slug_nearest(segment, uv, closest2, nearest, tangent);
+        }
+    }
+    float distance = sqrt(closest2);
+    // At the centerline the distance gradient is undefined; the segment normal still gives the pixel width.
+    vec2 normal = distance > 1e-12 ? nearest / distance :
+        vec2(-tangent.y, tangent.x) * inversesqrt(max(dot(tangent, tangent), 1e-30));
+    float aa = max(abs(dot(normal, dx)) + abs(dot(normal, dy)), 1e-9);
+    // Account for both edges when a stroke is narrower than a pixel; it must fade toward zero with its width.
+    return clamp(0.5 + (stroke.z - distance) / aa, 0.0, 1.0) -
+        clamp(0.5 - (stroke.z + distance) / aa, 0.0, 1.0);
+}
+
 // Samples the source atlas in the inherited raster texture coordinate frame, not child-tile UVs.
 // Ordinary raster fallback images are distinguished by a negative data-format sentinel.
 vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
 {
+    vec2 footprint = max(abs(dx) + abs(dy), vec2(1e-9));
+    float projectedFootprint = max(footprint.x, footprint.y);
+    // Skip atlas reads and all shape/segment searches once the source tile is too small on screen.
+    if (projectedFootprint >= oe_featureimage_vector_fade.y) return vec4(0.0);
+    float visibility = 1.0 - smoothstep(oe_featureimage_vector_fade.x,
+        oe_featureimage_vector_fade.y, projectedFootprint);
     vec4 header = oe_slug_read(atlas, 0);
     if (header.x != -73821.0)
-        return textureGrad(atlas, uv, dx, dy);
+    {
+        vec4 raster = textureGrad(atlas, uv, dx, dy);
+        raster.a *= visibility;
+        return raster;
+    }
     vec4 meta = oe_slug_read(atlas, 2);
-    vec2 footprint = max(abs(dx) + abs(dy), vec2(1e-9));
     vec2 pixelsPerEm = 1.0 / footprint;
     int gridSize = int(meta.y);
     int gridBase = int(meta.x);
-    // The optional 16x16 index avoids a full shape scan when the fine grid is too small.
+    // Use the 16x16 index until the visibility cutoff; minification never scans all shapes.
     if (max(footprint.x, footprint.y) > 1.0 / float(gridSize) && meta.w > 0.0)
     {
         gridSize = 16;
@@ -210,26 +273,29 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
     }
     ivec2 cell = clamp(ivec2(uv * float(gridSize)), ivec2(0), ivec2(gridSize - 1));
     vec2 list = oe_slug_read(atlas, gridBase + cell.y * gridSize + cell.x).xy;
-    bool coarse = max(footprint.x, footprint.y) > 1.0 / float(gridSize);
-    int count = coarse ? int(header.w) : int(list.y);
+    // Preserve off-tile sampling without treating minification as a full-path search request.
+    bool outside = any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)));
+    int count = outside ? int(header.w) : int(list.y);
     vec4 result = vec4(0.0);
     float remaining = 1.0;
     // Front-to-back premultiplied compositing preserves paint order and can stop
     // exactly at opaque coverage. There is no approximate alpha cutoff.
     for (int i = count - 1; i >= 0; --i)
     {
-        int address = coarse ? 3 + 4 * i : int(oe_slug_read(atlas, int(list.x) + i).x);
+        vec4 entry = outside ? vec4(float(3 + 4 * i), 0.0, 0.0, 0.0) :
+            oe_slug_read(atlas, int(list.x) + i);
+        int address = int(entry.x);
         vec4 band = oe_slug_read(atlas, address + 1);
         vec2 origin = oe_slug_read(atlas, address + 3).xy;
         vec2 coord = uv - origin;
         vec2 bandCoord = coord * band.xy + band.zw;
         vec2 margin = 0.5 * abs(footprint * band.xy);
-        // Match Slug's carrier-quad rejection before fetching curve metadata/color.
+        // Curves and strokes share carrier bounds. Reject before fetching type or curve/segment metadata.
         if (any(lessThan(bandCoord, -margin)) ||
-            any(greaterThan(bandCoord, vec2(float(SLUG_INDIRECTION_SIZE)) + margin)))
-            continue;
-        int bandHeaders = int(oe_slug_read(atlas, address + 2).x);
-        float coverage = slug_Render(coord, pixelsPerEm, bandCoord, bandHeaders, atlas);
+            any(greaterThan(bandCoord, vec2(float(SLUG_INDIRECTION_SIZE)) + margin))) continue;
+        vec4 shape = oe_slug_read(atlas, address + 2);
+        float coverage = shape.w == 1.0 ? oe_slug_stroke(atlas, uv, dx, dy, shape, entry.yz) :
+            slug_Render(coord, pixelsPerEm, bandCoord, int(shape.x), atlas);
         if (coverage == 0.0) continue;
         vec4 fill = oe_slug_read(atlas, address);
         float alpha = fill.a * coverage;
@@ -240,6 +306,7 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
     vec4 background = oe_slug_read(atlas, 1);
     result += vec4(background.rgb * background.a, background.a) * remaining;
     if (result.a > 0.0) result.rgb /= result.a;
+    result.a *= visibility;
     return result;
 }
 

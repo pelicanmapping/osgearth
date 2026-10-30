@@ -13,6 +13,8 @@
 #include <osgEarth/CoverageLayer>
 #include <osgEarth/MapboxGLImageLayer>
 #include <osgEarth/FeatureModelLayer>
+#include <osgEarth/FeatureImageLayer>
+#include <cmath>
 #include <osgEarth/TiledFeatureModelLayer>
 #include <osgEarth/ModelLayer>
 #include <osgEarth/TerrainConstraintLayer>
@@ -115,6 +117,53 @@ namespace osgEarth
 
     namespace detail
     {
+        // Edits the open vector layer's live uniform on the GUI thread; no atlas rebuild or retained UI state.
+        // Pixel controls preserve fade-start > cutoff >= 16, including keyboard-entered values.
+        inline void drawFeatureImageFadeControls(FeatureImageLayer* layer)
+        {
+            if (!layer || layer->options().mode() != "vector") return;
+            auto* stateSet = layer->getStateSet();
+            auto* uniform = stateSet ? stateSet->getUniform("oe_featureimage_vector_fade") : nullptr;
+            if (!uniform) return; // Raster fallback builds have no vector fade controls.
+
+            osg::Vec2f fade;
+            if (!uniform->get(fade)) return;
+            float start = fade.x() > 0.0f ? 1.0f / fade.x() : 32.0f;
+            float cutoff = fade.y() > 0.0f ? 1.0f / fade.y() : 16.0f;
+            if (!std::isfinite(start)) start = 32.0f;
+            if (!std::isfinite(cutoff)) cutoff = 16.0f;
+            cutoff = std::max(16.0f, cutoff);
+            start = std::max(cutoff + 1.0f, start);
+            const ImGuiSliderFlags flags = ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp;
+            bool changed = ImGuiLTable::SliderFloat("Vector fade start (px)", &start,
+                cutoff + 1.0f, std::max(4096.0f, start), "%.1f", flags);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Projected source-tile size where fading starts as you zoom out. "
+                    "Larger values hide distant details sooner. Ctrl-click to enter a value.");
+            changed |= ImGuiLTable::SliderFloat("Vector fade cutoff (px)", &cutoff,
+                16.0f, start - 1.0f, "%.1f", flags);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Projected source-tile size where details disappear. Minimum 16 pixels. "
+                    "Live adjustments last until the layer is reopened.");
+            if (changed)
+            {
+                cutoff = std::max(16.0f, cutoff);
+                start = std::max(cutoff + 1.0f, start);
+                uniform->set(osg::Vec2f(1.0f / start, 1.0f / cutoff));
+            }
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("Vector fade");
+            ImGui::TableNextColumn();
+            if (ImGui::Button("Reset fade"))
+            {
+                float configured = layer->options().getConfig().value<float>("vector_min_tile_pixels", 16.0f);
+                if (!std::isfinite(configured) || configured < 16.0f) configured = 16.0f;
+                uniform->set(osg::Vec2f(0.5f / configured, 1.0f / configured));
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Restore this layer's configured fade settings.");
+        }
+
         struct AddWMSDialog
         {
             AddWMSDialog()
@@ -863,6 +912,8 @@ namespace osgEarth
                                 imageLayer->setColorBlending(modulate ? BLEND_MODULATE : BLEND_INTERPOLATE);
                             }
                         }
+
+                        detail::drawFeatureImageFadeControls(dynamic_cast<FeatureImageLayer*>(layer));
 
 #ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
                         auto grimeLayer = dynamic_cast<osgEarthPrestige::GrimeLayer*>(layer);

@@ -12,6 +12,7 @@
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/Shaders>
 #include <osgEarth/Capabilities>
+#include <cmath>
 
 using namespace osgEarth;
 
@@ -100,6 +101,13 @@ FeatureImageLayer::openImplementation()
 #else
         if (!Registry::capabilities().supportsGLSL(330u))
             return Status(Status::ServiceUnavailable, "Vector FeatureImage requires GLSL 3.30");
+        // Keep this render-only setting in the retained Config so the public Options layout does not change.
+        float minPixels = options().getConfig().value<float>("vector_min_tile_pixels", 16.0f);
+        if (!std::isfinite(minPixels) || minPixels < 16.0f)
+            return Status(Status::ConfigurationError, "vector_min_tile_pixels must be finite and at least 16");
+        // Fade over a factor of two in projected source-tile size, before exceeding the coarse grid's AA margin.
+        getOrCreateStateSet()->getOrCreateUniform("oe_featureimage_vector_fade", osg::Uniform::FLOAT_VEC2)->set(
+            osg::Vec2f(0.5f / minPixels, 1.0f / minPixels));
         Util::Shaders shaders;
         shaders.load(VirtualProgram::getOrCreate(getOrCreateStateSet()), "FeatureImageLayer.Slug.glsl");
 #endif

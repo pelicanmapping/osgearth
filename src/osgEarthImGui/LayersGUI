@@ -899,12 +899,6 @@ namespace osgEarth
                             ImGuiLTable::Checkbox("Show debug volumes", &showBoundingVolumes);
                             threedTiles->getTilesetNode()->setShowBoundingVolumes(showBoundingVolumes);
                             ImGui::PopID();
-
-                            ImGui::PushID("debugColors");
-                            bool colorPerTile = threedTiles->getTilesetNode()->getColorPerTile();
-                            ImGuiLTable::Checkbox("Show color per tile", &colorPerTile);
-                            threedTiles->getTilesetNode()->setColorPerTile(colorPerTile);
-                            ImGui::PopID();
                         }
 
                         auto mapboxGLLayer = dynamic_cast<MapBoxGLImageLayer*>(layer);

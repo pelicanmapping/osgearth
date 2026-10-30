@@ -9,14 +9,16 @@
  *
  * Output scene graph:
  *
- *   MatrixTransform (root, Y-up to Z-up unless "gltfZUp"; CullFace BACK;
- *     |              the shared standard PBR program from PBRTexture)
- *     +- MatrixTransform | Group (one per glTF node, named after the node)
- *     |    +- Geode (one per mesh, shared by every node that references the mesh)
- *     |         +- Geometry (one per primitive; PBRTexture bound with install():
- *     |                      descriptor on unit 0, maps on the standard units)
- *     +- InstancedExternalNode (one per distinct external asset file and
- *                              winding parity, glTF 2.1 externalAssets)
+ *   MatrixTransform (root, Y-up to Z-up unless "gltfZUp"; no state of its own)
+ *     +- Group (one StateSet shared by every model: CullFace BACK and the
+ *          |    standard PBR program from PBRTexture, plus OE_LIGHTING off
+ *          |    when every primitive is unlit and there are no external assets)
+ *          +- MatrixTransform | Group (one per glTF node, named after the node)
+ *          |    +- Geode (one per mesh, shared by every node that references the mesh)
+ *          |         +- Geometry (one per primitive; PBRTexture bound with install():
+ *          |                      descriptor on unit 0, maps on the standard units)
+ *          +- InstancedExternalNode (one per distinct external asset file and
+ *                                   winding parity, glTF 2.1 externalAssets)
  *
  * No shaders are generated per model: every material uses the one program
  * that PBRTexture::installProgram() shares, and the ShaderGenerator is told
@@ -38,9 +40,9 @@
  * animations, morph targets, cameras and lights are ignored.
  *
  * Unlit materials (KHR_materials_unlit) bind only their base color texture
- * and turn OE_LIGHTING off on their primitives, so they draw base color times
- * vertex color with no scene lighting; their primitives get no generated
- * normals.
+ * and turn OE_LIGHTING off on their primitives (or once in the shared state of
+ * a model that is entirely unlit), so they draw base color times vertex color
+ * with no scene lighting; their primitives get no generated normals.
  *
  * Known limitations: every PBR map samples TEXCOORD_0 (texCoord indices and
  * KHR_texture_transform are ignored); normal maps are sampled as authored
@@ -677,6 +679,7 @@ public:
             for (cgltf_size i = 0; i < _data->extensions_required_count; ++i)
                 if (std::strcmp(_data->extensions_required[i], "KHR_texture_basisu") == 0)
                     _basisRequired = true;
+            _allUnlit = allPrimitivesUnlit();
         }
 
         osg::ref_ptr<osg::Node> build()
@@ -685,13 +688,16 @@ public:
             root->setName(osgDB::getSimpleFileName(_referrer));
             if (!_flags.zUp)
                 root->setMatrix(osg::Matrixd::rotate(osg::Vec3d(0.0, 1.0, 0.0), osg::Vec3d(0.0, 0.0, 1.0)));
-            root->getOrCreateStateSet()->setAttributeAndModes(
-                new osg::CullFace(osg::CullFace::BACK), osg::StateAttribute::ON);
 
             // Every material is bound for the one shared PBR program, so
             // nothing is generated per model and later ShaderGenerator passes
             // must leave this graph alone. Colors are linear throughout.
-            osgEarth::PBRTexture::installProgram(root->getStateSet());
+            // The program's state lives on a group below the root that every
+            // model shares (see sharedContentState); the root stays free for
+            // callers to add state of their own.
+            osg::ref_ptr<osg::Group> content = new osg::Group();
+            content->setStateSet(sharedContentState(_allUnlit));
+            root->addChild(content.get());
             osgEarth::ShaderGenerator::setIgnoreHint(root.get(), true);
             root->setUserValue(SHADERGEN_HINT_LINEAR_COLOR, true);
 
@@ -701,7 +707,7 @@ public:
                 {
                     osg::ref_ptr<osg::Node> node = buildNode(
                         *scene.nodes[i], osg::Matrixd::identity(), _flags.parentReversesWinding, 0u);
-                    if (node.valid()) root->addChild(node.get());
+                    if (node.valid()) content->addChild(node.get());
                 }
             };
 
@@ -728,13 +734,58 @@ public:
                     if (error.empty()) error = "Failed to load external asset " + batch.filename;
                     return {};
                 }
-                root->addChild(node.get());
+                content->addChild(node.get());
             }
 
             return root;
         }
 
     private:
+        //! The state every model's content group shares: back-face culling and the standard PBR program, plus
+        //! lighting turned off when all of a model's primitives are unlit. Sharing one StateSet object means the
+        //! cull's state graph holds it once, so moving between draws of different models (3D Tiles draw thousands)
+        //! only changes their materials instead of popping and pushing this state each time. Created once and never
+        //! released, like the program; builders on any thread may attach it. Never modify it.
+        static osg::StateSet* sharedContentState(bool unlit)
+        {
+            static osg::StateSet* const states[2] = { createContentState(false), createContentState(true) };
+            return states[unlit ? 1 : 0];
+        }
+
+        //! Creates one variant of the shared content state (see sharedContentState), holding a reference to it.
+        static osg::StateSet* createContentState(bool unlit)
+        {
+            osg::StateSet* state = new osg::StateSet();
+            state->ref();
+            state->setAttributeAndModes(new osg::CullFace(osg::CullFace::BACK), osg::StateAttribute::ON);
+            osgEarth::PBRTexture::installProgram(state);
+            if (unlit)
+                osgEarth::GLUtils::setLighting(state, osg::StateAttribute::OFF);
+            return state;
+        }
+
+        //! True when the document has primitives, every one with a KHR_materials_unlit material, and no external
+        //! assets. Such a model turns lighting off once in its shared content state rather than on each primitive:
+        //! a define on every draw's own state is pushed and popped per draw, and OSG re-applies the program each
+        //! time the defines change. External assets keep their own materials, so they must not inherit unlit.
+        bool allPrimitivesUnlit() const
+        {
+            bool any = false;
+            for (cgltf_size i = 0; i < _data->meshes_count; ++i)
+            {
+                const cgltf_mesh& mesh = _data->meshes[i];
+                for (cgltf_size j = 0; j < mesh.primitives_count; ++j)
+                {
+                    const cgltf_material* material = mesh.primitives[j].material;
+                    if (!material || !material->unlit) return false;
+                    any = true;
+                }
+            }
+            for (cgltf_size i = 0; i < _data->nodes_count; ++i)
+                if (_data->nodes[i].external_asset) return false;
+            return any;
+        }
+
         struct ExternalBatch
         {
             std::string filename;
@@ -757,6 +808,7 @@ public:
         const Flags _flags;
         TextureCache* _textureCache;
         bool _basisRequired = false;
+        bool _allUnlit = false;                                   // see allPrimitivesUnlit
 
         std::vector<osg::ref_ptr<osg::Array>> _arrays;            // per accessor
         std::vector<osg::ref_ptr<osg::Node>> _meshes;             // per mesh (non-instanced)
@@ -1405,7 +1457,8 @@ public:
 
             // KHR_materials_unlit: the PBRTexture program's output (base color
             // times vertex color) is final; every lighting stage honors OE_LIGHTING.
-            if (material.unlit)
+            // An all-unlit model sets it once in its shared content state instead.
+            if (material.unlit && !_allUnlit)
                 osgEarth::GLUtils::setLighting(stateSet, osg::StateAttribute::OFF);
 
             if (material.has_pbr_metallic_roughness)

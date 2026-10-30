@@ -50,6 +50,8 @@ namespace
     {
         Util::Json::Value json;
         std::string path = Util::getTempName("pbr-material-", ".png");
+        // Every loaded model, kept alive so tests can walk from a geometry up through its parents.
+        std::vector<osg::ref_ptr<osg::Node>> roots;
 
         GLTFFixture()
         {
@@ -95,6 +97,7 @@ namespace
             auto result = reader->readNode(stream, readOptions);
             INFO(result.message());
             REQUIRE(result.validNode());
+            roots.push_back(result.getNode());
             GeometryVisitor visitor;
             result.getNode()->accept(visitor);
             REQUIRE(visitor.geometries.size() == 2);
@@ -107,6 +110,27 @@ namespace
         auto* result = dynamic_cast<PBRTexture*>(geometry->getStateSet()->getTextureAttribute(0, osg::StateAttribute::TEXTURE));
         REQUIRE(result != nullptr);
         return result;
+    }
+
+    //! The nearest StateSet at or above a loaded node that names the given define; null when none does. The
+    //! model must still be alive (GLTFFixture keeps it), since this follows each node's first parent.
+    osg::StateSet* stateWithDefine(osg::Node* node, const std::string& define)
+    {
+        for (; node; node = node->getNumParents() > 0 ? node->getParent(0) : nullptr)
+            if (node->getStateSet() && node->getStateSet()->getDefinePair(define))
+                return node->getStateSet();
+        return nullptr;
+    }
+
+    //! The nearest StateSet at or above a loaded node that holds the standard PBR program: a glTF model's content
+    //! state. (A primitive's own state may hold another program, such as an alpha discard.)
+    osg::StateSet* stateWithProgram(osg::Node* node)
+    {
+        for (; node; node = node->getNumParents() > 0 ? node->getParent(0) : nullptr)
+            if (node->getStateSet() &&
+                node->getStateSet()->getAttribute(osg::StateAttribute::PROGRAM) == PBRTexture::getOrCreateProgram())
+                return node->getStateSet();
+        return nullptr;
     }
 }
 
@@ -209,13 +233,16 @@ TEST_CASE("glTF factor-only and plain materials preserve their defaults", "[pbr]
     REQUIRE_FALSE(material(plain[0])->pbr.valid());
 }
 
-// KHR_materials_unlit keeps base color and alpha mode only, turns lighting off on its
-// primitives, and needs no normals; lit materials stay lit with every map.
+// KHR_materials_unlit keeps base color and alpha mode only, turns lighting off for its
+// primitives, and needs no normals; lit materials stay lit with every map. A model that is
+// entirely unlit turns lighting off once in its shared content state; a mixed one does it
+// per unlit primitive. Models share their content state.
 TEST_CASE("glTF unlit materials bind base color only and disable lighting", "[pbr][gltf]")
 {
     GLTFFixture fixture;
     auto lit = fixture.load();
     auto skipped = fixture.load("gltfSkipPBRTextures");
+    const Util::Json::Value litMaterial = fixture.json["materials"][0u];
     auto& source = fixture.json["materials"][0u];
     source["extensions"]["KHR_materials_unlit"] = Util::Json::Value(Util::Json::objectValue);
     source["alphaMode"] = "BLEND";
@@ -224,16 +251,21 @@ TEST_CASE("glTF unlit materials bind base color only and disable lighting", "[pb
     fixture.json["extensionsRequired"].append("KHR_materials_unlit");
     auto unlit = fixture.load();
 
-    REQUIRE(lit[0]->getStateSet()->getDefinePair(OE_LIGHTING_DEFINE) == nullptr);
+    REQUIRE(stateWithDefine(lit[0], OE_LIGHTING_DEFINE) == nullptr);
     REQUIRE(lit[0]->getNormalArray() != nullptr);
     REQUIRE(material(lit[0])->normal.valid());
     REQUIRE(material(lit[0])->pbr.valid());
 
     auto* state = unlit[0]->getStateSet();
-    const auto* lighting = state->getDefinePair(OE_LIGHTING_DEFINE);
-    REQUIRE(lighting != nullptr);
+    REQUIRE(state->getDefinePair(OE_LIGHTING_DEFINE) == nullptr);
+    auto* contentState = stateWithDefine(unlit[0], OE_LIGHTING_DEFINE);
+    REQUIRE(contentState == stateWithProgram(unlit[0]));
+    const auto* lighting = contentState->getDefinePair(OE_LIGHTING_DEFINE);
     REQUIRE((lighting->second & osg::StateAttribute::ON) == 0);
     REQUIRE(unlit[0]->getNormalArray() == nullptr);
+    REQUIRE(stateWithProgram(lit[0]) != nullptr);
+    REQUIRE(stateWithProgram(lit[0]) == stateWithProgram(skipped[0]));
+    REQUIRE(stateWithProgram(lit[0]) != contentState);
 
     auto* texture = material(unlit[0]);
     REQUIRE(material(unlit[1]) == texture);
@@ -252,6 +284,13 @@ TEST_CASE("glTF unlit materials bind base color only and disable lighting", "[pb
     REQUIRE(state->getMode(GL_BLEND) == osg::StateAttribute::ON);
     REQUIRE(state->getRenderingHint() == osg::StateSet::TRANSPARENT_BIN);
     REQUIRE(state->getMode(GL_CULL_FACE) == osg::StateAttribute::OFF);
+
+    fixture.json["materials"].append(litMaterial);
+    fixture.json["meshes"][0u]["primitives"][1u]["material"] = 1;
+    auto mixed = fixture.load();
+    REQUIRE(stateWithDefine(mixed[0], OE_LIGHTING_DEFINE) == mixed[0]->getStateSet());
+    REQUIRE(stateWithDefine(mixed[1], OE_LIGHTING_DEFINE) == nullptr);
+    REQUIRE(stateWithProgram(mixed[0]) == stateWithProgram(lit[0]));
 }
 
 TEST_CASE("glTF embedded images remain local to each loaded model", "[pbr][gltf]")

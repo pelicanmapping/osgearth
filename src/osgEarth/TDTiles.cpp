@@ -509,30 +509,10 @@ Tileset::create(const std::string& json, const URIContext& uc)
     return new Tileset(root, lc);
 }
 
-static VirtualProgram* getOrCreateDebugVirtualProgram()
-{
-    char s_debugColoring[] =
-        "#pragma import_defines(OE_3DTILES_DEBUG)\n"
-        "uniform vec4 debugColor;\n"
-        "void color( inout vec4 color ) \n"
-        "{\n"
-        "#ifdef OE_3DTILES_DEBUG \n"
-        "    color = mix(debugColor, color, 0.5); \n"
-        "#endif\n"
-        "} \n";
-
-    static osg::ref_ptr< VirtualProgram > s_debugProgram;
-    if (!s_debugProgram.valid())
-    {
-        s_debugProgram = new VirtualProgram();
-        s_debugProgram->setFunction("color", s_debugColoring, VirtualProgram::LOCATION_FRAGMENT_LIGHTING);
-    }
-    return s_debugProgram.get();
-}
-
 //........................................................................
 
-osg::Vec4
+//! A random opaque color, used to tell tiles' bounding volume visualizations apart.
+static osg::Vec4
 randomColor()
 {
     float r = (float)rand() / (float)RAND_MAX;
@@ -716,6 +696,7 @@ ThreeDTileNode::ThreeDTileNode(ThreeDTilesetNode* tileset, Tile* tile, bool imme
     _refine(REFINE_ADD)
 {
     OE_PROFILING_ZONE;
+    _hasContent = _tile->content().isSet() && _tile->content()->uri().isSet();
     if (_tile->content().isSet())
     {
         OE_PROFILING_ZONE_TEXT(_tile->content()->uri()->full().c_str());
@@ -783,10 +764,6 @@ ThreeDTileNode::ThreeDTileNode(ThreeDTilesetNode* tileset, Tile* tile, bool imme
         }
         addChild(_children.get());
     }
-
-    _debugColor = randomColor();
-
-    getOrCreateStateSet()->getOrCreateUniform("debugColor", osg::Uniform::FLOAT_VEC4)->set(_debugColor);
 
     computeBoundingVolume();
 
@@ -1005,11 +982,13 @@ osg::ref_ptr<osg::Geode> buildSphere(const double radius,
 
 void ThreeDTileNode::createDebugBounds()
 {
+    const osg::Vec4 color = randomColor();
+
     if (_tile->boundingVolume()->sphere().isSet())
     {
         osg::MatrixTransform* mt = new osg::MatrixTransform;
         mt->setMatrix(osg::Matrixd::translate(_localBoundingSphere.center()));
-        mt->addChild(buildSphere(_localBoundingSphere.radius(), 20, 20, _debugColor));
+        mt->addChild(buildSphere(_localBoundingSphere.radius(), 20, 20, color));
         _boundsDebug = mt;
     }
     else if (_boundingBox.valid())
@@ -1035,7 +1014,7 @@ void ThreeDTileNode::createDebugBounds()
         for (int i = 0; i < 24; ++i)
             d->pushVertex(corners[index[i]]);
 
-        d->setColor(_debugColor);
+        d->setColor(color);
         d->finish();
 
         osg::MatrixTransform* transform = new osg::MatrixTransform;
@@ -1049,11 +1028,6 @@ void ThreeDTileNode::createDebugBounds()
 osg::BoundingSphere ThreeDTileNode::computeBound() const
 {
     return _tile->getBoundingSphere();
-}
-
-bool ThreeDTileNode::hasContent()
-{
-    return _tile->content().isSet() && _tile->content()->uri().isSet();
 }
 
 osg::Node* ThreeDTileNode::getContent()
@@ -1169,10 +1143,28 @@ bool ThreeDTileNode::prepareForRefine(osgUtil::CullVisitor* cv, double priority)
     // is ready, so it must not expire while the parent needs it.
     updateTracking(cv);
 
-    if (hasContent() && !isContentReady())
+    // An external tileset is drawn through its root tile, so that has to be drawable as well.
+    ThreeDTileNode* root = nullptr;
+    if (hasContent())
     {
-        _tileset->requestTileContent(this, priority);
-        return false;
+        if (!isContentReady())
+        {
+            _tileset->requestTileContent(this, priority);
+            return false;
+        }
+
+        ThreeDTilesetContentNode* tilesetContent = dynamic_cast<ThreeDTilesetContentNode*>(_content.get());
+        root = tilesetContent ? tilesetContent->getTileNode() : nullptr;
+        if (!root)
+        {
+            // Ordinary loaded content is drawable as is. This is the usual case, so return before paying for the
+            // modelview push below, which only the external root and empty-tile cases measure anything in.
+            return true;
+        }
+    }
+    else if (!_children.valid() || _children->getNumChildren() == 0)
+    {
+        return true;
     }
 
     // The parent calls this from its own frame; measure this tile and its descendants in theirs.
@@ -1181,14 +1173,11 @@ bool ThreeDTileNode::prepareForRefine(osgUtil::CullVisitor* cv, double priority)
     cv->pushModelViewMatrix(matrix.get(), getReferenceFrame());
 
     bool ready = true;
-    if (hasContent())
+    if (root)
     {
-        // An external tileset is drawn through its root tile, so that has to be drawable as well.
-        ThreeDTilesetContentNode* tilesetContent = dynamic_cast<ThreeDTilesetContentNode*>(_content.get());
-        ThreeDTileNode* root = tilesetContent ? tilesetContent->getTileNode() : nullptr;
-        ready = root == nullptr || root->prepareForRefine(cv, priority);
+        ready = root->prepareForRefine(cv, priority);
     }
-    else if (_children.valid() && _children->getNumChildren() > 0)
+    else
     {
         // A tile without content draws its children instead, but only once its own error calls for it (see
         // traverse); until then it draws nothing, so it isn't ready and the parent keeps drawing. Its children
@@ -1531,7 +1520,6 @@ ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& author
     _maximumScreenSpaceError(15.0f),
     _maxTiles(50),
     _showBoundingVolumes(false),
-    _showColorPerTile(false),
     _maxAge(5.0f),
     _maxSimultaneousLoads(0u),
     _loadsInFlight(std::make_shared<std::atomic_uint>(0u)),
@@ -1559,13 +1547,6 @@ ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& author
     _tracker.push_back(0);
     // Pointer to last element
     _sentryItr = --_tracker.end();
-
-    _debugVP = getOrCreateDebugVirtualProgram();
-    getOrCreateStateSet()->setAttribute(_debugVP.get());
-    if (_showColorPerTile)
-    {
-        getOrCreateStateSet()->setDefine("OE_3DTILES_DEBUG", osg::StateAttribute::ON);
-    }
 
     if (!_options.valid())
     {
@@ -1732,27 +1713,6 @@ bool ThreeDTilesetNode::getShowBoundingVolumes() const
 void ThreeDTilesetNode::setShowBoundingVolumes(bool showBoundingVolumes)
 {
     _showBoundingVolumes = showBoundingVolumes;
-}
-
-bool ThreeDTilesetNode::getColorPerTile() const
-{
-    return _showColorPerTile;
-}
-
-void ThreeDTilesetNode::setColorPerTile(bool colorPerTile)
-{
-    if (_showColorPerTile != colorPerTile)
-    {
-        _showColorPerTile = colorPerTile;
-        if (_showColorPerTile)
-        {
-            getOrCreateStateSet()->setDefine("OE_3DTILES_DEBUG", osg::StateAttribute::ON);
-        }
-        else
-        {
-            getOrCreateStateSet()->setDefine("OE_3DTILES_DEBUG", osg::StateAttribute::OFF);
-        }
-    }
 }
 
 double ThreeDTilesetNode::getSSEDenominator() const

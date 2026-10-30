@@ -126,6 +126,21 @@ namespace osgEarth
             auto* uniform = stateSet ? stateSet->getUniform("oe_featureimage_vector_fade") : nullptr;
             if (!uniform) return; // Raster fallback builds have no vector fade controls.
 
+            auto* screenBins = stateSet->getUniform("oe_featureimage_screen_bins");
+            bool enabled = false;
+            if (screenBins && screenBins->get(enabled))
+            {
+                if (ImGuiLTable::Checkbox("Vector screen bins", &enabled))
+                {
+                    screenBins->set(enabled);
+                    if (enabled) stateSet->setDefine("OE_FEATUREIMAGE_SCREEN_BINS");
+                    else stateSet->removeDefine("OE_FEATUREIMAGE_SCREEN_BINS");
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Experimental NVGL screen index. Reuses lists between updates; "
+                        "rebuilding can cost more than it saves.");
+            }
+
             osg::Vec2f fade;
             if (!uniform->get(fade)) return;
             float start = fade.x() > 0.0f ? 1.0f / fade.x() : 32.0f;

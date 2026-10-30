@@ -108,6 +108,14 @@ FeatureImageLayer::openImplementation()
         // Fade over a factor of two in projected source-tile size, before exceeding the coarse grid's AA margin.
         getOrCreateStateSet()->getOrCreateUniform("oe_featureimage_vector_fade", osg::Uniform::FLOAT_VEC2)->set(
             osg::Vec2f(0.5f / minPixels, 1.0f / minPixels));
+        if (Registry::capabilities().supportsGLSL(450u))
+        {
+            bool screenBins = options().getConfig().value<bool>("vector_screen_bins", false);
+            if (screenBins) getOrCreateStateSet()->setDefine("OE_FEATUREIMAGE_SCREEN_BINS");
+            VirtualProgram::getOrCreate(getOrCreateStateSet())->getTemplate()->addBindUniformBlock("VectorFrustumParams", 12);
+            getOrCreateStateSet()->getOrCreateUniform("oe_featureimage_screen_bins", osg::Uniform::BOOL)->set(
+                screenBins);
+        }
         Util::Shaders shaders;
         shaders.load(VirtualProgram::getOrCreate(getOrCreateStateSet()), "FeatureImageLayer.Slug.glsl");
 #endif

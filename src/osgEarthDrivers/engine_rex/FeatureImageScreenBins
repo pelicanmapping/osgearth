@@ -1,0 +1,320 @@
+// osgEarth - Copyright 2026 Pelican Mapping - MIT License
+#pragma once
+#include "DrawTileCommand"
+#include <osgEarth/ScreenSpaceGrid>
+#include <osgEarth/Shaders>
+#include <osgEarth/VirtualProgram>
+#include <unordered_map>
+#include <cmath>
+
+namespace osgEarth { namespace REX
+{
+    // Private NVGL helper. One instance belongs to one LayerDrawable/graphics context and its draw thread.
+    // Source atlases remain owned by REX; this object owns only transient view-dependent index buffers.
+    class FeatureImageScreenBins
+    {
+        struct Params
+        {
+            osg::Matrixf invProjMatrix;
+            osg::Vec4i viewport;
+            osg::Vec2i numTiles;
+            unsigned pixelsPerTile = 0;
+            float debugTiles = 0.0f;
+        };
+        struct Receiver
+        {
+            osg::Vec4f origin, axisU, axisV, error, domain;
+            osg::Vec4i bins;
+            osg::Vec4ui data;
+        };
+        struct Shape
+        {
+            osg::observer_ptr<const SharedGeometry> geometry;
+            osg::Vec3d origin, u, v, residual, normal;
+            unsigned revision = 0;
+            bool valid = false;
+        };
+        Params _params;
+        GLBuffer::Ptr _parameters, _frustums, _receivers, _bins, _words, _allocation;
+        osg::ref_ptr<osg::Program> _gridProgram, _cullProgram;
+        std::unordered_map<const SharedGeometry*, Shape> _shapes;
+        std::vector<Receiver> _cpu;
+        struct Snapshot
+        {
+            Texture::Ptr atlas;
+            osg::Matrix modelView;
+            osg::Matrixf color;
+            const SharedGeometry* geometry = nullptr;
+            osg::Vec2f elevation;
+            unsigned revision = 0;
+        };
+        std::vector<Snapshot> _snapshots;
+        osg::Matrix _projection;
+        osg::Vec4i _viewport;
+        unsigned _age = 0;
+        bool _hasIndex = false;
+        bool _failed = false;
+        static constexpr unsigned wordCapacity = 2u * 1024u * 1024u;
+        static constexpr unsigned binCapacity = 256u * 1024u;
+
+        // Fits a tile's local vertices to UV and caches an envelope for curvature, constraints, and morphing.
+        // The fragment-side UV/derivative guard guarantees correctness even for additional vertex deformation.
+        const Shape& shape(const SharedGeometry* geometry)
+        {
+            auto& result = _shapes[geometry];
+            auto* positions = geometry->getVertexArray();
+            auto* coords = geometry->getTexCoordArray();
+            if (!positions || !coords || positions->size() != coords->size() || positions->size() < 3) return result;
+            unsigned revision = positions->getModifiedCount() + coords->getModifiedCount();
+            if (result.geometry.get() == geometry && result.revision == revision) return result;
+            result = Shape();
+            result.geometry = geometry;
+            result.revision = revision;
+            unsigned b = 0, c = 0;
+            double length = 0.0, area = 0.0;
+            osg::Vec2d a((*coords)[0].x(), (*coords)[0].y());
+            for (unsigned i = 1; i < coords->size(); ++i)
+            {
+                osg::Vec2d d((*coords)[i].x() - a.x(), (*coords)[i].y() - a.y());
+                if (d.length2() > length) { length = d.length2(); b = i; }
+            }
+            osg::Vec2d ab((*coords)[b].x() - a.x(), (*coords)[b].y() - a.y());
+            for (unsigned i = 1; i < coords->size(); ++i)
+            {
+                osg::Vec2d ac((*coords)[i].x() - a.x(), (*coords)[i].y() - a.y());
+                double cross = ab.x() * ac.y() - ab.y() * ac.x();
+                if (std::abs(cross) > std::abs(area)) { area = cross; c = i; }
+            }
+            if (std::abs(area) < 1e-12) return result;
+            osg::Vec2d ac((*coords)[c].x() - a.x(), (*coords)[c].y() - a.y());
+            osg::Vec3d pb = osg::Vec3d((*positions)[b]) - osg::Vec3d((*positions)[0]);
+            osg::Vec3d pc = osg::Vec3d((*positions)[c]) - osg::Vec3d((*positions)[0]);
+            result.u = (pb * ac.y() - pc * ab.y()) / area;
+            result.v = (pc * ab.x() - pb * ac.x()) / area;
+            result.origin = osg::Vec3d((*positions)[0]) - result.u * a.x() - result.v * a.y();
+            auto* normals = geometry->getNormalArray();
+            auto* neighbors = geometry->getNeighborArray();
+            for (unsigned i = 0; i < positions->size(); ++i)
+            {
+                osg::Vec3d error = osg::Vec3d((*positions)[i]) - result.origin -
+                    result.u * (*coords)[i].x() - result.v * (*coords)[i].y();
+                for (unsigned k = 0; k < 3; ++k)
+                {
+                    double morph = neighbors && neighbors->size() == positions->size() ?
+                        2.0 * std::abs((*neighbors)[i][k] - (*positions)[i][k]) : 0.0;
+                    result.residual[k] = std::max(result.residual[k], std::abs(error[k]) + morph + 0.01);
+                    result.normal[k] = std::max(result.normal[k], normals && normals->size() == positions->size() ?
+                        1.01 * std::abs(double((*normals)[i][k])) : 1.0);
+                }
+            }
+            result.valid = true;
+            return result;
+        }
+
+        // Creates per-context compute resources; compilation failure disables acceleration for this instance.
+        bool initialize(osg::State& state)
+        {
+            if (_failed) return false;
+            if (_parameters) return true;
+            static_assert(sizeof(Receiver) == 112, "GLSL receiver layout");
+            static_assert(sizeof(Params) == 96, "GLSL frustum parameter layout");
+            Util::Shaders shaders;
+            shaders.replace("OE_BINDING_FRUSTUM_PARAMS", "12");
+            shaders.replace("OE_BINDING_FRUSTUMS", "12");
+            _gridProgram = new osg::Program;
+            _gridProgram->addBindUniformBlock("FrustumParams", 12);
+            _gridProgram->addShader(new osg::Shader(osg::Shader::COMPUTE,
+                ShaderLoader::load("FrustumGridComputer.glsl", shaders)));
+            // Vector declarations supply their own binding macros.
+            Util::Shaders vectorShaders;
+            _cullProgram = new osg::Program;
+            _cullProgram->addBindUniformBlock("VectorFrustumParams", 12);
+            _cullProgram->addShader(new osg::Shader(osg::Shader::COMPUTE,
+                ShaderLoader::load("FeatureImageLayer.ScreenBins.comp.glsl", vectorShaders)));
+            for (auto* program : { _gridProgram.get(), _cullProgram.get() })
+            {
+                program->apply(state);
+                if (!state.getLastAppliedProgramObject() || !state.getLastAppliedProgramObject()->isLinked())
+                {
+                    OE_WARN << "[FeatureImage] Screen-bin compilation failed; retaining source index" << std::endl;
+                    _failed = true;
+                    return false;
+                }
+            }
+            _parameters = GLBuffer::create(GL_UNIFORM_BUFFER, state);
+            _frustums = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+            _receivers = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+            _bins = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+            _words = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+            _allocation = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+            // glGenBuffers reserves names; first bind materializes them before named-buffer uploads.
+            for (auto& buffer : { _parameters, _frustums, _receivers, _bins, _words, _allocation }) buffer->bind();
+            _words->bind();
+            _words->bufferData(wordCapacity * sizeof(osg::Vec4ui), nullptr, GL_DYNAMIC_DRAW);
+            return true;
+        }
+
+        // Rebinds a retained index after another layer or camera may have used the same binding points.
+        void bindResults()
+        {
+            _parameters->bindBufferBase(12);
+            _receivers->bindBufferBase(13);
+            _bins->bindBufferBase(14);
+            _words->bindBufferBase(15);
+        }
+
+    public:
+        // Builds and binds this draw's screen index. Call after the atlas arena is bound, before drawing terrain.
+        // Always restores OSG's graphics program; false leaves the caller on the original source-space index.
+        bool prepare(osg::State& state, const DrawTileCommands& tiles, const std::vector<GL4Tile>& gpuTiles)
+        {
+            const auto* saved = state.getLastAppliedProgramObject();
+            struct RestoreProgram
+            {
+                osg::State& state;
+                const osg::Program::PerContextProgram* program;
+                // Restores the active graphics program and OSG's cache on every return path.
+                ~RestoreProgram() { program->useProgram(); state.setLastAppliedProgramObject(program); }
+            } restore{state, saved};
+            if (!initialize(state)) return false;
+            osg::Vec4i viewport;
+            glGetIntegerv(GL_VIEWPORT, viewport.ptr());
+            if (viewport.z() <= 0 || viewport.w() <= 0) return false;
+            const osg::Matrix& projection = state.getProjectionMatrix();
+            bool sameSources = _hasIndex && _snapshots.size() == tiles.size() && _viewport == viewport;
+            bool sameView = sameSources && _projection == projection;
+            for (unsigned i = 0; sameSources && i < tiles.size(); ++i)
+            {
+                const auto& tile = tiles[i];
+                if (!tile._colorSamplers) { sameSources = false; break; }
+                const auto& color = (*tile._colorSamplers)[SamplerBinding::COLOR];
+                const auto& previous = _snapshots[i];
+                sameSources = previous.atlas == color._texture && previous.revision == color.revision() &&
+                    previous.geometry == tile._geom.get() && previous.elevation == tile._elevMinMax &&
+                    previous.color == color._matrix;
+                sameView = sameView && previous.modelView == tile._modelViewMatrix;
+            }
+            // Retained lists are valid UV queries, even if a moving view addresses different pixels.
+            // The fragment guard falls back for misses. Bound moving-view rebuilds to one in four draws.
+            if (sameSources && (sameView || ++_age < 4))
+            {
+                bindResults();
+                return true;
+            }
+            auto* ext = state.get<osg::GLExtensions>();
+            // Finish prior shader reads before overwriting retained lists; the allocator also returns to CPU updates.
+            ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+            bool changed = detail::updateScreenSpaceGrid(state, _gridProgram.get(), *_parameters, *_frustums,
+                _params, projection, viewport, 16, 12, 12);
+            if (changed) ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+            if (_shapes.size() > 1024) _shapes.clear();
+            _cpu.assign(tiles.size(), Receiver());
+            unsigned total = 0;
+            for (unsigned i = 0; i < tiles.size(); ++i)
+            {
+                const auto& tile = tiles[i];
+                auto& receiver = _cpu[i];
+                receiver.data.x() = total;
+                if (!tile._geom || !tile._colorSamplers || gpuTiles[i].colorIndex < 0) continue;
+                const auto& color = (*tile._colorSamplers)[SamplerBinding::COLOR];
+                if (!color._texture || !color._texture->isResident(state)) continue;
+                const auto& fit = shape(tile._geom.get());
+                const auto& matrix = color._matrix;
+                if (!fit.valid || matrix(0,0) <= 0 || matrix(1,1) <= 0) continue;
+                const auto& mv = tile._modelViewMatrix;
+                osg::Vec3d u = fit.u / matrix(0,0), v = fit.v / matrix(1,1);
+                osg::Vec3d origin = fit.origin - u * matrix(3,0) - v * matrix(3,1);
+                origin = origin * mv;
+                u = osg::Matrix::transform3x3(u, mv);
+                v = osg::Matrix::transform3x3(v, mv);
+                osg::Vec3d localError = fit.residual;
+                double elevation = std::max(std::abs(tile._elevMinMax.x()), std::abs(tile._elevMinMax.y()));
+                localError += fit.normal * elevation;
+                osg::Vec3d error;
+                for (unsigned k = 0; k < 3; ++k)
+                    for (unsigned j = 0; j < 3; ++j) error[k] += std::abs(mv(j,k)) * localError[j];
+                receiver.origin.set(origin.x(), origin.y(), origin.z(), 0);
+                receiver.axisU.set(u.x(), u.y(), u.z(), 0);
+                receiver.axisV.set(v.x(), v.y(), v.z(), 0);
+                receiver.error.set(error.x(), error.y(), error.z(), 0);
+                receiver.domain.set(matrix(3,0), matrix(3,1), matrix(3,0) + matrix(0,0), matrix(3,1) + matrix(1,1));
+                osg::Vec2d lower(1e30, 1e30), upper(-1e30, -1e30);
+                bool crossesEye = false;
+                for (unsigned corner = 0; corner < 32; ++corner)
+                {
+                    osg::Vec3d p = origin + u * receiver.domain[(corner & 1) ? 2 : 0] +
+                        v * receiver.domain[(corner & 2) ? 3 : 1];
+                    for (unsigned k = 0; k < 3; ++k) p[k] += (corner & (4u << k)) ? error[k] : -error[k];
+                    osg::Vec4d clip = osg::Vec4d(p.x(), p.y(), p.z(), 1) * projection;
+                    if (clip.w() <= 1e-6) { crossesEye = true; break; }
+                    osg::Vec2d pixel((clip.x()/clip.w() * 0.5 + 0.5) * viewport.z(),
+                        (0.5 - clip.y()/clip.w() * 0.5) * viewport.w());
+                    for (unsigned k = 0; k < 2; ++k)
+                    { lower[k] = std::min(lower[k], pixel[k]); upper[k] = std::max(upper[k], pixel[k]); }
+                }
+                if (crossesEye) { lower.set(0,0); upper.set(viewport.z()-1, viewport.w()-1); }
+                if (upper.x() < 0 || upper.y() < 0 || lower.x() >= viewport.z() || lower.y() >= viewport.w()) continue;
+                // Source cells much smaller than a screen bin cannot benefit from refinement.
+                double sourcePixelsX = (upper.x() - lower.x()) / (receiver.domain.z() - receiver.domain.x());
+                double sourcePixelsY = (upper.y() - lower.y()) / (receiver.domain.w() - receiver.domain.y());
+                if (!crossesEye && std::max(sourcePixelsX, sourcePixelsY) < 256.0) continue;
+                int x0 = int(std::max(0.0, lower.x())) / 16, y0 = int(std::max(0.0, lower.y())) / 16;
+                int x1 = int(std::min(double(viewport.z()-1), upper.x())) / 16;
+                int y1 = int(std::min(double(viewport.w()-1), upper.y())) / 16;
+                unsigned count = unsigned(x1-x0+1) * unsigned(y1-y0+1);
+                if (count > binCapacity - total) continue;
+                receiver.bins.set(x0, y0, x1-x0+1, y1-y0+1);
+                receiver.data.y() = gpuTiles[i].colorIndex;
+                total += count;
+            }
+            if (total == 0) { _hasIndex = false; return false; }
+            _snapshots.resize(tiles.size());
+            for (unsigned i = 0; i < tiles.size(); ++i)
+            {
+                const auto& tile = tiles[i];
+                auto& snapshot = _snapshots[i];
+                snapshot = Snapshot();
+                if (tile._colorSamplers)
+                {
+                    const auto& color = (*tile._colorSamplers)[SamplerBinding::COLOR];
+                    snapshot.atlas = color._texture;
+                    snapshot.color = color._matrix;
+                    snapshot.revision = color.revision();
+                }
+                snapshot.geometry = tile._geom.get();
+                snapshot.elevation = tile._elevMinMax;
+                snapshot.modelView = tile._modelViewMatrix;
+            }
+            _viewport = viewport;
+            _projection = projection;
+            _age = 0;
+            _hasIndex = true;
+            _receivers->uploadData(_cpu);
+            if (_bins->size() < total * 32u)
+            {
+                _bins->bind();
+                _bins->bufferData(total * 32u, nullptr, GL_DYNAMIC_DRAW);
+            }
+            unsigned first = 1;
+            _allocation->uploadData(sizeof(first), &first);
+            _parameters->bindBufferBase(12);
+            _frustums->bindBufferBase(12);
+            _receivers->bindBufferBase(13);
+            _bins->bindBufferBase(14);
+            _words->bindBufferBase(15);
+            _allocation->bindBufferBase(16);
+            _cullProgram->apply(state);
+            const auto* compute = state.getLastAppliedProgramObject();
+            ext->glUniform1ui(compute->getUniformLocation("oe_vector_bin_count"), total);
+            ext->glUniform1ui(compute->getUniformLocation("oe_vector_receiver_count"), unsigned(tiles.size()));
+            ext->glUniform1ui(compute->getUniformLocation("oe_vector_capacity"), wordCapacity);
+            for (int phase = 0; phase < 2; ++phase)
+            {
+                ext->glUniform1i(compute->getUniformLocation("oe_vector_phase"), phase);
+                ext->glDispatchCompute((total + 63) / 64, 1, 1);
+                ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+            }
+            return true;
+        }
+    };
+} }

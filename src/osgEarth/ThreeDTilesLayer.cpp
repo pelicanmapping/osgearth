@@ -2,9 +2,12 @@
  * Copyright 2025 Pelican Mapping
  * MIT License
  */
+#include <osgEarth/Chonk>
 #include <osgEarth/GeoTransform>
+#include <osgEarth/NodeUtils>
 #include <osgEarth/Registry>
 #include <osgEarth/ThreeDTilesLayer>
+#include <osg/BlendFunc>
 
 #define LC "[ThreeDTilesLayer] " << getName() << " : "
 
@@ -14,6 +17,35 @@ using namespace osgEarth::Contrib;
 using namespace osgEarth::Contrib::ThreeDTiles;
 using namespace osgEarth::Threading;
 
+namespace
+{
+    //! Converts compatible model branches while retaining instance semantics, unsupported state, and asset reloads.
+    //! A local origin keeps RTC/ECEF translations out of float placements; the tile transform stays above this node.
+    //! Paging jobs own their conversion graphs; the returned graph retains the shared factory for later updates.
+    osg::ref_ptr<osg::Node> convertContent(osg::Node* node, const std::shared_ptr<ChonkFactory>& factory,
+        int renderBin, int twoSidedRenderBin)
+    {
+        if (!node)
+            return nullptr;
+
+        const osg::BoundingSphere bound = node->getBound();
+        if (!bound.valid())
+            return node;
+
+        const osg::Vec3d origin(bound.center());
+        osg::ref_ptr<osg::MatrixTransform> local = new osg::MatrixTransform(osg::Matrixd::translate(-origin));
+        local->addChild(node);
+
+        auto converted = ChonkFactory::convertScene(local.get(), factory, renderBin, twoSidedRenderBin);
+
+        osg::ref_ptr<osg::MatrixTransform> placed = new osg::MatrixTransform(osg::Matrixd::translate(origin));
+        placed->setName(node->getName());
+        placed->setNodeMask(node->getNodeMask());
+        placed->addChild(converted);
+        return placed;
+    }
+}
+
 //------------------------------------------------------------------------
 
 Config
@@ -22,6 +54,7 @@ ThreeDTilesLayer::Options::getConfig() const
     Config conf = VisibleLayer::Options::getConfig();
     conf.set("url", _url);
     conf.set("max_sse", _maximumScreenSpaceError);
+    conf.set("nvgl", nvgl());
     return conf;
 }
 
@@ -31,6 +64,7 @@ ThreeDTilesLayer::Options::fromConfig( const Config& conf )
     _maximumScreenSpaceError.init(15.0f);
     conf.get("url", _url);
     conf.get("max_sse", _maximumScreenSpaceError);
+    conf.get("nvgl", nvgl());
 }
 
 //........................................................................
@@ -75,7 +109,39 @@ ThreeDTilesLayer::openImplementation()
         return Status(Status::GeneralError, "Bad tileset");
     }
 
-    _tilesetNode = new ThreeDTilesetNode(tileset, "", getSceneGraphCallbacks(), readOptions.get());
+    osg::ref_ptr<TextureArena> textures;
+    ThreeDTilesetNode::ContentProcessor processContent;
+    if (*options().nvgl() && GLUtils::useNVGL())
+    {
+        textures = new TextureArena();
+        textures->setAutoRelease(true);
+        auto factory = std::make_shared<ChonkFactory>(textures.get());
+
+        // Reserve both raster-policy bins from the same UID space as TiledModelLayer's bins.
+        // Fresh IDs also keep retained graphs from earlier opens isolated from this arena.
+        const int renderBin = 100 + static_cast<int>(osgEarth::createUID());
+        const int twoSidedRenderBin = 100 + static_cast<int>(osgEarth::createUID());
+        processContent = [factory, renderBin, twoSidedRenderBin](osg::Node* node)
+        {
+            return convertContent(node, factory, renderBin, twoSidedRenderBin);
+        };
+    }
+
+    _tilesetNode = new ThreeDTilesetNode(tileset, "", getSceneGraphCallbacks(), readOptions.get(), processContent);
+    if (textures.valid())
+    {
+        _tilesetNode->getOrCreateStateSet()->setAttribute(textures, osg::StateAttribute::ON);
+        _tilesetNode->getOrCreateStateSet()->setAttributeAndModes(
+            new osg::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA),
+            osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+
+        // Retain this tileset's arena independently of the layer, including across close/reopen.
+        _tilesetNode->addUpdateCallback(new LambdaCallback<>([textures](osg::NodeVisitor& nv)
+        {
+            textures->update(nv);
+            return true;
+        }));
+    }
     _tilesetNode->setMaximumScreenSpaceError(*options().maximumScreenSpaceError());
     _tilesetNode->setOwnerName(getName());
 

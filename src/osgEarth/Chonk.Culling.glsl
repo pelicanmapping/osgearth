@@ -135,7 +135,8 @@ uniform uvec4 oe_chonk_views; // view count, active mask, mesh/LOD commands, vis
 uniform int oe_chonk_pass;
 uniform uint oe_chonk_list_stride;
 uniform uint oe_chonk_max_lods;   // visibility records per source instance
-uniform vec4 oe_chonk_hiz_params; // viewport width and height in pixels, pyramid levels, 1 if valid
+uniform vec4 oe_chonk_hiz_params; // viewport width and height, levels, +1 forward / -1 reverse / 0 invalid
+uniform vec2 oe_chonk_hiz_depth_mapping; // scale and bias from clip-space Z/W to window depth
 layout(bindless_sampler) uniform sampler2D oe_chonk_hiz; // farthest depth per texel; level 0 = half res
 layout(binding = 23, std430) buffer ChonkVisibility { uint visibility[]; }; // 1 = visible last frame
 #ifdef OE_CHONK_MULTIVIEW
@@ -252,10 +253,12 @@ float windowDepth(float w, mat4 proj)
   #if OE_LOG_DEPTH_BUFFER == 2
     return log(w*0.001 + 1.0) / log(far*0.001 + 1.0); // per-fragment log depth
   #else
-    return log2(w + 1.0) / log2(far + 1.0); // per-vertex log depth
+    float ndc = 2.0 * log2(w + 1.0) / log2(far + 1.0) - 1.0; // per-vertex log depth
+    return ndc * oe_chonk_hiz_depth_mapping.x + oe_chonk_hiz_depth_mapping.y;
   #endif
 #else
-    return 0.5*(proj[2][2]*(-w) + proj[3][2])/w + 0.5;
+    float ndc = (proj[2][2]*(-w) + proj[3][2])/w;
+    return ndc * oe_chonk_hiz_depth_mapping.x + oe_chonk_hiz_depth_mapping.y;
 #endif
 }
 
@@ -264,7 +267,7 @@ float windowDepth(float w, mat4 proj)
 bool occludedByHiZ(vec4 center_view, float r, mat4 proj, vec4 LL, vec4 UR)
 {
     float w = -(center_view.z + r); // view distance to the sphere's nearest point
-    if (oe_chonk_hiz_params.w < 0.5 || proj[3][3] > 0.01 || w <= 0.0 || LL.x < -1e5)
+    if (abs(oe_chonk_hiz_params.w) < 0.5 || proj[3][3] > 0.01 || w <= 0.0 || LL.x < -1e5)
         return false;
     vec2 lo = clamp(LL.xy*0.5 + 0.5, 0.0, 1.0) * oe_chonk_hiz_params.xy * 0.5; // level-0 texels
     vec2 hi = clamp(UR.xy*0.5 + 0.5, 0.0, 1.0) * oe_chonk_hiz_params.xy * 0.5;
@@ -273,11 +276,16 @@ bool occludedByHiZ(vec4 center_view, float r, mat4 proj, vec4 LL, vec4 UR)
     ivec2 size = textureSize(oe_chonk_hiz, level);
     ivec2 a = clamp(ivec2(lo / exp2(float(level))), ivec2(0), size - 1);
     ivec2 b = clamp(ivec2(hi / exp2(float(level))), ivec2(0), size - 1);
-    float farthest = max(
-        max(texelFetch(oe_chonk_hiz, a, level).r, texelFetch(oe_chonk_hiz, ivec2(b.x, a.y), level).r),
-        max(texelFetch(oe_chonk_hiz, ivec2(a.x, b.y), level).r, texelFetch(oe_chonk_hiz, b, level).r));
-    // The margin covers 24-bit depth quantization.
-    return windowDepth(w, proj) > farthest + 1e-6;
+    vec4 depths = vec4(texelFetch(oe_chonk_hiz, a, level).r,
+        texelFetch(oe_chonk_hiz, ivec2(b.x, a.y), level).r,
+        texelFetch(oe_chonk_hiz, ivec2(a.x, b.y), level).r,
+        texelFetch(oe_chonk_hiz, b, level).r);
+    bool reverse = oe_chonk_hiz_params.w < 0.0;
+    float farthest = reverse ? min(min(depths.x, depths.y), min(depths.z, depths.w)) :
+        max(max(depths.x, depths.y), max(depths.z, depths.w));
+    // The margin covers 24-bit depth quantization in either ordering.
+    float nearest = windowDepth(w, proj);
+    return reverse ? nearest < farthest - 1e-6 : nearest > farthest + 1e-6;
 }
 
 // Zeroes every list's instance count; command templates stay resident on the GPU.

@@ -289,6 +289,11 @@ namespace osgEarth
         static osg::ref_ptr<osg::Node> convertScene(
             osg::Node* node, std::shared_ptr<ChonkFactory> factory);
 
+        //! Convert a scene using caller-reserved bins for front-face and two-sided draws, including after reloads.
+        //! Bins must be distinct and exclusive to the factory's texture arena; other semantics match convertScene.
+        static osg::ref_ptr<osg::Node> convertScene(osg::Node* node, std::shared_ptr<ChonkFactory> factory,
+            int renderBin, int twoSidedRenderBin);
+
         //! Append the node's geometry as another LOD in the provided Chonk.
         //! Use the drawable overload to preserve InstanceGeometry placements.
         //! Returns false if the node contained no geometry, the material arena
@@ -491,7 +496,8 @@ namespace osgEarth
             unsigned frameNumber = 0;
             bool hizValid = false; // the depth pyramid was built for the late pass
             GLuint64 hiz = 0; // bindless sampler handle of the pyramid
-            osg::Vec4f hizParams; // viewport width and height in pixels, levels, 1 when valid
+            osg::Vec4f hizParams; // viewport width and height, levels, +1 forward / -1 reverse / 0 invalid
+            osg::Vec2f hizDepthMapping; // scale and bias from clip-space Z/W to window depth
         };
 
         using Instances = std::vector<Instance>;

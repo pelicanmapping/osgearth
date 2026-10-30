@@ -175,6 +175,8 @@ AssetCatalog::AssetCatalog(const std::vector<ScatterAsset>& entries, std::size_t
     _impl->readOptions->setObjectCacheHint(osgDB::Options::CACHE_NONE);
     _impl->readOptions->setPluginData("osgEarth::URIResultCache", nullptr);
     _impl->arena->setAutoRelease(true);
+
+    _impl->readOptions->setReadFileCallback(new osgDB::ReadFileCallback());
 }
 
 AssetCatalog::~AssetCatalog() = default;

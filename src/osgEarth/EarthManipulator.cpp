@@ -2022,13 +2022,31 @@ EarthManipulator::updateTether(double t)
 
             if (_settings->getTetherMode() == TETHER_CENTER_AND_HEADING)
             {
-                // Back out the tetheree's rotation, then discard all but the heading component:
-                osg::Matrixd localToFrame(L2W*osg::Matrixd::inverse( _centerLocalToWorld ));
-                double azim = atan2(-localToFrame(0,1),localToFrame(0,0));
+                osg::Matrixd localToFrame(L2W * osg::Matrixd::inverse(_centerLocalToWorld));
 
-                osg::Quat finalTetherRotation;
-                finalTetherRotation.makeRotate(-azim, 0.0, 0.0, 1.0);
-                _tetherRotation.slerp(t, _tetherRotationVP0, finalTetherRotation);
+                // The tether node's aircraft-forward axis is local +Y.
+                osg::Vec3d forward(localToFrame(1, 0), localToFrame(1, 1), localToFrame(1, 2));
+
+                // Heading is the forward vector projected onto the local tangent plane.
+                forward.z() = 0.0;
+
+                // Avoid calculating a heading if the forward vector is nearly vertical.
+                if (forward.length2() > 1e-12)
+                {
+                    forward.normalize();
+
+                    // +Y provides the stable longitudinal heading. The +90-degree offset
+                    // preserves the legacy camera orientation that previously used +X.
+                    const double headingOffset = osg::PI_2;
+
+                    double azim = atan2(-forward.y(), forward.x());
+                    azim = normalizeAzimRad(azim + headingOffset);
+
+                    osg::Quat finalTetherRotation;
+                    finalTetherRotation.makeRotate(-azim, 0.0, 0.0, 1.0);
+
+                    _tetherRotation.slerp(t, _tetherRotationVP0, finalTetherRotation);
+                }
             }
 
             // Track all rotations

@@ -8,6 +8,8 @@
 #include <osgEarth/LogarithmicDepthBuffer>
 #include <osg/Texture3D>
 #include <osg/Multisample>
+#include <osg/ClipControl>
+#include <osg/Depth>
 #include <osgDB/FileNameUtils>
 #include <cmath>
 #include <cstring>
@@ -880,4 +882,93 @@ TEST_CASE("Chonk additive quality shares global SSE without population leakage",
     CHECK(lods(first) == std::set<unsigned>{0u});
     CHECK(lods(second) == std::set<unsigned>{0u});
     CHECK(glGetError() == GL_NO_ERROR);
+}
+
+//! Validate both pixels and GPU draw counts so disabling occlusion cannot satisfy the regression.
+//! Reuse one camera across conventions and reveal a previously hidden instance to exercise history recovery.
+TEST_CASE("Chonk occlusion follows the active depth convention", "[chonk][gpu][chonk-depth-convention]")
+{
+    if (!Capabilities::get().supportsNVGL())
+    {
+        WARN("Depth convention test needs NVGL and OSG_GL_CONTEXT_VERSION=4.6");
+        return;
+    }
+    ChonkTest::Renderer renderer;
+    REQUIRE(renderer.initialize());
+    auto model = renderer.factory->getOrCreateChonk(ChonkTest::mesh(), 0.0f);
+    REQUIRE(model);
+    osg::ref_ptr<InspectableDrawable> targets = new InspectableDrawable();
+    targets->setBirthday(-10.0);
+    targets->add(model, osg::Matrixf::translate(-20,0,0));
+    targets->add(model, osg::Matrixf::translate(20,0,0));
+
+    auto red = ChonkTest::mesh();
+    static_cast<osg::Vec4Array*>(red->getColorArray())->front().set(1,0,0,1);
+    auto wall = renderer.factory->getOrCreateChonk(red, 0.0f);
+    REQUIRE(wall);
+    osg::ref_ptr<ChonkDrawable> occluder = new ChonkDrawable(-1);
+    occluder->setUseGPUCulling(false);
+    occluder->setBirthday(-10.0);
+    occluder->add(wall, osg::Matrixf::scale(16,30,1) * osg::Matrixf::translate(32,0,20));
+    osg::ref_ptr<osg::Group> scene = new osg::Group();
+    scene->addChild(occluder);
+    scene->addChild(targets);
+    renderer.setScene(scene);
+    auto* camera = renderer.viewer.getCamera();
+    auto* ss = camera->getOrCreateStateSet();
+    Util::LogarithmicDepthBuffer logDepth;
+    const double n = 1.0, f = 10000.0;
+    for (unsigned mode = 0; mode < 11; ++mode)
+    {
+        INFO("Depth convention " << mode);
+        const bool zeroToOne = mode == 1 || mode == 3 || mode == 5 || mode == 9;
+        const bool reverseProjection = mode == 1 || mode == 2 || mode == 5 || mode == 9;
+        const bool reverseRange = mode == 4;
+        const bool reverse = reverseProjection || reverseRange;
+        const double rangeNear = reverseRange ? 1.0 : (mode == 5 || mode == 10) ? 0.2 : 0.0;
+        const double rangeFar = reverseRange ? 0.0 : (mode == 5 || mode == 10) ? 0.8 : 1.0;
+        logDepth.uninstall(camera);
+        osg::Matrixd projection = osg::Matrixd::perspective(45.0, 1.0, n, f);
+        if (zeroToOne)
+        {
+            projection(2,2) = reverseProjection ? n/(f-n) : f/(n-f);
+            projection(3,2) = reverseProjection ? f*n/(f-n) : f*n/(n-f);
+        }
+        else if (reverseProjection)
+        {
+            projection(2,2) = (f+n)/(f-n);
+            projection(3,2) = 2.0*f*n/(f-n);
+        }
+        if (mode == 9) // VRV's infinite reverse-Z projection
+        {
+            projection(2,2) = 0.0;
+            projection(3,2) = n;
+        }
+        camera->setProjectionMatrix(projection);
+        ss->setAttributeAndModes(new osg::ClipControl(osg::ClipControl::LOWER_LEFT,
+            zeroToOne ? osg::ClipControl::ZERO_TO_ONE : osg::ClipControl::NEGATIVE_ONE_TO_ONE));
+        ss->setAttributeAndModes(new osg::Depth(mode == 9 ? osg::Depth::GREATER : mode == 8 ? osg::Depth::LESS :
+            reverse ? osg::Depth::GEQUAL : osg::Depth::LEQUAL,
+            rangeNear, rangeFar, true));
+        camera->setClearDepth(reverse ? 0.0 : 1.0);
+        if (mode == 6 || mode == 7)
+        {
+            logDepth.setUseFragDepth(mode == 7);
+            logDepth.install(camera);
+        }
+        for (bool hidden : {true, false, true})
+        {
+            INFO("Occluder present " << hidden);
+            occluder->setNodeMask(hidden ? ~0u : 0u);
+            for (unsigned frame = 0; frame < 4; ++frame) renderer.frame();
+            auto snapshot = targets->snapshot(*renderer.context->getState());
+            unsigned drawn = 0;
+            for (const auto& command : snapshot.commands) drawn += command.cmd.instanceCount;
+            REQUIRE(drawn == (hidden ? 1u : 2u));
+            auto pixels = renderer.pixels();
+            CHECK(pixels->data(66,128)[2] > 200);
+            CHECK(pixels->data(190,128)[hidden ? 0 : 2] > 200);
+            CHECK(glGetError() == GL_NO_ERROR);
+        }
+    }
 }

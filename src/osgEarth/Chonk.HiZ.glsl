@@ -12,6 +12,7 @@ layout(r32f, bindless_image) writeonly uniform image2D oe_hiz_target;
 uniform ivec2 oe_hiz_source_size;
 uniform ivec2 oe_hiz_target_size;
 uniform int oe_hiz_from_depth; // 1 when building level 0
+uniform bool oe_hiz_reverse_z; // farthest is the minimum with GREATER/GEQUAL depth tests
 
 void main()
 {
@@ -22,14 +23,15 @@ void main()
     ivec2 hi = min(lo + 1, oe_hiz_source_size - 1);
     if (p.x == oe_hiz_target_size.x - 1) hi.x = oe_hiz_source_size.x - 1;
     if (p.y == oe_hiz_target_size.y - 1) hi.y = oe_hiz_source_size.y - 1;
-    float farthest = 0.0;
+    float farthest = oe_hiz_reverse_z ? 1.0 : 0.0;
     for (int y = lo.y; y <= hi.y; ++y)
     {
         for (int x = lo.x; x <= hi.x; ++x)
         {
-            farthest = max(farthest, oe_hiz_from_depth != 0 ?
+            float depth = oe_hiz_from_depth != 0 ?
                 texelFetch(oe_hiz_depth, ivec2(x, y), 0).r :
-                imageLoad(oe_hiz_source, ivec2(x, y)).r);
+                imageLoad(oe_hiz_source, ivec2(x, y)).r;
+            farthest = oe_hiz_reverse_z ? min(farthest, depth) : max(farthest, depth);
         }
     }
     imageStore(oe_hiz_target, p, vec4(farthest));

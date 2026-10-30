@@ -26,6 +26,7 @@ namespace osgEarth { namespace Contrib
             META_LayerOptions(osgEarth, Options, VisibleLayer::Options);
             OE_OPTION(URI, url);
             OE_OPTION(float, maximumScreenSpaceError);
+            OE_OPTION(bool, nvgl, true);
             virtual Config getConfig() const;
         private:
             void fromConfig( const Config& conf );

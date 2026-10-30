@@ -605,19 +605,36 @@ public:
             const auto* image = texture.getImage();
             if (!image || !image->data()) return;
             auto* ext = state.get<osg::GLExtensions>();
-            if (!ext->glCompressedTexImage2D) return;
+
+            // Prefer immutable storage: on NVIDIA, defining each level with glCompressedTexImage2D costs ~1 ms for
+            // a 256x256 DXT1 image with mips, against ~0.05 ms for glTexStorage2D plus sub-image uploads. That
+            // difference throttles how fast streamed glTF tiles get through the ICO's per-frame compile budget.
+            // A texture object that is already allocated (a re-upload, or a reused orphan of the same profile)
+            // keeps its storage and only takes the sub-image uploads.
+            const bool useStorage = ext->isTextureStorageEnabled && ext->glTexStorage2D && ext->glCompressedTexSubImage2D;
+            if (!useStorage && !ext->glCompressedTexImage2D) return;
+
+            const auto levels = mipLevels(texture);
+            const GLenum format = texture.getInternalFormat();
+            const auto* object = texture.getTextureObject(state.getContextID());
             state.unbindPixelBufferObject();
+            if (useStorage && !(object && object->isAllocated()))
+                ext->glTexStorage2D(GL_TEXTURE_2D, std::max(1u, levels), format, image->s(), image->t());
+
             int width = image->s(), height = image->t();
             for (unsigned level = 0; level < image->getNumMipmapLevels(); ++level)
             {
                 GLint blockSize, size;
                 osg::Texture::getCompressedSize(image->getPixelFormat(), width, height, 1, blockSize, size);
-                ext->glCompressedTexImage2D(GL_TEXTURE_2D, level, texture.getInternalFormat(),
-                    width, height, 0, size, image->getMipmapData(level));
+                if (useStorage)
+                    ext->glCompressedTexSubImage2D(GL_TEXTURE_2D, level, 0, 0, width, height, format, size,
+                        image->getMipmapData(level));
+                else
+                    ext->glCompressedTexImage2D(GL_TEXTURE_2D, level, format, width, height, 0, size,
+                        image->getMipmapData(level));
                 width = std::max(1, width / 2);
                 height = std::max(1, height / 2);
             }
-            const auto levels = mipLevels(texture);
             if (levels > image->getNumMipmapLevels() && ext->glGenerateMipmap)
                 ext->glGenerateMipmap(GL_TEXTURE_2D);
             texture.setTextureSize(image->s(), image->t());

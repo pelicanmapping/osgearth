@@ -92,9 +92,16 @@ so fragments search nearby segments rather than the entire path. Segment bounds
 include stroke width and an antialiasing margin; segment order and one blend per
 path are preserved. Minified vector layers fade out instead of scanning complete paths.
 
-`vector_min_tile_pixels` controls this visibility cutoff (default `16`, minimum `16`).
-The layer is fully visible at twice this projected source-tile size, fades smoothly
-as it shrinks, and becomes transparent at the cutoff. For example,
+`vector_fade_start` and `vector_fade_cutoff` set the projected source-tile sizes in
+pixels at which fading starts and ends. Start must be at least cutoff; cutoff must
+be at least `16`. Equal values give a hard cutoff, for example
+`vector_fade_start="200" vector_fade_cutoff="200"`. These are pixel thresholds,
+not camera ranges. Omitted start defaults to twice the configured cutoff.
+
+For compatibility, `vector_min_tile_pixels` supplies the cutoff when
+`vector_fade_cutoff` is omitted (default `16`, minimum `16`).
+By default, fading starts at twice this projected source-tile size and the layer
+becomes transparent at the cutoff. For example,
 `<vector_min_tile_pixels>32</vector_min_tile_pixels>` fades between approximately
 64 and 32 pixels across the source tile. Evaluation uses the largest source-UV
 pixel footprint per fragment, so oblique views can fade earlier in the compressed
@@ -106,7 +113,7 @@ configuration value, retained when serializing the layer, and does not change da
 In `osgearth_imgui`, expand the vector layer in the Map panel to adjust **Vector
 fade start (px)** and **Vector fade cutoff (px)** live. These controls update the
 uniform immediately, without rebuilding tiles. Cutoff stays at least 16 pixels
-and below fade start. **Reset fade** restores the configured values. Live changes
+and at or below fade start. **Reset fade** restores the configured values. Live changes
 last until the layer is reopened.
 
 `vector_screen_bins` enables an experimental screen-space index in the NVGL renderer

@@ -102,12 +102,16 @@ FeatureImageLayer::openImplementation()
         if (!Registry::capabilities().supportsGLSL(330u))
             return Status(Status::ServiceUnavailable, "Vector FeatureImage requires GLSL 3.30");
         // Keep this render-only setting in the retained Config so the public Options layout does not change.
-        float minPixels = options().getConfig().value<float>("vector_min_tile_pixels", 16.0f);
-        if (!std::isfinite(minPixels) || minPixels < 16.0f)
-            return Status(Status::ConfigurationError, "vector_min_tile_pixels must be finite and at least 16");
-        // Fade over a factor of two in projected source-tile size, before exceeding the coarse grid's AA margin.
+        const Config conf = options().getConfig();
+        float cutoff = conf.value<float>("vector_fade_cutoff", conf.value<float>("vector_min_tile_pixels", 16.0f));
+        float start = conf.value<float>("vector_fade_start", 2.0f * cutoff);
+        if (!std::isfinite(cutoff) || cutoff < 16.0f)
+            return Status(Status::ConfigurationError, "Vector fade cutoff must be finite and at least 16 pixels");
+        if (!std::isfinite(start) || start < cutoff)
+            return Status(Status::ConfigurationError, "Vector fade start must be finite and at least the cutoff");
+        // Equal endpoints request a hard cutoff; otherwise fade before exceeding the coarse grid's AA margin.
         getOrCreateStateSet()->getOrCreateUniform("oe_featureimage_vector_fade", osg::Uniform::FLOAT_VEC2)->set(
-            osg::Vec2f(0.5f / minPixels, 1.0f / minPixels));
+            osg::Vec2f(1.0f / start, 1.0f / cutoff));
         if (Registry::capabilities().supportsGLSL(450u))
         {
             bool screenBins = options().getConfig().value<bool>("vector_screen_bins", false);

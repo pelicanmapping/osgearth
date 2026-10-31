@@ -321,8 +321,9 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
     float projectedFootprint = max(footprint.x, footprint.y);
     // Skip atlas reads and all shape/segment searches once the source tile is too small on screen.
     if (projectedFootprint >= oe_featureimage_vector_fade.y) return vec4(0.0);
-    float visibility = 1.0 - smoothstep(oe_featureimage_vector_fade.x,
-        oe_featureimage_vector_fade.y, projectedFootprint);
+    // Equal endpoints are a hard cutoff; smoothstep is undefined when its edges coincide.
+    float visibility = oe_featureimage_vector_fade.x < oe_featureimage_vector_fade.y ?
+        1.0 - smoothstep(oe_featureimage_vector_fade.x, oe_featureimage_vector_fade.y, projectedFootprint) : 1.0;
     vec4 header = oe_slug_read(atlas, 0);
     if (header.x != -73821.0)
     {

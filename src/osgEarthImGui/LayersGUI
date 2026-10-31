@@ -118,7 +118,7 @@ namespace osgEarth
     namespace detail
     {
         // Edits the open vector layer's live uniform on the GUI thread; no atlas rebuild or retained UI state.
-        // Pixel controls preserve fade-start > cutoff >= 16, including keyboard-entered values.
+        // Pixel controls preserve fade-start >= cutoff >= 16, including keyboard-entered values.
         inline void drawFeatureImageFadeControls(FeatureImageLayer* layer)
         {
             if (!layer || layer->options().mode() != "vector") return;
@@ -148,22 +148,22 @@ namespace osgEarth
             if (!std::isfinite(start)) start = 32.0f;
             if (!std::isfinite(cutoff)) cutoff = 16.0f;
             cutoff = std::max(16.0f, cutoff);
-            start = std::max(cutoff + 1.0f, start);
+            start = std::max(cutoff, start);
             const ImGuiSliderFlags flags = ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp;
             bool changed = ImGuiLTable::SliderFloat("Vector fade start (px)", &start,
-                cutoff + 1.0f, std::max(4096.0f, start), "%.1f", flags);
+                cutoff, std::max(4096.0f, start), "%.1f", flags);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Projected source-tile size where fading starts as you zoom out. "
-                    "Larger values hide distant details sooner. Ctrl-click to enter a value.");
+                    "Equal start and cutoff values make a hard cutoff. Ctrl-click to enter a value.");
             changed |= ImGuiLTable::SliderFloat("Vector fade cutoff (px)", &cutoff,
-                16.0f, start - 1.0f, "%.1f", flags);
+                16.0f, start, "%.1f", flags);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Projected source-tile size where details disappear. Minimum 16 pixels. "
                     "Live adjustments last until the layer is reopened.");
             if (changed)
             {
                 cutoff = std::max(16.0f, cutoff);
-                start = std::max(cutoff + 1.0f, start);
+                start = std::max(cutoff, start);
                 uniform->set(osg::Vec2f(1.0f / start, 1.0f / cutoff));
             }
             ImGui::TableNextColumn();
@@ -171,9 +171,14 @@ namespace osgEarth
             ImGui::TableNextColumn();
             if (ImGui::Button("Reset fade"))
             {
-                float configured = layer->options().getConfig().value<float>("vector_min_tile_pixels", 16.0f);
-                if (!std::isfinite(configured) || configured < 16.0f) configured = 16.0f;
-                uniform->set(osg::Vec2f(0.5f / configured, 1.0f / configured));
+                const Config conf = layer->options().getConfig();
+                float configuredCutoff = conf.value<float>("vector_fade_cutoff",
+                    conf.value<float>("vector_min_tile_pixels", 16.0f));
+                if (!std::isfinite(configuredCutoff) || configuredCutoff < 16.0f) configuredCutoff = 16.0f;
+                float configuredStart = conf.value<float>("vector_fade_start", 2.0f * configuredCutoff);
+                if (!std::isfinite(configuredStart) || configuredStart < configuredCutoff)
+                    configuredStart = configuredCutoff;
+                uniform->set(osg::Vec2f(1.0f / configuredStart, 1.0f / configuredCutoff));
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Restore this layer's configured fade settings.");

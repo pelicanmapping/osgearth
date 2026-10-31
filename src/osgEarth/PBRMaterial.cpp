@@ -259,7 +259,7 @@ PBRTexture::installProgram(osg::StateSet* stateSet)
 }
 
 void
-PBRTexture::install(osg::StateSet* stateSet)
+PBRTexture::install(osg::StateSet* stateSet, bool defaultsInherited)
 {
     if (!stateSet) return;
 
@@ -284,13 +284,16 @@ PBRTexture::install(osg::StateSet* stateSet)
     bind(PBR_UNIT, pbr.get(), 2);
     bind(OCCLUSION_UNIT, occlusion.get(), 4);
 
-    // Default values are inherited from installProgram() on an ancestor, so a default material (such as every
-    // 3D Tiles tile) adds no uniforms here: OSG matches a draw's own uniforms against its uniform map by name, and
-    // sets distinct uniform objects again, for every draw that has any. A uniform already on this stateset (for
-    // example from installProgram() on the same stateset) is updated instead, so no stale value is left behind.
-    if (layoutAndFactors != DEFAULT_LAYOUT_AND_FACTORS || stateSet->getUniform("oe_pbr_texture_layoutAndFactors"))
+    // When the caller guarantees that installProgram()'s defaults are what this stateset inherits, a default
+    // material (such as every 3D Tiles tile) adds no uniforms here: OSG matches a draw's own uniforms against its
+    // uniform map by name, and sets distinct uniform objects again, for every draw that has any. Otherwise the
+    // values are always set, so a default material below another material doesn't inherit that one's values. A
+    // uniform already on this stateset (for example from installProgram() on the same stateset) is always updated,
+    // so no stale value is left behind.
+    if (!defaultsInherited || layoutAndFactors != DEFAULT_LAYOUT_AND_FACTORS ||
+        stateSet->getUniform("oe_pbr_texture_layoutAndFactors"))
         stateSet->getOrCreateUniform("oe_pbr_texture_layoutAndFactors", osg::Uniform::FLOAT_VEC4)->set(layoutAndFactors);
-    if (flags != DEFAULT_FLAGS || stateSet->getUniform("oe_pbr_texture_flags"))
+    if (!defaultsInherited || flags != DEFAULT_FLAGS || stateSet->getUniform("oe_pbr_texture_flags"))
         stateSet->getOrCreateUniform("oe_pbr_texture_flags", osg::Uniform::INT)->set(flags);
 }
 

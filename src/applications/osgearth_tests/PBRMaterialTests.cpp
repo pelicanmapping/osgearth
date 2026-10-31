@@ -283,6 +283,13 @@ TEST_CASE("glTF unlit materials bind base color only and disable lighting", "[pb
     REQUIRE(material(lit[0])->normal.valid());
     REQUIRE(lit[0]->getStateSet()->getUniform("oe_pbr_texture_flags")->get(flags));
     REQUIRE(flags != 0);
+    // Outside the reader, install() sets even default values explicitly, so a default material below another
+    // material doesn't inherit that material's values.
+    osg::ref_ptr<osg::StateSet> standalone = new osg::StateSet();
+    texture->install(standalone.get());
+    REQUIRE(standalone->getUniform("oe_pbr_texture_flags")->get(flags));
+    REQUIRE(flags == 0);
+    REQUIRE(standalone->getUniform("oe_pbr_texture_layoutAndFactors") != nullptr);
     // Base color alone is the same texture gltfSkipPBRTextures builds, so they share.
     REQUIRE(texture == material(skipped[0]));
 

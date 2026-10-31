@@ -1089,7 +1089,7 @@ public:
             // The shared program always samples an albedo; untextured
             // primitives get a white one.
             if (!bound)
-                defaultMaterial()->install(stateSet);
+                defaultMaterial()->install(stateSet, true);
 
             PrimitiveArrays arrays;
             bool ok = false;
@@ -1473,7 +1473,9 @@ public:
                 osg::ref_ptr<osgEarth::PBRTexture> textures = pbrTexture(material);
                 if (textures.valid())
                 {
-                    textures->install(stateSet);
+                    // Primitives sit under the shared content state (installProgram's defaults) with no other
+                    // material in between, so default values needn't be set on each one.
+                    textures->install(stateSet, true);
                     bound = true;
                 }
             }

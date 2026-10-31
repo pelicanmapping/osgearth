@@ -353,6 +353,24 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
     vec2 list = oe_slug_read(atlas, gridBase + cell.y * gridSize + cell.x).xy;
     // Preserve off-tile sampling without treating minification as a full-path search request.
     bool outside = any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)));
+    // Both source grids include a full cell of padding. Retain the original UVs for coverage,
+    // and use a clamped edge cell when its padding also contains this fragment's AA footprint.
+    if (outside)
+    {
+        float footprintSize = max(footprint.x, footprint.y);
+        float overshoot = max(max(-uv.x, -uv.y), max(uv.x - 1.0, uv.y - 1.0));
+        if (gridSize != 16 && meta.w > 0.0 &&
+            overshoot > 1.0 / float(gridSize) - footprintSize - 2e-7)
+        {
+            gridSize = 16;
+            cell = clamp(ivec2(uv * 16.0), ivec2(0), ivec2(15));
+            list = oe_slug_read(atlas, int(meta.w) + cell.y * 16 + cell.x).xy;
+        }
+        // Leave room for antialiasing and float rounding before trusting an edge-cell list.
+        float padding = 1.0 / float(gridSize) - footprintSize - 2e-7;
+        if (padding >= 0.0 && all(greaterThanEqual(uv, vec2(-padding))) &&
+            all(lessThanEqual(uv, vec2(1.0 + padding)))) outside = false;
+    }
     int count = outside ? int(header.w) : int(list.y);
     vec4 result = vec4(0.0);
     float remaining = 1.0;

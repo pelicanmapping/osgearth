@@ -71,6 +71,11 @@ parent texture/matrix inheritance remains unchanged. No offscreen rasterization
 is involved for supported vector tiles. Shape evaluation runs front to back and stops at exactly opaque coverage; transparent shapes retain
 their paint order. The finer spatial index shortens candidate lists when zoomed in,
 while the coarse index preserves antialiasing support when zoomed out.
+Queries just outside a source tile also use the padded edge-cell lists when their
+antialiasing footprint fits. The wider coarse-grid padding handles queries beyond
+the fine grid's safe margin. Coverage uses the original UVs; queries beyond both
+indexed margins retain the full-shape fallback. This applies to both rendering
+backends and does not require `vector_screen_bins`.
 
 Round-joined strokes with round caps use compact centerlines instead of CPU-expanded
 outline curves. Closed round-joined rings also use this path. The FIL fragment shader

@@ -12,7 +12,9 @@
 #include <osgEarth/NetworkMonitor>
 #include <osgEarth/Threading>
 #include <osgEarth/GLUtils>
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
 #include <osgEarth/LineDrawable>
+#endif
 #include <osgEarth/Math>
 #include <osgEarth/Horizon>
 #include <osgEarth/MapNode>
@@ -79,6 +81,48 @@ namespace
         ~LoadSlot() { --(*_counter); }
         std::shared_ptr<std::atomic_uint> _counter;
     };
+
+    // True when a box, given in a frame that boxToLocal maps into the cull's current local frame, is entirely
+    // outside one of the view frustum's active planes. Gives the same answer as pushing boxToLocal and calling
+    // CullVisitor::isCulled(box), without the push (a matrix inverse plus copying and transforming the culling
+    // set), which every tile would otherwise pay. The frustum's planes face inward and are in the local frame.
+    bool isBoxCulled(osgUtil::CullVisitor* cv, const osg::BoundingBoxd& box, const osg::Matrixd& boxToLocal)
+    {
+        const osg::CullingSet& cullingSet = cv->getCurrentCullingSet();
+        if ((cullingSet.getCullingMask() & osg::CullingSet::VIEW_FRUSTUM_CULLING) == 0)
+        {
+            return false;
+        }
+
+        // The box's center and half axes in the local frame (OSG matrices transform row vectors).
+        const osg::Vec3d center = box.center() * boxToLocal;
+        auto halfAxis = [&boxToLocal](int row, double size)
+        {
+            return osg::Vec3d(boxToLocal(row, 0), boxToLocal(row, 1), boxToLocal(row, 2)) * (0.5 * size);
+        };
+        const osg::Vec3d halfX = halfAxis(0, box.xMax() - box.xMin());
+        const osg::Vec3d halfY = halfAxis(1, box.yMax() - box.yMin());
+        const osg::Vec3d halfZ = halfAxis(2, box.zMax() - box.zMin());
+
+        const osg::Polytope& frustum = cullingSet.getFrustum();
+        const osg::Polytope::ClippingMask mask = frustum.getCurrentMask();
+        osg::Polytope::ClippingMask selector = 1;
+        for (const osg::Plane& plane : frustum.getPlaneList())
+        {
+            if (mask & selector)
+            {
+                const osg::Vec3d normal = plane.getNormal();
+                const double extent =
+                    osg::absolute(normal * halfX) + osg::absolute(normal * halfY) + osg::absolute(normal * halfZ);
+                if (plane.distance(center) < -extent)
+                {
+                    return true;
+                }
+            }
+            selector <<= 1;
+        }
+        return false;
+    }
 }
 
 
@@ -509,30 +553,11 @@ Tileset::create(const std::string& json, const URIContext& uc)
     return new Tileset(root, lc);
 }
 
-static VirtualProgram* getOrCreateDebugVirtualProgram()
-{
-    char s_debugColoring[] =
-        "#pragma import_defines(OE_3DTILES_DEBUG)\n"
-        "uniform vec4 debugColor;\n"
-        "void color( inout vec4 color ) \n"
-        "{\n"
-        "#ifdef OE_3DTILES_DEBUG \n"
-        "    color = mix(debugColor, color, 0.5); \n"
-        "#endif\n"
-        "} \n";
-
-    static osg::ref_ptr< VirtualProgram > s_debugProgram;
-    if (!s_debugProgram.valid())
-    {
-        s_debugProgram = new VirtualProgram();
-        s_debugProgram->setFunction("color", s_debugColoring, VirtualProgram::LOCATION_FRAGMENT_LIGHTING);
-    }
-    return s_debugProgram.get();
-}
-
 //........................................................................
 
-osg::Vec4
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
+//! A random opaque color, used to tell tiles' bounding volume visualizations apart.
+static osg::Vec4
 randomColor()
 {
     float r = (float)rand() / (float)RAND_MAX;
@@ -540,6 +565,7 @@ randomColor()
     float b = (float)rand() / (float)RAND_MAX;
     return osg::Vec4(r, g, b, 1.0f);
 }
+#endif
 
 namespace
 {
@@ -716,18 +742,17 @@ ThreeDTileNode::ThreeDTileNode(ThreeDTilesetNode* tileset, Tile* tile, bool imme
     _refine(REFINE_ADD)
 {
     OE_PROFILING_ZONE;
+    _hasContent = _tile->content().isSet() && _tile->content()->uri().isSet();
+    _geometricError = *_tile->geometricError();
     if (_tile->content().isSet())
     {
         OE_PROFILING_ZONE_TEXT(_tile->content()->uri()->full().c_str());
     }
 
-    // If this tile has content, store a URI Context to that relative-path external file
-    // references (textures) will resolve correctly.
-    if (_tile->content().isSet())
-    {
-        _options = Registry::instance()->cloneOrCreateOptions(options);
-        URIContext(_tile->content()->uri()->full()).store(_options.get());
-    }
+    // Every tile shares the tileset's options. A tile doesn't need its own copy holding its content's URI context:
+    // each content read goes through URI, which reads with a copy of the options carrying that URI's context, so
+    // relative references (such as a glTF's textures) resolve the same way. A copy per tile cost ~1.5 KB and ~1 us
+    // for every tile built, and a tileset like Google's builds hundreds of thousands of tiles it never loads.
 
     // the transform to localize this tile:
     if (tile->transform().isSet())
@@ -761,6 +786,7 @@ ThreeDTileNode::ThreeDTileNode(ThreeDTilesetNode* tileset, Tile* tile, bool imme
 
         if (_content.valid())
         {
+            _tilesetContent = dynamic_cast<ThreeDTilesetContentNode*>(_content.get());
             _tileset->runPreMergeOperations(_content.get());
             _tileset->runPostMergeOperations(_content.get());
         }
@@ -784,13 +810,11 @@ ThreeDTileNode::ThreeDTileNode(ThreeDTilesetNode* tileset, Tile* tile, bool imme
         addChild(_children.get());
     }
 
-    _debugColor = randomColor();
-
-    getOrCreateStateSet()->getOrCreateUniform("debugColor", osg::Uniform::FLOAT_VEC4)->set(_debugColor);
-
     computeBoundingVolume();
 
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
     createDebugBounds();
+#endif
 }
 
 void ThreeDTileNode::setParentTile(ThreeDTileNode* parentTile)
@@ -942,6 +966,7 @@ void ThreeDTileNode::computeBoundingVolume()
     }
 }
 
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
 osg::ref_ptr<osg::Geode> buildSphere(const double radius,
     const unsigned int rings,
     const unsigned int sectors,
@@ -1005,11 +1030,13 @@ osg::ref_ptr<osg::Geode> buildSphere(const double radius,
 
 void ThreeDTileNode::createDebugBounds()
 {
+    const osg::Vec4 color = randomColor();
+
     if (_tile->boundingVolume()->sphere().isSet())
     {
         osg::MatrixTransform* mt = new osg::MatrixTransform;
         mt->setMatrix(osg::Matrixd::translate(_localBoundingSphere.center()));
-        mt->addChild(buildSphere(_localBoundingSphere.radius(), 20, 20, _debugColor));
+        mt->addChild(buildSphere(_localBoundingSphere.radius(), 20, 20, color));
         _boundsDebug = mt;
     }
     else if (_boundingBox.valid())
@@ -1035,7 +1062,7 @@ void ThreeDTileNode::createDebugBounds()
         for (int i = 0; i < 24; ++i)
             d->pushVertex(corners[index[i]]);
 
-        d->setColor(_debugColor);
+        d->setColor(color);
         d->finish();
 
         osg::MatrixTransform* transform = new osg::MatrixTransform;
@@ -1044,16 +1071,12 @@ void ThreeDTileNode::createDebugBounds()
         _boundsDebug = transform;
     }
 }
+#endif
 
 
 osg::BoundingSphere ThreeDTileNode::computeBound() const
 {
     return _tile->getBoundingSphere();
-}
-
-bool ThreeDTileNode::hasContent()
-{
-    return _tile->content().isSet() && _tile->content()->uri().isSet();
 }
 
 osg::Node* ThreeDTileNode::getContent()
@@ -1091,6 +1114,7 @@ void ThreeDTileNode::resolveContent()
 
             // Assign the parent node if we just loaded a tileset
             ThreeDTilesetContentNode* tilesetContentNode = dynamic_cast<ThreeDTilesetContentNode*>(_content.get());
+            _tilesetContent = tilesetContentNode;
             if (tilesetContentNode)
             {
                 ThreeDTileNode* tileNode = tilesetContentNode->getTileNode();
@@ -1169,26 +1193,45 @@ bool ThreeDTileNode::prepareForRefine(osgUtil::CullVisitor* cv, double priority)
     // is ready, so it must not expire while the parent needs it.
     updateTracking(cv);
 
-    if (hasContent() && !isContentReady())
-    {
-        _tileset->requestTileContent(this, priority);
-        return false;
-    }
-
-    // The parent calls this from its own frame; measure this tile and its descendants in theirs.
-    osg::ref_ptr<osg::RefMatrix> matrix = new osg::RefMatrix(*cv->getModelViewMatrix());
-    computeLocalToWorldMatrix(*matrix, cv);
-    cv->pushModelViewMatrix(matrix.get(), getReferenceFrame());
-
-    bool ready = true;
+    // An external tileset is drawn through its root tile, so that has to be drawable as well.
+    ThreeDTileNode* root = nullptr;
     if (hasContent())
     {
-        // An external tileset is drawn through its root tile, so that has to be drawable as well.
-        ThreeDTilesetContentNode* tilesetContent = dynamic_cast<ThreeDTilesetContentNode*>(_content.get());
-        ThreeDTileNode* root = tilesetContent ? tilesetContent->getTileNode() : nullptr;
-        ready = root == nullptr || root->prepareForRefine(cv, priority);
+        if (!isContentReady())
+        {
+            _tileset->requestTileContent(this, priority);
+            return false;
+        }
+
+        root = _tilesetContent ? _tilesetContent->getTileNode() : nullptr;
+        if (!root)
+        {
+            // Ordinary loaded content is drawable as is. This is the usual case, so return before paying for the
+            // modelview push below, which only the external root and empty-tile cases measure anything in.
+            return true;
+        }
     }
-    else if (_children.valid() && _children->getNumChildren() > 0)
+    else if (!_children.valid() || _children->getNumChildren() == 0)
+    {
+        return true;
+    }
+
+    // The parent calls this from its own frame; measure this tile and its descendants in theirs (the same frame
+    // when this tile's transform is identity).
+    const bool push = !isIdentityTransform();
+    if (push)
+    {
+        osg::ref_ptr<osg::RefMatrix> matrix = new osg::RefMatrix(*cv->getModelViewMatrix());
+        computeLocalToWorldMatrix(*matrix, cv);
+        cv->pushModelViewMatrix(matrix.get(), getReferenceFrame());
+    }
+
+    bool ready = true;
+    if (root)
+    {
+        ready = root->prepareForRefine(cv, priority);
+    }
+    else
     {
         // A tile without content draws its children instead, but only once its own error calls for it (see
         // traverse); until then it draws nothing, so it isn't ready and the parent keeps drawing. Its children
@@ -1200,8 +1243,9 @@ bool ThreeDTileNode::prepareForRefine(osgUtil::CullVisitor* cv, double priority)
         {
             for (unsigned int i = 0; i < _children->getNumChildren(); i++)
             {
-                ThreeDTileNode* childTile = dynamic_cast<ThreeDTileNode*>(_children->getChild(i));
-                if (childTile && !childTile->prepareForRefine(cv, priority))
+                // _children holds only the tiles built in the constructor.
+                ThreeDTileNode* childTile = static_cast<ThreeDTileNode*>(_children->getChild(i));
+                if (!childTile->prepareForRefine(cv, priority))
                 {
                     ready = false;
                 }
@@ -1209,7 +1253,10 @@ bool ThreeDTileNode::prepareForRefine(osgUtil::CullVisitor* cv, double priority)
         }
     }
 
-    cv->popModelViewMatrix();
+    if (push)
+    {
+        cv->popModelViewMatrix();
+    }
     return ready;
 }
 
@@ -1259,7 +1306,7 @@ double ThreeDTileNode::computeScreenSpaceError(osgUtil::CullVisitor* cv)
     if (ProjectionMatrix::isPerspective(proj))
     {
         double height = cv->getCurrentCamera()->getViewport()->height();
-        return (*_tile->geometricError() * height) / (distance * _tileset->getSSEDenominator());
+        return (_geometricError * height) / (distance * _tileset->getSSEDenominator());
     }
     else // orthographic
     {
@@ -1267,7 +1314,7 @@ double ThreeDTileNode::computeScreenSpaceError(osgUtil::CullVisitor* cv)
         double L, R, B, T, N, F;
         ProjectionMatrix::getOrtho(proj, L, R, B, T, N, F);
         double pixelSize = std::max(T-B, R-L) / std::max(vp->width(), vp->height());
-        return (*_tile->geometricError()) / pixelSize;
+        return _geometricError / pixelSize;
     }
 }
 
@@ -1288,6 +1335,7 @@ bool ThreeDTileNode::unloadContent()
         removeChild(_content.get());
         _content = nullptr;
     }
+    _tilesetContent = nullptr;
 
     _firstVisit = true;
     _content = 0;
@@ -1325,10 +1373,12 @@ void ThreeDTileNode::releaseGLObjects(osg::State* state) const
         _children->releaseGLObjects(state);
     }
 
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
     if (_boundsDebug.valid())
     {
         _boundsDebug->releaseGLObjects(state);
     }
+#endif
 }
 
 unsigned int ThreeDTileNode::getLastCulledFrameNumber() const
@@ -1346,9 +1396,35 @@ void ThreeDTileNode::updateTracking(osgUtil::CullVisitor* cv)
     // Update tracking if this node wasn't immediately loaded.  Tiles that were immediately loaded are expected to be tracked by their parent.
     if (hasContent() && !_immediateLoad)
     {
-        _tileset->touchTile(this);
-        _lastCulledFrameNumber = cv->getFrameStamp()->getFrameNumber();
+        // A tile is often reached twice in a frame (its parent prepares it to refine, then it's traversed), but
+        // one touch keeps it from expiring.
+        const unsigned int frameNumber = cv->getFrameStamp()->getFrameNumber();
+        if (frameNumber != _lastTouchedFrame)
+        {
+            _tileset->touchTile(this);
+            _lastTouchedFrame = frameNumber;
+        }
+        _lastCulledFrameNumber = frameNumber;
         _lastCulledFrameTime = cv->getFrameStamp()->getReferenceTime();
+    }
+}
+
+void ThreeDTileNode::accept(osg::NodeVisitor& nv)
+{
+    if (nv.getVisitorType() == nv.CULL_VISITOR && isIdentityTransform())
+    {
+        // What MatrixTransform::accept does, but dispatched as a Group: the cull still tests this tile's bound,
+        // pushes its state (if any) and calls traverse(), just without pushing a modelview that changes nothing.
+        if (nv.validNodeMask(*this))
+        {
+            nv.pushOntoNodePath(this);
+            nv.apply(static_cast<osg::Group&>(*this));
+            nv.popFromNodePath();
+        }
+    }
+    else
+    {
+        osg::MatrixTransform::accept(nv);
     }
 }
 
@@ -1372,18 +1448,9 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
             }
         }
 
-        if (_boundingBox.valid())
+        if (_boundingBox.valid() && isBoxCulled(cv, _boundingBox, _boundingBoxLocalToWorld))
         {
-            osg::ref_ptr< osg::RefMatrix > refMatrix = new osg::RefMatrix(*cv->getModelViewMatrix());
-            refMatrix->preMult(_boundingBoxLocalToWorld);
-            cv->pushModelViewMatrix(refMatrix.get(), getReferenceFrame());
-            bool culled = cv->isCulled(_boundingBox);
-            cv->popModelViewMatrix();
-
-            if (culled)
-            {
-                return;
-            }
+            return;
         }
 
         resolveContent();
@@ -1419,8 +1486,9 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
             bool areChildrenReady = true;
             for (unsigned int i = 0; i < _children->getNumChildren(); i++)
             {
-                ThreeDTileNode* childTile = dynamic_cast<ThreeDTileNode*>(_children->getChild(i));
-                if (childTile && !childTile->prepareForRefine(cv, priority))
+                // _children holds only the tiles built in the constructor.
+                ThreeDTileNode* childTile = static_cast<ThreeDTileNode*>(_children->getChild(i));
+                if (!childTile->prepareForRefine(cv, priority))
                 {
                     areChildrenReady = false;
                 }
@@ -1439,14 +1507,21 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
                 _content->accept(nv);
             }
 
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
             if (_tileset->getShowBoundingVolumes() && _boundsDebug.valid())
             {
                 _boundsDebug->accept(nv);
             }
+#endif
 
             if (_children.valid())
             {
-                _children->accept(nv);
+                // Visit the child tiles directly rather than through their group, saving a cull visit per level;
+                // each child tests its own bound.
+                for (unsigned int i = 0; i < _children->getNumChildren(); i++)
+                {
+                    _children->getChild(i)->accept(nv);
+                }
             }
         }
         else
@@ -1456,10 +1531,12 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
                 _content->accept(nv);
             }
 
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
             if (_tileset->getShowBoundingVolumes() && _boundsDebug.valid())
             {
                 _boundsDebug->accept(nv);
             }
+#endif
         }
     }
     else if (nv.getTraversalMode() == osg::NodeVisitor::TRAVERSE_ACTIVE_CHILDREN)
@@ -1530,8 +1607,6 @@ ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& author
     _options(options),
     _maximumScreenSpaceError(15.0f),
     _maxTiles(50),
-    _showBoundingVolumes(false),
-    _showColorPerTile(false),
     _maxAge(5.0f),
     _maxSimultaneousLoads(0u),
     _loadsInFlight(std::make_shared<std::atomic_uint>(0u)),
@@ -1559,13 +1634,6 @@ ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& author
     _tracker.push_back(0);
     // Pointer to last element
     _sentryItr = --_tracker.end();
-
-    _debugVP = getOrCreateDebugVirtualProgram();
-    getOrCreateStateSet()->setAttribute(_debugVP.get());
-    if (_showColorPerTile)
-    {
-        getOrCreateStateSet()->setDefine("OE_3DTILES_DEBUG", osg::StateAttribute::ON);
-    }
 
     if (!_options.valid())
     {
@@ -1724,6 +1792,7 @@ void ThreeDTilesetNode::setMaximumScreenSpaceError(float maximumScreenSpaceError
     _maximumScreenSpaceError = maximumScreenSpaceError;
 }
 
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
 bool ThreeDTilesetNode::getShowBoundingVolumes() const
 {
     return _showBoundingVolumes;
@@ -1733,27 +1802,7 @@ void ThreeDTilesetNode::setShowBoundingVolumes(bool showBoundingVolumes)
 {
     _showBoundingVolumes = showBoundingVolumes;
 }
-
-bool ThreeDTilesetNode::getColorPerTile() const
-{
-    return _showColorPerTile;
-}
-
-void ThreeDTilesetNode::setColorPerTile(bool colorPerTile)
-{
-    if (_showColorPerTile != colorPerTile)
-    {
-        _showColorPerTile = colorPerTile;
-        if (_showColorPerTile)
-        {
-            getOrCreateStateSet()->setDefine("OE_3DTILES_DEBUG", osg::StateAttribute::ON);
-        }
-        else
-        {
-            getOrCreateStateSet()->setDefine("OE_3DTILES_DEBUG", osg::StateAttribute::OFF);
-        }
-    }
-}
+#endif
 
 double ThreeDTilesetNode::getSSEDenominator() const
 {
@@ -1793,12 +1842,16 @@ void ThreeDTilesetNode::touchTile(ThreeDTileNode* node)
     std::lock_guard<std::mutex> lock(_mutex);
     if (node->_trackerItrValid)
     {
-        _tracker.erase(node->_trackerItr);
+        // Move the tile's entry to the most recently used end; splicing keeps the iterator valid and, unlike
+        // erasing and re-adding it, frees and allocates nothing.
+        _tracker.splice(_tracker.end(), _tracker, node->_trackerItr);
     }
-
-    _tracker.push_back(node);
-    node->_trackerItrValid = true;
-    node->_trackerItr = --_tracker.end();
+    else
+    {
+        _tracker.push_back(node);
+        node->_trackerItrValid = true;
+        node->_trackerItr = --_tracker.end();
+    }
 }
 
 void ThreeDTilesetNode::expireTiles(const osg::NodeVisitor& nv)

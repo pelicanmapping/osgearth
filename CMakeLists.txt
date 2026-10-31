@@ -23,7 +23,7 @@ set(OSGEARTH_PATCH_VERSION 1)
 set(OSGEARTH_VERSION ${OSGEARTH_MAJOR_VERSION}.${OSGEARTH_MINOR_VERSION}.${OSGEARTH_PATCH_VERSION})
 
 # Increment this each time the ABI changes
-set(OSGEARTH_SOVERSION 199)
+set(OSGEARTH_SOVERSION 200)
 
 # Forces a build that complies with the C++14 API and uses polyfills to do so
 # for C++17 types like variant, optional, and string_view.

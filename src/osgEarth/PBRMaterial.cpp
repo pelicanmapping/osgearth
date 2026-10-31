@@ -202,6 +202,11 @@ namespace
         return osg::ref_ptr<osg::Image>(rr.getImage());
     }
 
+    // Values of the standard program's per-material uniforms for a material with only an albedo texture and
+    // default factors. installProgram() sets them; install() only adds the uniforms that differ.
+    const osg::Vec4 DEFAULT_LAYOUT_AND_FACTORS(PBRMaterial::DRAM, 1, 1, 1);
+    const int DEFAULT_FLAGS = 0;
+
     const char* const STANDARD_PROGRAM_NAME = "osgEarth.PBRTexture";
     const char* const STANDARD_FUNCTIONS[] = {
         "oe_pbr_texture_vertex_model",
@@ -244,10 +249,17 @@ PBRTexture::installProgram(osg::StateSet* stateSet)
     stateSet->getOrCreateUniform("oe_pbr_texture_normal", osg::Uniform::SAMPLER_2D)->set(static_cast<int>(NORMAL_UNIT));
     stateSet->getOrCreateUniform("oe_pbr_texture_pbr", osg::Uniform::SAMPLER_2D)->set(static_cast<int>(PBR_UNIT));
     stateSet->getOrCreateUniform("oe_pbr_texture_occlusion", osg::Uniform::SAMPLER_2D)->set(static_cast<int>(OCCLUSION_UNIT));
+    // Defaults for materials below that don't set their own; a material already installed on this same stateset
+    // keeps its values.
+    if (!stateSet->getUniform("oe_pbr_texture_layoutAndFactors"))
+        stateSet->getOrCreateUniform("oe_pbr_texture_layoutAndFactors", osg::Uniform::FLOAT_VEC4)->set(
+            DEFAULT_LAYOUT_AND_FACTORS);
+    if (!stateSet->getUniform("oe_pbr_texture_flags"))
+        stateSet->getOrCreateUniform("oe_pbr_texture_flags", osg::Uniform::INT)->set(DEFAULT_FLAGS);
 }
 
 void
-PBRTexture::install(osg::StateSet* stateSet)
+PBRTexture::install(osg::StateSet* stateSet, bool defaultsInherited)
 {
     if (!stateSet) return;
 
@@ -272,8 +284,17 @@ PBRTexture::install(osg::StateSet* stateSet)
     bind(PBR_UNIT, pbr.get(), 2);
     bind(OCCLUSION_UNIT, occlusion.get(), 4);
 
-    stateSet->getOrCreateUniform("oe_pbr_texture_layoutAndFactors", osg::Uniform::FLOAT_VEC4)->set(layoutAndFactors);
-    stateSet->getOrCreateUniform("oe_pbr_texture_flags", osg::Uniform::INT)->set(flags);
+    // When the caller guarantees that installProgram()'s defaults are what this stateset inherits, a default
+    // material (such as every 3D Tiles tile) adds no uniforms here: OSG matches a draw's own uniforms against its
+    // uniform map by name, and sets distinct uniform objects again, for every draw that has any. Otherwise the
+    // values are always set, so a default material below another material doesn't inherit that one's values. A
+    // uniform already on this stateset (for example from installProgram() on the same stateset) is always updated,
+    // so no stale value is left behind.
+    if (!defaultsInherited || layoutAndFactors != DEFAULT_LAYOUT_AND_FACTORS ||
+        stateSet->getUniform("oe_pbr_texture_layoutAndFactors"))
+        stateSet->getOrCreateUniform("oe_pbr_texture_layoutAndFactors", osg::Uniform::FLOAT_VEC4)->set(layoutAndFactors);
+    if (!defaultsInherited || flags != DEFAULT_FLAGS || stateSet->getUniform("oe_pbr_texture_flags"))
+        stateSet->getOrCreateUniform("oe_pbr_texture_flags", osg::Uniform::INT)->set(flags);
 }
 
 Status

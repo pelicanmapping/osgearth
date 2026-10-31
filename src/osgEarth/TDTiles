@@ -21,6 +21,12 @@
 #include <memory>
 #include <vector>
 
+// Per-tile bounding volume visualization ("debug volumes"), for debugging the tile hierarchy. It builds geometry for
+// every tile of every loaded tileset, drawn or not (about 3 KB and a few microseconds per tile, and Google's tileset
+// holds hundreds of thousands of tiles), so it's compiled out. Uncomment to bring it back. It changes the classes'
+// layout, so it lives here, where osgEarth and everything using these classes (such as LayersGUI) see the same value.
+// #define OSGEARTH_3DTILES_DEBUG_VOLUMES
+
 namespace osgUtil {
     class IncrementalCompileOperation;
 }
@@ -144,7 +150,8 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         ThreeDTileNode(ThreeDTilesetNode* tileset, Tile* tile, bool immediateLoad, osgDB::Options* options);
         osg::BoundingSphere computeBound() const;
 
-        bool hasContent();
+        //! True when the tile record names content to load. Fixed at construction, so it's cheap to call from cull.
+        bool hasContent() const { return _hasContent; }
 
         osg::Node* getContent();
 
@@ -178,6 +185,11 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         double getDistanceToTile(osgUtil::CullVisitor* cv);
 
         double computeScreenSpaceError(osgUtil::CullVisitor* cv);
+
+        //! Lets a cull visit a tile whose matrix is identity (most tiles) as a plain group, skipping the modelview
+        //! push (matrix inverse and frustum transform) that the cull does for every transform. Other visitors, and
+        //! tiles with a real transform, are visited as a MatrixTransform.
+        void accept(osg::NodeVisitor& nv) override;
 
         void traverse(osg::NodeVisitor& nv);
 
@@ -281,16 +293,26 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
 
     private:
 
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
         void createDebugBounds();
+#endif
 
         void computeBoundingVolume();
+
+        //! True when this tile's transform leaves the cull's modelview unchanged, so it needn't be pushed.
+        bool isIdentityTransform() const
+        {
+            return getReferenceFrame() == RELATIVE_RF && getMatrix().isIdentity();
+        }
 
         osg::ref_ptr< Tile > _tile;
 
         osg::ref_ptr< osg::Node > _content;
         osg::ref_ptr< osg::Group > _children;
 
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
         osg::ref_ptr< osg::Node > _boundsDebug;
+#endif
         ThreeDTilesetNode* _tileset;
 
         Threading::Future< osg::ref_ptr<osg::Node> > _contentFuture;
@@ -316,7 +338,16 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
 
         osg::ref_ptr< osgDB::Options > _options;
 
-        osg::Vec4 _debugColor;
+        // Whether _tile names content, and its geometric error; cached because the cull reads them for every
+        // tile every frame and each is several pointer hops into the parsed tile record.
+        bool _hasContent = false;
+        double _geometricError = 0.0;
+
+        // The content when it's an external tileset (owned by _content), so the cull needn't dynamic_cast it.
+        ThreeDTilesetContentNode* _tilesetContent = nullptr;
+
+        // Frame in which this tile last touched the tileset's expiry tracker.
+        unsigned int _lastTouchedFrame = ~0u;
 
         unsigned int _lastCulledFrameNumber;
         float _lastCulledFrameTime;
@@ -397,17 +428,13 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
          */
         void requestTileContent(ThreeDTileNode* node, double priority);
 
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
         /**
          * Turns on/off bounding volume visualization.
          */
         bool getShowBoundingVolumes() const;
         void setShowBoundingVolumes(bool showBoundingVolumes);
-
-        /**
-         * Turns on/off rendering a debug color per tile.
-         */
-        bool getColorPerTile() const;
-        void setColorPerTile(bool colorPerTile);
+#endif
 
         const std::string& getOwnerName() const;
         void setOwnerName(const std::string& name);
@@ -446,10 +473,9 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         std::mutex _loadingMutex;
         std::vector<osg::observer_ptr<ThreeDTileNode>> _loading;
 
-        bool _showBoundingVolumes;
-        bool _showColorPerTile;
-
-        osg::ref_ptr< VirtualProgram> _debugVP;
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
+        bool _showBoundingVolumes = false;
+#endif
 
         unsigned int _lastExpiredFrame;
 

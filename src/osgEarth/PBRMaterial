@@ -160,16 +160,18 @@ namespace osgEarth
         /**
          * Binds this material on a stateset for the standard PBR program: the
          * descriptor itself on unit 0 (read by Chonk), the component textures on
-         * the standard units, and the factor and flag uniforms the program reads.
-         * Install the program once on an ancestor with installProgram().
+         * the standard units, and the factor and flag uniforms the program reads
+         * when they differ from installProgram()'s defaults (or are already on
+         * the stateset). Install the program once on an ancestor with
+         * installProgram(), which supplies the default values.
          */
         void install(osg::StateSet* stateSet);
 
         /**
-         * Installs the shared standard PBR program and its sampler bindings on a
-         * stateset, typically the root of a model whose materials were bound with
-         * install(). The program is created once and reused everywhere, so no
-         * shader generation happens per model.
+         * Installs the shared standard PBR program, its sampler bindings and the
+         * default factor and flag uniforms on a stateset, typically the root of a
+         * model whose materials were bound with install(). The program is created
+         * once and reused everywhere, so no shader generation happens per model.
          */
         static void installProgram(osg::StateSet* stateSet);
 

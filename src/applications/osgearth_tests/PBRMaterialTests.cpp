@@ -275,9 +275,14 @@ TEST_CASE("glTF unlit materials bind base color only and disable lighting", "[pb
     REQUIRE_FALSE(texture->normal.valid());
     REQUIRE_FALSE(texture->pbr.valid());
     REQUIRE_FALSE(texture->occlusion.valid());
+    // Default flags are inherited from the shared content state, not set on the primitive.
     int flags = -1;
-    REQUIRE(state->getUniform("oe_pbr_texture_flags")->get(flags));
+    REQUIRE(state->getUniform("oe_pbr_texture_flags") == nullptr);
+    REQUIRE(contentState->getUniform("oe_pbr_texture_flags")->get(flags));
     REQUIRE(flags == 0);
+    REQUIRE(material(lit[0])->normal.valid());
+    REQUIRE(lit[0]->getStateSet()->getUniform("oe_pbr_texture_flags")->get(flags));
+    REQUIRE(flags != 0);
     // Base color alone is the same texture gltfSkipPBRTextures builds, so they share.
     REQUIRE(texture == material(skipped[0]));
 

@@ -894,11 +894,13 @@ namespace osgEarth
                             threedTiles->setMaximumScreenSpaceError(sse);
                             ImGui::PopID();
 
+#ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
                             ImGui::PushID("debugVolumes");
                             bool showBoundingVolumes = threedTiles->getTilesetNode()->getShowBoundingVolumes();
                             ImGuiLTable::Checkbox("Show debug volumes", &showBoundingVolumes);
                             threedTiles->getTilesetNode()->setShowBoundingVolumes(showBoundingVolumes);
                             ImGui::PopID();
+#endif
                         }
 
                         auto mapboxGLLayer = dynamic_cast<MapBoxGLImageLayer*>(layer);

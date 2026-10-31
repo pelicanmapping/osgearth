@@ -22,9 +22,9 @@ jobs:
 
     strategy:
       matrix:
-        os: ['macos-14']
+        os: ['macos-26']
         include:
-          - os: 'macos-14'
+          - os: 'macos-26'
             triplet: 'x64-macosx'
 
     steps:

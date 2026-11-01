@@ -67,13 +67,35 @@ namespace osgEarth
             if (_stream) _stream->write(ptr, realsize);
         }
 
+        // Collects one header line from curl (not NUL-terminated). A status line starts a new response
+        // (e.g. after a redirect or proxy CONNECT), so only the final response's headers are kept.
+        // Repeated fields are combined into one comma-separated value per RFC 9110 5.3, matching names
+        // case-insensitively, so e.g. a second Cache-Control field can't hide a no-store in the first.
         void writeHeader(const char* ptr, size_t realsize)
         {
-            std::string header(ptr);
+            std::string header(ptr, realsize);
+            if (header.compare(0, 5, "HTTP/") == 0)
+            {
+                _headers.clear();
+                return;
+            }
+
             std::size_t colon = header.find_first_of(':');
             if (colon != std::string::npos && colon > 0 && colon < header.length() - 1)
             {
-                _headers[header.substr(0, colon)] = header.substr(colon + 1);
+                std::string name = Strings::trim(header.substr(0, colon));
+                std::string value = Strings::trim(header.substr(colon + 1));
+
+                for (auto& existing : _headers)
+                {
+                    if (ciEquals(existing.first, name))
+                    {
+                        if (!value.empty())
+                            existing.second = existing.second.empty() ? value : existing.second + ", " + value;
+                        return;
+                    }
+                }
+                _headers[name] = value;
             }
         }
 
@@ -301,7 +323,14 @@ namespace osgEarth
     {
         HTTPCacheDirectives d;
 
-        const std::string cacheControl = headers.value("cache-control");
+        // Header collection already combines repeated fields, but join any duplicates in stored metadata too
+        // so no directive (e.g. no-store) is missed.
+        std::string cacheControl;
+        for (auto& field : headers.children("cache-control"))
+        {
+            if (!field.value().empty())
+                cacheControl += (cacheControl.empty() ? "" : ", ") + field.value();
+        }
 
         for (auto& token : StringTokenizer()
             .delim(",")
@@ -597,6 +626,9 @@ HTTPResponse::setHeadersFromConfig(const Config& conf)
 {
     if (_parts.size() > 0)
     {
+        // Replace rather than add: Headers compares names case-sensitively, so adding could leave a stale
+        // "Cache-Control" next to a new "cache-control".
+        _parts[0]->_headers.clear();
         for (auto& i : conf.children())
         {
             _parts[0]->_headers[i.key()] = i.value();
@@ -1777,20 +1809,31 @@ HTTPClient::doGet(const HTTPRequest&    request,
     if ((expired || !gotFromCache) && cachePolicy->usage() != CachePolicy::USAGE_CACHE_ONLY)
     {
         HTTPRequest remoteRequest(request);
+
+        // A 304 only vouches for the cached body if the condition was ours. If the caller supplied its own
+        // condition, the 304 refers to the caller's copy, so we leave the request alone and pass it through.
+        bool revalidatingCachedCopy = false;
         if (gotFromCache && !cachedLastModified.empty())
         {
-            bool hasCondition = false;
+            bool callerHasCondition = false;
             for (auto& header : remoteRequest.getHeaders())
-                hasCondition = hasCondition || ciEquals(header.first, "If-Modified-Since");
-            if (!hasCondition)
+            {
+                callerHasCondition = callerHasCondition ||
+                    ciEquals(header.first, "If-Modified-Since") ||
+                    ciEquals(header.first, "If-None-Match");
+            }
+            if (!callerHasCondition)
+            {
                 remoteRequest.addHeader("If-Modified-Since", cachedLastModified);
+                revalidatingCachedCopy = true;
+            }
         }
 
         HTTPResponse remoteResponse = _impl->doGet(remoteRequest, options, progress);
 
         const TimeStamp receivedAt = DateTime().asTimeStamp();
 
-        if (remoteResponse.getCode() == HTTPResponse::NOT_MODIFIED && gotFromCache)
+        if (remoteResponse.getCode() == HTTPResponse::NOT_MODIFIED && revalidatingCachedCopy)
         {
             // Still valid: keep the cached body. Per RFC 9111 4.3.4 the 304's headers (new Date, Cache-Control,
             // Expires...) replace the stored ones, and the receive time restarts the freshness lifetime.

@@ -777,13 +777,26 @@ namespace
     FileSystemCacheBin::remove(const std::string& key)
     {
         CacheStatsScope scope(_stats, CacheStatistics::Metric::Remove);
-        if ( !binValidForReading() ) { scope.error(); return false; }
+
+        // Drop any queued asynchronous write for this key. Otherwise readers would still see the pending
+        // record, and the queued job would write the removed entry back to disk afterwards. The write job
+        // checks its record under the same file gate, so once it's erased here the job skips the write.
+        bool removedPending = false;
+        if (_pool)
+        {
+            URI writeURI(osgDB::concatPaths(_binPath, key));
+            ScopedGate<std::string> lockFile(_fileGate, writeURI.full());
+            ScopedWriteLock lock(_writeCacheRWM);
+            removedPending = _writeCache.erase(writeURI.full()) > 0;
+        }
+
+        if ( !binValidForReading() ) { removedPending ? scope.success() : scope.error(); return removedPending; }
         URI fileURI( key, _metaPath );
         std::string path( fileURI.full() + OSG_EXT );
 
         // exclusive file access:
         ScopedGate<std::string> lockFile(_fileGate, fileURI.full());
-        const bool result = ::unlink( path.c_str() ) == 0;
+        const bool result = (::unlink( path.c_str() ) == 0) || removedPending;
         result ? scope.success() : scope.error();
         return result;
     }

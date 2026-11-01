@@ -319,25 +319,64 @@ namespace osgEarth
     // Reads the Cache-Control, Pragma, Expires, Date and Age headers of a response into caching rules.
     // Header names are matched case-insensitively (Config keys are). A response with neither max-age nor
     // Expires has no explicit freshness lifetime, leaving it up to the CachePolicy.
+    // Returns all values of the named header joined with ", ". Header collection already combines repeated
+    // fields, but stored metadata may still hold duplicates, and none of their directives may be missed.
+    std::string joinHeaderFields(const Config& headers, const std::string& name)
+    {
+        std::string joined;
+        for (auto& field : headers.children(name))
+        {
+            if (!field.value().empty())
+                joined += (joined.empty() ? "" : ", ") + field.value();
+        }
+        return joined;
+    }
+
+    // Splits a directive list (Cache-Control, Pragma) at commas outside quoted strings, honoring backslash
+    // escapes inside them (RFC 9110 5.6.4), so a quoted value like "a\",b" can't swallow the next directive.
+    // Returns trimmed, non-empty directives with quotes left in place.
+    std::vector<std::string> splitDirectives(const std::string& value)
+    {
+        std::vector<std::string> result;
+        std::string current;
+        bool inQuotes = false;
+        for (std::size_t i = 0; i < value.size(); ++i)
+        {
+            char c = value[i];
+            if (inQuotes && c == '\\' && i + 1 < value.size())
+            {
+                current += c;
+                current += value[++i];
+                continue;
+            }
+            if (c == '"')
+                inQuotes = !inQuotes;
+
+            if (c == ',' && !inQuotes)
+            {
+                current = Strings::trim(current);
+                if (!current.empty())
+                    result.push_back(current);
+                current.clear();
+            }
+            else
+            {
+                current += c;
+            }
+        }
+        current = Strings::trim(current);
+        if (!current.empty())
+            result.push_back(current);
+        return result;
+    }
+
     HTTPCacheDirectives getCacheDirectives(const Config& headers)
     {
         HTTPCacheDirectives d;
 
-        // Header collection already combines repeated fields, but join any duplicates in stored metadata too
-        // so no directive (e.g. no-store) is missed.
-        std::string cacheControl;
-        for (auto& field : headers.children("cache-control"))
-        {
-            if (!field.value().empty())
-                cacheControl += (cacheControl.empty() ? "" : ", ") + field.value();
-        }
+        const std::string cacheControl = joinHeaderFields(headers, "cache-control");
 
-        for (auto& token : StringTokenizer()
-            .delim(",")
-            .quote('"')
-            .keepEmpties(false)
-            .ignoreDanglingQuotes()
-            .tokenize(cacheControl))
+        for (auto& token : splitDirectives(cacheControl))
         {
             std::string name = token, value;
             auto eq = token.find('=');
@@ -365,14 +404,19 @@ namespace osgEarth
             }
         }
 
-        // HTTP/1.0 servers express no-cache with Pragma; Cache-Control takes precedence when present.
-        if (cacheControl.empty() && ciEquals(Strings::trim(headers.value("pragma")), "no-cache"))
+        // HTTP/1.0 servers express no-cache with Pragma; it's ignored when a Cache-Control field is present.
+        if (!headers.hasChild("cache-control"))
         {
-            d.noCache = true;
+            for (auto& token : splitDirectives(joinHeaderFields(headers, "pragma")))
+            {
+                if (ciEquals(token, "no-cache"))
+                    d.noCache = true;
+            }
         }
 
-        // An unparseable Expires (e.g. "0") parses to 0, which means already expired.
-        if (headers.hasValue("expires"))
+        // An unparseable Expires (e.g. "0", or empty) parses to 0, which means already expired. hasChild rather
+        // than hasValue so that an empty Expires still counts as present.
+        if (headers.hasChild("expires"))
         {
             d.hasExpires = true;
             d.expires = DateTime(Strings::trim(headers.value("expires"))).asTimeStamp();
@@ -1838,6 +1882,9 @@ HTTPClient::doGet(const HTTPRequest&    request,
             // Still valid: keep the cached body. Per RFC 9111 4.3.4 the 304's headers (new Date, Cache-Control,
             // Expires...) replace the stored ones, and the receive time restarts the freshness lifetime.
             Config merged = cachedHeaders;
+            // The stored Age described the original response; only the 304's own Age (if any) applies now,
+            // otherwise an old Age >= max-age would make the entry stale again right after revalidation.
+            merged.remove("age");
             const Config notModifiedHeaders = remoteResponse.getHeadersAsConfig();
             for (auto& header : notModifiedHeaders.children())
             {

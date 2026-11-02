@@ -34,6 +34,23 @@ The original `REGISTER_OSGEARTH_LAYER` macro remains available for plugin loadin
 For terrain-derived road corridors and level GIS feature pads, see
 [Terrain grading](prestige-grading.md).
 
+## Surface splatting angle cutoff
+
+`prestige:surface_splatting` uses `max_slope` to limit coverage by terrain slope,
+in degrees from level. The default is `90`, which disables slope suppression:
+
+```xml
+<prestige:surface_splatting name="Pavement">
+    <max_slope>90</max_slope>
+</prestige:surface_splatting>
+```
+
+Values must be greater than zero and at most 90. Below 90, coverage fades over
+five degrees either side of the cutoff. Expand the layer in the ImGui Map panel
+and adjust **Splatting angle cutoff (deg)** to update the uniform immediately,
+without rebuilding coverage tiles. C++ callers can use `setMaxSlope` and
+`getMaxSlope`; the setter also updates the serialized `max_slope` value.
+
 ## Grime
 
 `GrimeLayer` is part of this nodekit. Include `<osgEarthPrestige/GrimeLayer>` and

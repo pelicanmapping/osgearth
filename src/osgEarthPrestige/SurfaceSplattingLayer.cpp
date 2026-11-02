@@ -209,6 +209,23 @@ void SurfaceSplattingLayer::init()
 
 SurfaceSplattingLayer::~SurfaceSplattingLayer() = default;
 
+void SurfaceSplattingLayer::setMaxSlope(float degrees)
+{
+    if (!std::isfinite(degrees) || degrees <= 0.0f || degrees > 90.0f) return;
+    options().maxSlope() = degrees;
+    // Fade five degrees either side of the cutoff; 90 keeps coverage on every slope.
+    const float fade = 5.0f;
+    const osg::Vec2f edges = degrees >= 90.0f ? osg::Vec2f(-2.0f, -1.0f) : osg::Vec2f(
+        std::cos(osg::DegreesToRadians(std::min(90.0f, degrees + fade))),
+        std::cos(osg::DegreesToRadians(std::max(0.0f, degrees - fade))));
+    getOrCreateStateSet()->getOrCreateUniform("oe_surface_slopeEdges", osg::Uniform::FLOAT_VEC2)->set(edges);
+}
+
+float SurfaceSplattingLayer::getMaxSlope() const
+{
+    return options().maxSlope().get();
+}
+
 Status SurfaceSplattingLayer::openImplementation()
 {
     const auto& anchor = options().anchor().get();
@@ -397,13 +414,7 @@ void SurfaceSplattingLayer::prepareForRendering(TerrainEngine* engine)
         (_impl->height ? 16 : 0)));
     state->addUniform(new osg::Uniform("oe_surface_reliefDepth", options().reliefDepth().get()));
     state->addUniform(new osg::Uniform("oe_surface_normalStrength", options().normalStrength().get()));
-    // Coverage fades across five degrees either side of max_slope, as cosines of the angle from level (the
-    // shader's smoothstep edges); at 90 degrees both edges sit below any cosine, keeping full coverage.
-    const float slope = options().maxSlope().get(), fade = 5.0f;
-    const osg::Vec2f slopeEdges = slope >= 90.0f ? osg::Vec2f(-2.0f, -1.0f) : osg::Vec2f(
-        std::cos(osg::DegreesToRadians(std::min(90.0f, slope+fade))),
-        std::cos(osg::DegreesToRadians(std::max(0.0f, slope-fade))));
-    state->addUniform(new osg::Uniform("oe_surface_slopeEdges", slopeEdges));
+    setMaxSlope(getMaxSlope());
     state->setDefine("OE_TERRAIN_LAYER_MATERIAL");
     state->setDefine("OE_TERRAIN_LAYER_COVERAGE_RED");
     PrestigeShaders shaders;

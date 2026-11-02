@@ -54,6 +54,7 @@
 
 #ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
 #include <osgEarthImGui/PrestigeGrimeLayerGUI>
+#include <osgEarthPrestige/SurfaceSplattingLayer>
 #endif
 
 #ifdef OSGEARTH_HAVE_PROCEDURAL_NODEKIT
@@ -921,6 +922,18 @@ namespace osgEarth
                         detail::drawFeatureImageFadeControls(dynamic_cast<FeatureImageLayer*>(layer));
 
 #ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+                        auto splattingLayer = dynamic_cast<osgEarthPrestige::SurfaceSplattingLayer*>(layer);
+                        if (splattingLayer)
+                        {
+                            float cutoff = splattingLayer->getMaxSlope();
+                            if (ImGuiLTable::SliderFloat("Splatting angle cutoff (deg)", &cutoff, 0.1f, 90.0f,
+                                "%.1f", ImGuiSliderFlags_AlwaysClamp))
+                                splattingLayer->setMaxSlope(cutoff);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Terrain slope from level; fades over +/-5 degrees. "
+                                    "90 disables the cutoff. Earth file: max_slope. Updates without rebuilding tiles.");
+                        }
+
                         auto grimeLayer = dynamic_cast<osgEarthPrestige::GrimeLayer*>(layer);
                         if (grimeLayer)
                         {

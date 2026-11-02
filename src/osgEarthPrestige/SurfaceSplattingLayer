@@ -57,6 +57,12 @@ namespace osgEarthPrestige
 
         META_Layer(osgEarthPrestige, SurfaceSplattingLayer, Options, FeatureImageLayer, prestige:surface_splatting);
 
+        //! Update-thread control for the terrain-slope cutoff in degrees (0 < value <= 90).
+        //! Updates live coverage without rebuilding tiles; invalid values are ignored. 90 disables the cutoff.
+        void setMaxSlope(float degrees);
+        //! Return the configured terrain-slope cutoff in degrees.
+        float getMaxSlope() const;
+
         //! Establish the regional frame; projected maps fail explicitly in this first implementation.
         void addedToMap(const Map* map) override;
         //! Detach camera state and release terrain unit reservations.

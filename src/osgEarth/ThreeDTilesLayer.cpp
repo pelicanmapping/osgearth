@@ -95,15 +95,21 @@ ThreeDTilesLayer::openImplementation()
     if (parentStatus.isError())
         return parentStatus;
 
+    return openTileset(*_options->url(), "");
+}
+
+Status
+ThreeDTilesLayer::openTileset(const URI& url, const std::string& authorizationHeader)
+{
     osg::ref_ptr< osgDB::Options > readOptions = osgEarth::Registry::instance()->cloneOrCreateOptions(this->getReadOptions());
 
-    ReadResult rr = _options->url()->readString(readOptions.get());
+    ReadResult rr = url.readString(readOptions.get());
     if (rr.failed())
     {
         return Status(Status::ResourceUnavailable, Stringify() << "Error loading tileset: " << rr.errorDetail());
     }
 
-    Tileset* tileset = Tileset::create(rr.getString(), _options->url()->full());
+    Tileset* tileset = Tileset::create(rr.getString(), url.full());
     if (!tileset)
     {
         return Status(Status::GeneralError, "Bad tileset");
@@ -127,7 +133,7 @@ ThreeDTilesLayer::openImplementation()
         };
     }
 
-    _tilesetNode = new ThreeDTilesetNode(tileset, "", getSceneGraphCallbacks(), readOptions.get(), processContent);
+    _tilesetNode = new ThreeDTilesetNode(tileset, authorizationHeader, getSceneGraphCallbacks(), readOptions.get(), processContent);
     if (textures.valid())
     {
         _tilesetNode->getOrCreateStateSet()->setAttribute(textures, osg::StateAttribute::ON);

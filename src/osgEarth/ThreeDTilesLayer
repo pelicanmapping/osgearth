@@ -65,6 +65,12 @@ namespace osgEarth { namespace Contrib
 
         virtual ~ThreeDTilesLayer();
 
+        //! Reads the root tileset at "url" and creates the tileset node, replacing any existing one.
+        //! The caller must already have opened the VisibleLayer base. Fails without changing the
+        //! node if the tileset cannot be read or parsed. A non-empty authorizationHeader is sent
+        //! with every tile request; "url" carries its own headers for the root request.
+        Status openTileset(const URI& url, const std::string& authorizationHeader);
+
         osg::ref_ptr<osgEarth::Contrib::ThreeDTiles::ThreeDTilesetNode> _tilesetNode;
     };
 } }

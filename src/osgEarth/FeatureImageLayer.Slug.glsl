@@ -6,14 +6,6 @@
 #pragma import_defines(OE_TERRAIN_BLEND_IMAGERY, OE_TERRAIN_CAST_SHADOWS)
 #pragma import_defines(OE_IS_PICK_CAMERA, OE_IS_SHADOW_CAMERA, OE_IS_DEPTH_CAMERA)
 
-#pragma import_defines(OE_FEATUREIMAGE_SCREEN_BINS)
-#if defined(OE_FEATUREIMAGE_SCREEN_BINS) && defined(OE_USE_GL4)
-#pragma include FeatureImageLayer.ScreenBins.h.glsl
-uniform bool oe_featureimage_screen_bins = true;
-uniform bool oe_vector_bins_ready = false;
-flat in int oe_tileID;
-#endif
-
 #define SLUG_INDIRECTION_SIZE 32
 
 // Source-UV footprint at fade start/end. Layer configuration can request an earlier cutoff.
@@ -216,19 +208,6 @@ void oe_slug_nearest(vec4 segment, vec2 uv, inout float closest2, inout vec2 nea
     }
 }
 
-// Converts the nearest segment into analytic coverage, shared by source and screen indexes.
-float oe_slug_strokeCoverage(float closest2, vec2 nearest, vec2 tangent, float radius, vec2 dx, vec2 dy)
-{
-    float distance = sqrt(closest2);
-    // At the centerline the distance gradient is undefined; the segment normal still gives the pixel width.
-    vec2 normal = distance > 1e-12 ? nearest / distance :
-        vec2(-tangent.y, tangent.x) * inversesqrt(max(dot(tangent, tangent), 1e-30));
-    float aa = max(abs(dot(normal, dx)) + abs(dot(normal, dy)), 1e-9);
-    // Account for both edges when a stroke is narrower than a pixel; it must fade toward zero with its width.
-    return clamp(0.5 + (radius - distance) / aa, 0.0, 1.0) -
-        clamp(0.5 - (radius + distance) / aa, 0.0, 1.0);
-}
-
 // Evaluates a round-capped, round-joined path as a union of capsules, blending the path only once.
 // Cell-local segment references preserve nearest-segment order and one blend per path.
 // Derivatives are supplied before divergent branches and remain in the inherited source-tile frame.
@@ -255,63 +234,15 @@ float oe_slug_stroke(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy, vec4 stroke, ve
             oe_slug_nearest(segment, uv, closest2, nearest, tangent);
         }
     }
-    return oe_slug_strokeCoverage(closest2, nearest, tangent, stroke.z, dx, dy);
+    float distance = sqrt(closest2);
+    // At the centerline the distance gradient is undefined; the segment normal still gives the pixel width.
+    vec2 normal = distance > 1e-12 ? nearest / distance :
+        vec2(-tangent.y, tangent.x) * inversesqrt(max(dot(tangent, tangent), 1e-30));
+    float aa = max(abs(dot(normal, dx)) + abs(dot(normal, dy)), 1e-9);
+    // Account for both edges when a stroke is narrower than a pixel; it must fade toward zero with its width.
+    return clamp(0.5 + (stroke.z - distance) / aa, 0.0, 1.0) -
+        clamp(0.5 - (stroke.z + distance) / aa, 0.0, 1.0);
 }
-
-#if defined(OE_FEATUREIMAGE_SCREEN_BINS) && defined(OE_USE_GL4)
-// Consumes an ordered compute list only when its UV and AA contract covers this fragment.
-// Any missing/overflowing bin, custom displacement, or larger derivative uses the unchanged source index.
-bool oe_slug_screen_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy, vec2 footprint, out vec4 result)
-{
-    if (!oe_vector_bins_ready || !oe_featureimage_screen_bins) return false;
-    VectorReceiver receiver = oe_vector_receivers[oe_tileID];
-    ivec2 cell = oe_screenBin(gl_FragCoord.xy) - receiver.bins.xy;
-    if (any(lessThan(cell, ivec2(0))) || any(greaterThanEqual(cell, receiver.bins.zw))) return false;
-    VectorBin bin = oe_vector_bins[receiver.data.x + uint(cell.y * receiver.bins.z + cell.x)];
-    if (bin.list.x == OE_VECTOR_FALLBACK || max(footprint.x, footprint.y) > uintBitsToFloat(bin.list.z) ||
-        any(lessThan(uv, bin.bounds.xy)) || any(greaterThan(uv, bin.bounds.zw))) return false;
-    result = vec4(0.0);
-    float remaining = 1.0;
-    uint head = bin.list.x;
-    while (head != 0u)
-    {
-        uvec4 entry = oe_vector_words[head];
-        head = entry.w;
-        int address = int(entry.x);
-        vec4 band = oe_slug_read(atlas, address + 1);
-        vec2 coord = uv - oe_slug_read(atlas, address + 3).xy;
-        vec2 bandCoord = coord * band.xy + band.zw;
-        vec2 margin = 0.5 * abs(footprint * band.xy);
-        if (any(lessThan(bandCoord, -margin)) ||
-            any(greaterThan(bandCoord, vec2(float(SLUG_INDIRECTION_SIZE)) + margin))) continue;
-        vec4 shape = oe_slug_read(atlas, address + 2);
-        float coverage;
-        if (shape.w == 1.0)
-        {
-            float closest2 = 1e30;
-            vec2 nearest = vec2(0), tangent = vec2(1, 0);
-            uvec4 references = uvec4(0);
-            for (uint i = 0u; i < entry.z; ++i)
-            {
-                if ((i & 3u) == 0u) references = oe_vector_words[entry.y + (i >> 2u)];
-                oe_slug_nearest(oe_slug_read(atlas, int(references[i & 3u])), uv, closest2, nearest, tangent);
-            }
-            coverage = oe_slug_strokeCoverage(closest2, nearest, tangent, shape.z, dx, dy);
-        }
-        else coverage = slug_Render(coord, 1.0 / footprint, bandCoord, int(shape.x), atlas);
-        if (coverage == 0.0) continue;
-        vec4 fill = oe_slug_read(atlas, address);
-        float alpha = fill.a * coverage;
-        result += vec4(fill.rgb * alpha, alpha) * remaining;
-        remaining *= 1.0 - alpha;
-        if (remaining == 0.0) break;
-    }
-    vec4 background = oe_slug_read(atlas, 1);
-    result += vec4(background.rgb * background.a, background.a) * remaining;
-    if (result.a > 0.0) result.rgb /= result.a;
-    return true;
-}
-#endif
 
 // Samples the source atlas in the inherited raster texture coordinate frame, not child-tile UVs.
 // Ordinary raster fallback images are distinguished by a negative data-format sentinel.
@@ -331,15 +262,6 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
         raster.a *= visibility;
         return raster;
     }
-#if defined(OE_FEATUREIMAGE_SCREEN_BINS) && defined(OE_USE_GL4)
-    vec4 screenResult;
-    if (projectedFootprint <= 1.0 / 64.0 &&
-        oe_slug_screen_sample(atlas, uv, dx, dy, footprint, screenResult))
-    {
-        screenResult.a *= visibility;
-        return screenResult;
-    }
-#endif
     vec4 meta = oe_slug_read(atlas, 2);
     vec2 pixelsPerEm = 1.0 / footprint;
     int gridSize = int(meta.y);

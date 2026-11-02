@@ -3,7 +3,6 @@
  * MIT License
  */
 #include "LayerDrawable"
-#include "FeatureImageScreenBins"
 #include "TerrainRenderData"
 #include "SelectionInfo"
 #include "EngineContext"
@@ -492,24 +491,6 @@ LayerDrawableNVGL::drawImplementation(osg::RenderInfo& ri) const
         state.haveAppliedAttribute(_context->textures());
     }
 
-    // Build vector lists after atlas residency is established, with the same tile order as this draw.
-    const auto* graphics = state.getLastAppliedProgramObject();
-    GLint readyLocation = graphics ? graphics->getUniformLocation("oe_vector_bins_ready") : -1;
-    if (readyLocation >= 0)
-    {
-        bool enabled = false;
-        const auto* ss = _layer ? _layer->getStateSet() : nullptr;
-        const auto* option = ss ? ss->getUniform("oe_featureimage_screen_bins") : nullptr;
-        if (option) option->get(enabled);
-        bool ready = false;
-        if (enabled && renderTerrainSurface)
-        {
-            if (!gl.vectorBins) gl.vectorBins = std::make_shared<FeatureImageScreenBins>();
-            ready = gl.vectorBins->prepare(state, _rs.tiles, _rs.tilebuf);
-        }
-        gl.ext->glUniform1i(readyLocation, ready ? 1 : 0);
-    }
-
     // Bind the tiles data to its layout(binding=X) in the shader.
     gl.tiles->bindBufferBase(31);
 
@@ -577,7 +558,6 @@ LayerDrawableNVGL::releaseGLObjects(osg::State* state) const
     if (state)
     {
         GLObjects& gl = GLObjects::get(_rs.globjects, *state);
-        gl.vectorBins.reset();
         gl.shared = nullptr;
         gl.tiles = nullptr;
         gl.commands = nullptr;

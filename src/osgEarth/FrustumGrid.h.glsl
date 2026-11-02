@@ -21,11 +21,3 @@ layout(binding = OE_BINDING_FRUSTUMS) buffer Frustums
 {
     Frustum frustums[];
 };
-
-// Maps window coordinates to the top-origin frustum grid, including nonzero viewport origins.
-ivec2 oe_screenBin(vec2 windowPosition)
-{
-    ivec2 pixel = ivec2(floor(windowPosition)) - u_viewport.xy;
-    pixel.y = u_viewport.w - 1 - pixel.y;
-    return pixel / int(u_pixelsPerTile);
-}

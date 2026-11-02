@@ -15,7 +15,9 @@ layout(binding = OE_BINDING_DECAL_TEXTURES, std430) readonly buffer DecalTexture
 // returns the index of the tile containing gl_FragCoord.xy
 int tileIndex()
 {
-    ivec2 tileCoord = oe_screenBin(gl_FragCoord.xy);
+    // compute the tile index for this fragment:
+    int vpHeight = (u_viewport[3] - u_viewport[1]);
+    ivec2 tileCoord = ivec2(gl_FragCoord.x - u_viewport[0], vpHeight - gl_FragCoord.y - u_viewport[1]) / int(u_pixelsPerTile);
     return tileCoord.y * u_numTiles.x + tileCoord.x;
 }
 

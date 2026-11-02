@@ -112,14 +112,6 @@ FeatureImageLayer::openImplementation()
         // Equal endpoints request a hard cutoff; otherwise fade before exceeding the coarse grid's AA margin.
         getOrCreateStateSet()->getOrCreateUniform("oe_featureimage_vector_fade", osg::Uniform::FLOAT_VEC2)->set(
             osg::Vec2f(1.0f / start, 1.0f / cutoff));
-        if (Registry::capabilities().supportsGLSL(450u))
-        {
-            bool screenBins = options().getConfig().value<bool>("vector_screen_bins", false);
-            if (screenBins) getOrCreateStateSet()->setDefine("OE_FEATUREIMAGE_SCREEN_BINS");
-            VirtualProgram::getOrCreate(getOrCreateStateSet())->getTemplate()->addBindUniformBlock("VectorFrustumParams", 12);
-            getOrCreateStateSet()->getOrCreateUniform("oe_featureimage_screen_bins", osg::Uniform::BOOL)->set(
-                screenBins);
-        }
         Util::Shaders shaders;
         shaders.load(VirtualProgram::getOrCreate(getOrCreateStateSet()), "FeatureImageLayer.Slug.glsl");
 #endif

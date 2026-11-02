@@ -75,7 +75,7 @@ Queries just outside a source tile also use the padded edge-cell lists when thei
 antialiasing footprint fits. The wider coarse-grid padding handles queries beyond
 the fine grid's safe margin. Coverage uses the original UVs; queries beyond both
 indexed margins retain the full-shape fallback. This applies to both rendering
-backends and does not require `vector_screen_bins`.
+backends.
 
 Round-joined strokes with round caps use compact centerlines instead of CPU-expanded
 outline curves. Closed round-joined rings also use this path. The FIL fragment shader
@@ -116,30 +116,8 @@ uniform immediately, without rebuilding tiles. Cutoff stays at least 16 pixels
 and at or below fade start. **Reset fade** restores the configured values. Live changes
 last until the layer is reopened.
 
-`vector_screen_bins` enables an experimental screen-space index in the NVGL renderer
-(default `false`). It shares the decal subsystem's screen-frustum grid machinery;
-a compute pass refines the existing source-cell lists into ordered path and segment
-lists for 16-pixel screen bins. FIL still evaluates exact coverage using its inherited
-source UVs and composites at its normal position in the terrain layer stack. It does
-not require a depth prepass or separate road geometry.
-
-The index is reused while the view is unchanged. During camera movement it refreshes
-once per four draws; source changes or viewport changes invalidate it immediately.
-A small query margin within the source index's existing padding covers minor camera
-movement. Every fragment checks the cached UV bounds and antialiasing footprint before
-using a list. Cache misses, unsupported tiles, and allocation overflow use
-the existing source index. Small projected tiles also retain that index. Each active
-layer/drawable/context budgets 32 MiB for list data and at most 8 MiB for bin headers,
-plus receiver metadata and the screen-frustum grid.
-
-In the Map panel, **Vector screen bins** switches this backend live for A/B comparison.
-Enabling it compiles the screen-index shader variant. Cached lists can reduce stroke
-fragment time, but rebuilding and rapid camera motion can cost more than they save;
-measure the complete rendering workload before enabling it by default. Other rendering
-paths continue to use the source index.
-
-Coverage remains a layer-local fragment operation. The optional compute pass only
-prepares candidate lists; this implementation does not use osgSlug's PathDrawable.
+This is a layer-local fragment implementation, with no separate stroke geometry
+or compute pass, and it does not use osgSlug's PathDrawable.
 
 Supported styling includes solid polygon fills with holes, solid line strokes
 and outlines with cap/join settings and width expressions, and point fills.

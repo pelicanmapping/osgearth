@@ -3,7 +3,6 @@
  * MIT License
  */
 #include "Decals"
-#include "ScreenSpaceGrid"
 #include "CullingUtils"
 #include "Shaders"
 
@@ -519,21 +518,55 @@ DecalDecorator::computeFrustumGrid(osg::State& state, GLObjects& gc) const
         gc.camera->getViewport()->width(),
         gc.camera->getViewport()->height());
 
-    gc.params.debugTiles = _debugTiles ? 1.0f : 0.0f;
-    bool changed = detail::updateScreenSpaceGrid(state, _computeFrustumsProgram.get(),
-        *gc.paramsBuffer, *gc.frustumsBuffer, gc.params, gc.camera->getProjectionMatrix(), viewport,
-        _pixelsPerTile, _paramsBinding, _frustumsBinding, gc.dirty);
-    if (changed)
+    if (gc.dirty || viewport != gc.params.viewport)
     {
-        gc.tilesBuffer->bind();
-        gc.tilesBuffer->bufferData(sizeof(GPUTile) * gc.params.numTiles.x() * gc.params.numTiles.y(),
-            nullptr, GL_DYNAMIC_DRAW);
-        gc.dirty = false;
-        _uniformsDirty = false;
-    }
-    return changed;
-}
+        gc.params.invProjMatrix = osg::Matrix::inverse(gc.camera->getProjectionMatrix());
+        gc.params.viewport = viewport;
+        gc.params.numTiles.x() = (int)((viewport[2] + _pixelsPerTile - 1) / _pixelsPerTile);
+        gc.params.numTiles.y() = (int)((viewport[3] + _pixelsPerTile - 1) / _pixelsPerTile);
+        gc.params.debugTiles = _debugTiles ? 1.0f : 0.0f;
 
+        // upload
+        gc.paramsBuffer->uploadData(sizeof(GPUParams), &gc.params);
+        _uniformsDirty = false;
+
+        // ensure enough storage space for the frustums grid:
+        gc.frustumsBuffer->bind();
+        gc.frustumsBuffer->bufferData(
+            sizeof(GPUFrustum) * gc.params.numTiles.x() * gc.params.numTiles.y(),
+            nullptr,
+            GL_DYNAMIC_DRAW);
+
+        // ensure enough storage space for the tiles index:
+        gc.tilesBuffer->bind();
+        gc.tilesBuffer->bufferData(
+            sizeof(GPUTile) * gc.params.numTiles.x() * gc.params.numTiles.y(),
+            nullptr,
+            GL_DYNAMIC_DRAW);
+
+        // activate the program
+        _computeFrustumsProgram->apply(state);
+        OE_HARD_ASSERT(state.getLastAppliedProgramObject(), "Shader compilation error!!");
+
+        // assign binding points for the buffers we will use in this shader:
+        gc.paramsBuffer->bindBufferBase(_paramsBinding);
+        gc.frustumsBuffer->bindBufferBase(_frustumsBinding);
+
+        // run it!
+        GLuint numGroupsX = (gc.params.numTiles.x() + TILES_PER_THREAD_GROUP - 1) / TILES_PER_THREAD_GROUP;
+        GLuint numGroupsY = (gc.params.numTiles.y() + TILES_PER_THREAD_GROUP - 1) / TILES_PER_THREAD_GROUP;
+        
+        gc.ext()->glDispatchCompute(numGroupsX, numGroupsY, 1);
+
+        gc.dirty = false;
+
+        // grid changed:
+        return true;
+    }
+
+    // grid did not change:
+    return false;
+}
 
 void
 DecalDecorator::cull(osg::State& state, GLObjects& gc) const

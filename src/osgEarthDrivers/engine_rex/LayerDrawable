@@ -20,7 +20,6 @@ using namespace osgEarth;
 namespace osgEarth { namespace REX
 {
     class TerrainRenderData;
-    class FeatureImageScreenBins;
 
     /**
      * Drawable for single "Layer" i.e. rendering pass. 
@@ -149,9 +148,6 @@ namespace osgEarth { namespace REX
         {
             // ssbo containing globally shared constant data
             GLBuffer::Ptr shared;
-
-            // View-dependent FIL indexes, private to this drawable/context.
-            std::shared_ptr<FeatureImageScreenBins> vectorBins;
 
             // ssbo containing per-tile render info
             GLBuffer::Ptr tiles;

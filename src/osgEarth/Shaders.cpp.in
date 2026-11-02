@@ -6,8 +6,6 @@ namespace osgEarth { namespace Util
 {
     Shaders::Shaders()
     {
-        _sources["FeatureImageLayer.ScreenBins.h.glsl"] = @FeatureImageLayer.ScreenBins.h.glsl@;
-        _sources["FeatureImageLayer.ScreenBins.comp.glsl"] = @FeatureImageLayer.ScreenBins.comp.glsl@;
         _sources["FeatureImageLayer.Slug.glsl"] = @FeatureImageLayer.Slug.glsl@;
         PBRMaterial = "PBRMaterial.glsl";
         _sources[PBRMaterial] = @PBRMaterial.glsl@;

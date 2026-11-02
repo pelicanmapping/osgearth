@@ -71,8 +71,6 @@ SET(LIB_NAME osgEarth)
 
 
 set(TARGET_GLSL
-    FeatureImageLayer.ScreenBins.h.glsl
-    FeatureImageLayer.ScreenBins.comp.glsl
     FeatureImageLayer.Slug.glsl
     CascadeDraping.glsl
     Chonk.glsl

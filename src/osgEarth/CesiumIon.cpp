@@ -58,6 +58,11 @@ CesiumIonResource::open(const URI& server,
     _resourceUrl = doc["url"].asString();
     _resourceToken = doc["accessToken"].asString();
 
+    // A resource can be opened more than once, so nothing from a previous asset may survive.
+    _acceptHeader.clear();
+    _externalType.clear();
+    _externalOptions = Json::Value();
+
     // Configure the accept header. External assets have no Ion token, and must not send an
     // authorization header at all because the third-party host would reject it.
     if (!_resourceToken.empty())

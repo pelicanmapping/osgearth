@@ -1512,7 +1512,9 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
         const double requestChildrenSSE = 0.8 * maxSSE;
         const bool empty = !hasContent();
         const bool covering = empty && context && context->covering;
-        const bool childrenCovering = _refine != REFINE_ADD && (covering || !empty);
+        // Only a replacing tile with content starts covering. An empty tile passes it on whatever its refine policy,
+        // since it has nothing of its own to keep drawing.
+        const bool childrenCovering = covering || (!empty && _refine != REFINE_ADD);
         bool refine = false;
 
         if (_children.valid() && _children->getNumChildren() > 0 && (covering || error > requestChildrenSSE))

@@ -42,7 +42,8 @@
  * Unlit materials (KHR_materials_unlit) bind only their base color texture
  * and turn OE_LIGHTING off on their primitives (or once in the shared state of
  * a model that is entirely unlit), so they draw base color times vertex color
- * with no scene lighting; their primitives get no generated normals.
+ * with no scene lighting; their primitives get no generated normals unless
+ * gltfGenerateUnlitNormals is set.
  *
  * Known limitations: every PBR map samples TEXCOORD_0 (texCoord indices and
  * KHR_texture_transform are ignored); normal maps are sampled as authored
@@ -59,6 +60,7 @@
  *   gltfSkipImagery                    do not load any textures
  *   gltfSkipPBRTextures                load base color textures only
  *   gltfSkipNormals                    do not generate missing normals
+ *   gltfGenerateUnlitNormals           also generate missing normals on unlit materials
  *   gltfForceReload                    bypass the shared material cache
  *   gltfDisableExternalAssetInstancing one ExternalNode per external reference
  */
@@ -138,6 +140,7 @@ public:
         bool skipImagery = false;
         bool skipPBRTextures = false;
         bool skipNormals = false;
+        bool generateUnlitNormals = false;
         bool forceReload = false;
         bool prepareTextures = false;
         bool instanceExternalAssets = true;
@@ -156,6 +159,7 @@ public:
                 else if (token == "gltfSkipImagery") flags.skipImagery = true;
                 else if (token == "gltfSkipPBRTextures") flags.skipPBRTextures = true;
                 else if (token == "gltfSkipNormals") flags.skipNormals = true;
+                else if (token == "gltfGenerateUnlitNormals") flags.generateUnlitNormals = true;
                 else if (token == "gltfForceReload") flags.forceReload = true;
                 else if (token == "gltfPrepareTextures") flags.prepareTextures = true;
                 else if (token == "gltfDisableExternalAssetInstancing") flags.instanceExternalAssets = false;
@@ -1120,10 +1124,10 @@ public:
             geometry->setColorArray(arrays.color.get(), osg::Array::BIND_PER_VERTEX);
             geometry->addPrimitiveSet(arrays.primitive.get());
 
-            // Unlit materials never read normals, so don't pay to generate them.
+            // Unlit materials never read normals, so don't pay to generate them unless asked to.
             const bool triangles = mode == GL_TRIANGLES || mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN;
             const bool unlit = primitive.material && primitive.material->unlit;
-            if (!arrays.normal.valid() && triangles && !unlit && !_flags.skipNormals)
+            if (!arrays.normal.valid() && triangles && (!unlit || _flags.generateUnlitNormals) && !_flags.skipNormals)
                 osgUtil::SmoothingVisitor::smooth(*geometry);
 
             geode->addDrawable(geometry.get());

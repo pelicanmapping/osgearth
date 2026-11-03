@@ -54,6 +54,7 @@ ThreeDTilesLayer::Options::getConfig() const
     Config conf = VisibleLayer::Options::getConfig();
     conf.set("url", _url);
     conf.set("max_sse", _maximumScreenSpaceError);
+    conf.set("generate_smooth_normals", generateSmoothNormals());
     conf.set("nvgl", nvgl());
     return conf;
 }
@@ -64,6 +65,7 @@ ThreeDTilesLayer::Options::fromConfig( const Config& conf )
     _maximumScreenSpaceError.init(15.0f);
     conf.get("url", _url);
     conf.get("max_sse", _maximumScreenSpaceError);
+    conf.get("generate_smooth_normals", generateSmoothNormals());
     conf.get("nvgl", nvgl());
 }
 
@@ -131,6 +133,11 @@ ThreeDTilesLayer::openTileset(const URI& url, const std::string& authorizationHe
         {
             return convertContent(node, factory, renderBin, twoSidedRenderBin);
         };
+    }
+
+    if (*options().generateSmoothNormals())
+    {
+        readOptions->setOptionString(readOptions->getOptionString() + " gltfGenerateUnlitNormals");
     }
 
     _tilesetNode = new ThreeDTilesetNode(tileset, authorizationHeader, getSceneGraphCallbacks(), readOptions.get(), processContent);

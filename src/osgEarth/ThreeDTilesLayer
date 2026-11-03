@@ -26,6 +26,9 @@ namespace osgEarth { namespace Contrib
             META_LayerOptions(osgEarth, Options, VisibleLayer::Options);
             OE_OPTION(URI, url);
             OE_OPTION(float, maximumScreenSpaceError);
+            //! Generates smooth normals where glTF content has none, including on unlit materials, which otherwise
+            //! skip them. Lit materials always get generated normals. Costs load time and memory on every tile.
+            OE_OPTION(bool, generateSmoothNormals, false);
             OE_OPTION(bool, nvgl, true);
             virtual Config getConfig() const;
         private:

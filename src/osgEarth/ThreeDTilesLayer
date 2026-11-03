@@ -26,10 +26,12 @@ namespace osgEarth { namespace Contrib
             META_LayerOptions(osgEarth, Options, VisibleLayer::Options);
             OE_OPTION(URI, url);
             OE_OPTION(float, maximumScreenSpaceError);
-            //! Generates smooth normals where glTF content has none, including on unlit materials, which otherwise
-            //! skip them. Lit materials always get generated normals. Costs load time and memory on every tile.
-            OE_OPTION(bool, generateSmoothNormals, false);
+            //! Lights content whose glTF materials are KHR_materials_unlit, generating any normals it is missing.
+            //! Default is false, which respects the extension. Costs load time and memory on every tile.
+            OE_OPTION(bool, ignoreUnlit, false);
             OE_OPTION(bool, nvgl, true);
+            //! false shows backfaces on all content; true (default) culls per each glTF material's doubleSided
+            OE_OPTION(bool, backfaceCulling, true);
             virtual Config getConfig() const;
         private:
             void fromConfig( const Config& conf );

@@ -250,8 +250,8 @@ TEST_CASE("glTF unlit materials bind base color only and disable lighting", "[pb
     fixture.json["extensionsUsed"].append("KHR_materials_unlit");
     fixture.json["extensionsRequired"].append("KHR_materials_unlit");
     auto unlit = fixture.load();
-    auto generated = fixture.load("gltfGenerateUnlitNormals");
-    auto suppressed = fixture.load("gltfGenerateUnlitNormals gltfSkipNormals");
+    auto ignored = fixture.load("gltfIgnoreUnlit");
+    auto ignoredNoNormals = fixture.load("gltfIgnoreUnlit gltfSkipNormals");
 
     REQUIRE(stateWithDefine(lit[0], OE_LIGHTING_DEFINE) == nullptr);
     REQUIRE(lit[0]->getNormalArray() != nullptr);
@@ -265,12 +265,14 @@ TEST_CASE("glTF unlit materials bind base color only and disable lighting", "[pb
     const auto* lighting = contentState->getDefinePair(OE_LIGHTING_DEFINE);
     REQUIRE((lighting->second & osg::StateAttribute::ON) == 0);
     REQUIRE(unlit[0]->getNormalArray() == nullptr);
-    // gltfGenerateUnlitNormals adds per-vertex normals without turning lighting back on; gltfSkipNormals still wins.
-    REQUIRE(generated[0]->getNormalArray() != nullptr);
-    REQUIRE(generated[0]->getNormalBinding() == osg::Array::BIND_PER_VERTEX);
-    REQUIRE(generated[0]->getNormalArray()->getNumElements() == generated[0]->getVertexArray()->getNumElements());
-    REQUIRE(stateWithDefine(generated[0], OE_LIGHTING_DEFINE) == contentState);
-    REQUIRE(suppressed[0]->getNormalArray() == nullptr);
+    // gltfIgnoreUnlit lights the material and generates its missing normals; gltfSkipNormals still wins.
+    REQUIRE(stateWithDefine(ignored[0], OE_LIGHTING_DEFINE) == nullptr);
+    REQUIRE(stateWithProgram(ignored[0]) == stateWithProgram(lit[0]));
+    REQUIRE(ignored[0]->getNormalArray() != nullptr);
+    REQUIRE(ignored[0]->getNormalBinding() == osg::Array::BIND_PER_VERTEX);
+    REQUIRE(ignored[0]->getNormalArray()->getNumElements() == ignored[0]->getVertexArray()->getNumElements());
+    REQUIRE(material(ignored[0])->normal.valid());
+    REQUIRE(ignoredNoNormals[0]->getNormalArray() == nullptr);
     REQUIRE(stateWithProgram(lit[0]) != nullptr);
     REQUIRE(stateWithProgram(lit[0]) == stateWithProgram(skipped[0]));
     REQUIRE(stateWithProgram(lit[0]) != contentState);

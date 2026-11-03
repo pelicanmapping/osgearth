@@ -85,7 +85,7 @@ public:
         supportsOption("gltfSkipImagery", "Do not load textures");
         supportsOption("gltfSkipPBRTextures", "Load base color textures only");
         supportsOption("gltfSkipNormals", "Do not generate missing normals");
-        supportsOption("gltfGenerateUnlitNormals", "Also generate missing normals on unlit materials");
+        supportsOption("gltfIgnoreUnlit", "Treat KHR_materials_unlit materials as lit");
         supportsOption("gltfPrepareTextures", "CPU-compress material textures and build mipmaps before caching");
         supportsOption("gltfForceReload", "Bypass the shared material cache");
         supportsOption("gltfDisableExternalAssetInstancing", "Create one ExternalNode per external asset reference");

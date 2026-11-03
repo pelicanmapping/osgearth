@@ -829,7 +829,7 @@ public:
 
         static osg::Matrixd localMatrix(const cgltf_node& node)
         {
-            cgltf_float m[16];
+            cgltf_double m[16];
             cgltf_node_transform_local(&node, m);
             return osg::Matrixd(m);
         }

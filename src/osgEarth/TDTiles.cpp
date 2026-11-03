@@ -68,11 +68,39 @@ namespace
 
         // Content requests made during the traversal, with their priorities (higher first).
         std::vector<std::pair<double, osgEarth::Contrib::ThreeDTiles::ThreeDTileNode*>> requests;
+
+        // True while visiting tiles that stand in for an ancestor's replaced content, with no content in between.
+        // An empty tile in this state has to reach its nearest content whatever its own error, because nothing else
+        // will cover its area once the ancestor refines.
+        bool covering = false;
     };
 
     // The context of the tileset being culled on this thread. A cull traversal runs on a single thread and
     // visits a tileset's tiles from inside its ThreeDTilesetNode::traverse, which installs and removes it.
     thread_local CullContext* s_cullContext = nullptr;
+
+    // Sets a context's covering state for the tiles visited during its lifetime, then restores it so that later
+    // siblings see the state their own parent set. Does nothing without a context.
+    struct ScopedCovering
+    {
+        ScopedCovering(CullContext* context, bool covering) : _context(context)
+        {
+            if (_context)
+            {
+                _previous = _context->covering;
+                _context->covering = covering;
+            }
+        }
+        ~ScopedCovering()
+        {
+            if (_context)
+            {
+                _context->covering = _previous;
+            }
+        }
+        CullContext* _context;
+        bool _previous = false;
+    };
 
     // Holds one of a tileset's load slots for as long as it exists.
     struct LoadSlot
@@ -1236,10 +1264,13 @@ bool ThreeDTileNode::prepareForRefine(osgUtil::CullVisitor* cv, double priority)
         // A tile without content draws its children instead, but only once its own error calls for it (see
         // traverse); until then it draws nothing, so it isn't ready and the parent keeps drawing. Its children
         // are requested from the same point as any other tile's, so nothing out of range is loaded or kept.
+        // The exception is a tile covering for a replaced ancestor, which goes straight to its nearest content;
+        // otherwise a small far-away area could stop a huge ancestor from refining around the camera.
+        const bool covering = s_cullContext && s_cullContext->covering;
         const double maxSSE = _tileset->getMaximumScreenSpaceError();
-        const double error = computeScreenSpaceError(cv);
-        ready = error > maxSSE;
-        if (error > 0.8 * maxSSE)
+        const double error = covering ? 0.0 : computeScreenSpaceError(cv);
+        ready = covering || error > maxSSE;
+        if (covering || error > 0.8 * maxSSE)
         {
             for (unsigned int i = 0; i < _children->getNumChildren(); i++)
             {
@@ -1475,14 +1506,20 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
         // tile below that point are neither requested nor touched, so the tileset's expiry can unload them.
         // A tile without content has nothing of its own to draw, so it refines without waiting for its children,
         // but still only once its error calls for it: empty tiles are how a tileset holds back content until the
-        // camera comes within range.
+        // camera comes within range. Once a replacing ancestor has content, though, that ancestor stops drawing
+        // when it refines, so an empty tile below it refines regardless, down to its nearest content.
         const double maxSSE = _tileset->getMaximumScreenSpaceError();
         const double requestChildrenSSE = 0.8 * maxSSE;
         const bool empty = !hasContent();
+        const bool covering = empty && context && context->covering;
+        // Only a replacing tile with content starts covering. An empty tile passes it on whatever its refine policy,
+        // since it has nothing of its own to keep drawing.
+        const bool childrenCovering = covering || (!empty && _refine != REFINE_ADD);
         bool refine = false;
 
-        if (_children.valid() && _children->getNumChildren() > 0 && error > requestChildrenSSE)
+        if (_children.valid() && _children->getNumChildren() > 0 && (covering || error > requestChildrenSSE))
         {
+            ScopedCovering scope(context, childrenCovering);
             bool areChildrenReady = true;
             for (unsigned int i = 0; i < _children->getNumChildren(); i++)
             {
@@ -1497,7 +1534,7 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
             // Keep drawing this tile until every child is ready, so refining never leaves a hole. An additive tile
             // keeps drawing its own content when it refines, so it doesn't wait: each child shows once it's ready,
             // even while a sibling isn't (an empty one out of range may not be for a long time).
-            refine = error > maxSSE && (empty || _refine == REFINE_ADD || areChildrenReady);
+            refine = (covering || error > maxSSE) && (empty || _refine == REFINE_ADD || areChildrenReady);
         }
 
         if (refine)
@@ -1518,6 +1555,7 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
             {
                 // Visit the child tiles directly rather than through their group, saving a cull visit per level;
                 // each child tests its own bound.
+                ScopedCovering scope(context, childrenCovering);
                 for (unsigned int i = 0; i < _children->getNumChildren(); i++)
                 {
                     _children->getChild(i)->accept(nv);
@@ -1951,7 +1989,9 @@ void ThreeDTilesetNode::traverse(osg::NodeVisitor& nv)
             context.horizonValid = true;
         }
 
+        // An external tileset's root covers for the same ancestors as the tile that points to it.
         CullContext* outerContext = s_cullContext;
+        context.covering = outerContext && outerContext->covering;
         s_cullContext = &context;
         osg::Group::traverse(nv);
         s_cullContext = outerContext;

@@ -254,11 +254,10 @@ namespace osgEarth
                 auto i = intersectMouse(view, x, y, _mapNode.get());
                 if (i.isOK())
                 {
-                    Decal decal;
+                    auto& decal = _stampingDecals->getDecals().emplace_back();
                     decal.matrix = worldTBN(i->getWorldIntersectPoint(), i->getWorldIntersectNormal());
                     applyDecalParams(decal);
 
-                    _stampingDecals->getDecals().emplace_back(std::move(decal));
                     _stampingDecals->dirtyBound();
                     _stampingDecals->debug(_debugBoxes);
                 }

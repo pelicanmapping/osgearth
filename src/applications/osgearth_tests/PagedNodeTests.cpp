@@ -47,7 +47,7 @@ namespace
             condition.wait_for(lock, std::chrono::seconds(5), [this]() { return released; });
         }
 
-        // Waits for loader entry without placing a C++14 lambda inside a Catch assertion macro.
+        // Waits for loader entry without placing a lambda inside a Catch assertion macro.
         bool waitUntilEntered() const
         {
             return waitFor([this]() { return entered.load(); });

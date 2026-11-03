@@ -23,7 +23,7 @@ Keep tests and benchmarks transient unless told otherwise. Don't add them to the
 update/alter existing unit tests for core functionality.
 
 # Coding Standards
-Code needs to be C++14 compliant.
+Code needs to be C++17 compliant.
 Code needs to build on various platforms, so don't write code for which MSVC has "relaxed rules".
 Indent with 4 spaces. No tabs.
 Line break at 128 characters.

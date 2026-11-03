@@ -20,6 +20,8 @@ osgEarth builds on trusted open source technologies like OpenSceneGraph and GDAL
 
 ## Install the SDK
 
+Building osgEarth or using its SDK requires C++17 or later.
+
 Install the latest version of osgEarth from `vcpkg`:
 ```bat
 vcpkg install osgearth:x64-windows

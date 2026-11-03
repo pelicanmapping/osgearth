@@ -8,9 +8,8 @@ zooming past the source LOD.
 Enable `OSGEARTH_ENABLE_SLUGHORN` in CMake (default: OFF) to build Slughorn
 statically and enable `FeatureImage` layers with `mode="vector"`. Use the normal
 `configure.bat` and `build.bat` workflow on Windows. The implementation requires
-a C++20-capable compiler; osgEarth's public headers and consumer compilation
-remain C++17 (or the existing C++14 polyfill mode). Only the private Slughorn
-translation unit and SDK core compile as C++20.
+a C++20-capable compiler for the private Slughorn translation unit and SDK core.
+osgEarth's public headers require C++17.
 
 CMake downloads a pinned, SHA512-verified Slughorn source archive. It builds
 only the core, with no Python, examples, or optional SDK backends. For offline

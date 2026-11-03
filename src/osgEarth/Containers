@@ -7,6 +7,8 @@
 #include <osgEarth/Threading>
 #include <osg/ref_ptr>
 #include <list>
+#include <mutex>
+#include <optional>
 #include <vector>
 #include <map>
 #include <unordered_map>
@@ -220,7 +222,7 @@ namespace osgEarth { namespace Util
         bool enabled = true;
 
     public:
-        using ValueType = typename osgEarth_std::optional<V>;
+        using ValueType = std::optional<V>;
         mutable int hits = 0;
         mutable int get_count = 0;
 
@@ -235,7 +237,7 @@ namespace osgEarth { namespace Util
         //! @param value The new maximum number of items the cache can hold.
         inline void setCapacity(unsigned value)
         {
-            osgEarth_std::scoped_lock L(mutex);
+            std::scoped_lock L(mutex);
             cache.clear();
             map.clear();
             hits = 0;
@@ -251,7 +253,7 @@ namespace osgEarth { namespace Util
         {
             if (capacity == 0)
                 return {};
-            osgEarth_std::scoped_lock L(mutex);
+            std::scoped_lock L(mutex);
             ++get_count;
             auto it = map.find(key);
             if (it == map.end())
@@ -269,7 +271,7 @@ namespace osgEarth { namespace Util
         {
             if (capacity == 0)
                 return false;
-            osgEarth_std::scoped_lock L(mutex);
+            std::scoped_lock L(mutex);
             auto it = map.find(key);
             if (it != map.end()) {
                 if (it->second != std::prev(cache.end()))
@@ -288,7 +290,7 @@ namespace osgEarth { namespace Util
         {
             if (capacity == 0 || !enabled)
                 return;
-            osgEarth_std::scoped_lock L(mutex);
+            std::scoped_lock L(mutex);
             auto it = map.find(key);
             if (it != map.end()) {
                 // Update value and move to back
@@ -309,8 +311,7 @@ namespace osgEarth { namespace Util
         //! Tries to get the value for the given key, inserting it if not found.
         //! This method does everything under a single mutex lock to avoid double-insertion.
         //! @param key The key to look up or insert.
-        //! @param create A function that creates a new value if the key is not found. This
-        //!    function should take no arguments and return an std::optional<V>.
+        //! @param create Receives an empty std::optional<V>& to populate on a cache miss.
         template<typename FUNC>
         inline ValueType get_or_insert(const K& key, FUNC&& create)
         {
@@ -320,7 +321,7 @@ namespace osgEarth { namespace Util
                 return v;
             }
 
-            osgEarth_std::scoped_lock L(mutex);
+            std::scoped_lock L(mutex);
             ++get_count;
             auto it = map.find(key);
             if (it != map.end()) {
@@ -351,7 +352,7 @@ namespace osgEarth { namespace Util
         {
             if (capacity == 0)
                 return;
-            osgEarth_std::scoped_lock L(mutex);
+            std::scoped_lock L(mutex);
             auto it = map.find(key);
             if (it != map.end()) {
                 cache.erase(it->second);
@@ -362,7 +363,7 @@ namespace osgEarth { namespace Util
         //! Clears all entries from the cache and resets statistics.
         inline void clear()
         {
-            osgEarth_std::scoped_lock L(mutex);
+            std::scoped_lock L(mutex);
             cache.clear();
             map.clear();
             get_count = 0, hits = 0;
@@ -371,7 +372,7 @@ namespace osgEarth { namespace Util
         //! Num of elements
         inline std::size_t size() const
         {
-            osgEarth_std::scoped_lock L(mutex);
+            std::scoped_lock L(mutex);
             return map.size();
         }
     };

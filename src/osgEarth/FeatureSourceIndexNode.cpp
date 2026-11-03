@@ -5,6 +5,7 @@
 #include <osgEarth/FeatureSourceIndexNode>
 #include <osgEarth/NodeUtils>
 #include <osgEarth/Metrics>
+#include <iterator>
 
 using namespace osgEarth;
 
@@ -14,19 +15,25 @@ using namespace osgEarth;
 
 namespace
 {
-    // nifty template to iterate over a map's keys
+    // Project a map iterator onto its keys for bulk index removal.
     template<typename T>
-    struct KeyIter : public std::iterator<std::input_iterator_tag, typename T::value_type>
+    struct KeyIter
     {
-		typename T::const_iterator it;
-        KeyIter(typename T::const_iterator i) : it(i) { }
-		KeyIter &operator++() {	++it; return *this;	}
-		KeyIter operator++(int) { KeyIter t = *this; ++*this; return t; }
+        using iterator_category = std::input_iterator_tag;
+        using value_type = typename T::key_type;
+        using difference_type = typename T::difference_type;
+        using pointer = const value_type*;
+        using reference = const value_type&;
 
-		typename T::key_type const *operator->() const { return &(it->first); }
-		typename T::key_type const &operator*() const {	return it->first; }
-		friend bool operator==(KeyIter const &a, KeyIter const &b) { return a.it == b.it; }
-		friend bool operator!=(KeyIter const &a, KeyIter const &b) { return a.it != b.it; }
+        typename T::const_iterator it;
+        KeyIter(typename T::const_iterator i) : it(i) { }
+        KeyIter& operator++() { ++it; return *this; }
+        KeyIter operator++(int) { KeyIter t = *this; ++*this; return t; }
+
+        pointer operator->() const { return &(it->first); }
+        reference operator*() const { return it->first; }
+        friend bool operator==(KeyIter const &a, KeyIter const &b) { return a.it == b.it; }
+        friend bool operator!=(KeyIter const &a, KeyIter const &b) { return a.it != b.it; }
     };
 }
 

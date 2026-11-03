@@ -7,7 +7,6 @@
 #include <osgEarth/Export>
 #include <osgEarth/Notify>
 #include <osgEarth/BuildConfig>
-#include <osgEarth/PolyfillCPP14>
 #include <osg/ref_ptr>
 #include <osg/Referenced>
 #include <memory>
@@ -44,14 +43,9 @@ namespace osgEarth
 #define OE_STRINGIFY_0(x) #x
 #define OE_STRINGIFY(x) OE_STRINGIFY_0(x)
 
-#if __cplusplus >= 201402L || _MSVC_LANG >= 201402L
-    #define OE_DEPRECATED(MESSAGE) [[deprecated(MESSAGE)]]
-#else
-    #define OE_DEPRECATED(MESSAGE)
-#endif
+#define OE_DEPRECATED(MESSAGE) [[deprecated(MESSAGE)]]
 
-// MACRO for disabling the compiler warning for a single [[deprecated]] function call;
-// used for internal polyfill only.
+// Suppress warnings around internal calls to deprecated APIs.
 #ifdef _MSC_VER
     #define OE_START_DEPRECATED_FUNCTION_CALLS \
         __pragma(warning(push)) \

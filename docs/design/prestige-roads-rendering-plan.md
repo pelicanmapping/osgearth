@@ -313,7 +313,7 @@ recorded in [RUNTIME_VECTORS.md](../../tools/experiments/prestige_roads/RUNTIME_
   Compare identical inputs and validate behavior before claiming a performance improvement.
 * Use `configure.bat` and `build.bat` for Windows configuration/builds. Initialize `osgearth_shell.bat`
   before running osgEarth tools; run relevant existing unit tests from `tests`.
-* Preserve C++14 compatibility and repository precision/threading conventions. No public API is committed
+* Preserve C++17 compatibility and repository precision/threading conventions. No public API is committed
   by the names in the design; bump the library ABI version when an actual public ABI change requires it.
 * Use explicit quality and residency settings; record the GPU, viewport, antialiasing, and terrain detail
   with every comparison. Establish numerical budgets from the initial measurements, not guessed frame rates.

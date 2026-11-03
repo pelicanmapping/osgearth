@@ -9,6 +9,7 @@
 #include <osgEarth/Containers>
 #include <osgEarth/NodeUtils>
 #include <osg/Matrix>
+#include <optional>
 #include <vector>
 
 namespace osgEarth
@@ -34,7 +35,7 @@ namespace osgEarth
         osg::Vec3f size = osg::Vec3f{ 1.0f, 1.0f, 10.0f };
 
         //! Texture dimensions in world units (meters). If not set, defaults to 'size'.
-        osgEarth_std::optional<osg::Vec2f> textureSize;
+        std::optional<osg::Vec2f> textureSize;
 
         //! Opacity (alpha)
         float opacity = 1.0f;

@@ -40,10 +40,6 @@ if (CESIUM_NATIVE_FOUND)
         PrepareRenderResources
         TaskProcessor)
 
-    set(CMAKE_CXX_STANDARD 17)
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
-    set(CMAKE_CXX_EXTENSIONS OFF)
-
     add_osgearth_library(
         TARGET ${LIB_NAME}
         PUBLIC_HEADERS ${TARGET_H}

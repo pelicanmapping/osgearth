@@ -36,19 +36,6 @@ else()
     find_package(Protobuf QUIET)
 endif()
 
-# Newer Protobuf releases require C++17 and propagate that requirement to every
-# target that links them. Do not silently produce an ABI-mixed SDK when the
-# C++14 compatibility build is requested; omit optional Protobuf/MVT support
-# instead. Older Protobuf packages that support C++14 continue to work.
-if(OSGEARTH_BUILD_WITH_CPP14_POLYFILLS AND Protobuf_FOUND AND TARGET protobuf::libprotobuf)
-    get_target_property(PROTOBUF_COMPILE_FEATURES protobuf::libprotobuf INTERFACE_COMPILE_FEATURES)
-    if("${PROTOBUF_COMPILE_FEATURES}" MATCHES "cxx_std_(17|20|23|26)")
-        message(WARNING "Protobuf requires C++17; disabling optional Protobuf/MVT support for the C++14 build")
-        set(Protobuf_FOUND FALSE)
-    endif()
-endif()
-
-
 # Other options ...................................................
 
 # support for the old Controls API (superceded by imgui)
@@ -356,7 +343,6 @@ SET(TARGET_H
     PMTiles
     PointDrawable
     PointSymbol
-    PolyfillCPP14
     PolygonizeLines
     PolygonSymbol
     PowerlineLayer
@@ -492,9 +478,6 @@ SET(TARGET_H
     rtree.h
     weemesh.h
     weejobs.h
-    tl_optional.hpp
-    mpark_variant.hpp
-    polyfill_string_view.hpp
 
     tinyxml/tinyxml.h
     tinyxml/tinystr.h

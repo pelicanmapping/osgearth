@@ -11,6 +11,7 @@
 #include <osgDB/FileNameUtils>
 #include <osg/Object>
 #include <osgDB/ConvertUTF>
+#include <filesystem>
 #include <stack>
 #include <mutex>
 #include <unordered_map>
@@ -109,10 +110,6 @@
 #    define __S_IFDIR _S_IFDIR
 #  endif
 #  define S_ISDIR(mode)    (mode&__S_IFDIR)
-#endif
-
-#if !defined(S_ISREG) && defined(_S_IFREG)
-#  define S_ISREG(mode)    (mode&_S_IFREG)
 #endif
 
 
@@ -575,56 +572,28 @@ osgEarth::Util::makeDirectoryForFile( const std::string &path )
 std::uint64_t
 osgEarth::Util::getFileSize(const std::string& path)
 {
-    struct stat64 stbuf;
-#ifdef OSG_USE_UTF8_FILENAME
-    const int result = _wstat64(OSGDB_STRING_TO_FILENAME(path).c_str(), &stbuf);
-#else
-    const int result = stat64(path.c_str(), &stbuf);
-#endif
-    return result == 0 && S_ISREG(stbuf.st_mode) ?
-        static_cast<std::uint64_t>(stbuf.st_size) : 0u;
+    const std::filesystem::path nativePath(OSGDB_STRING_TO_FILENAME(path));
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(nativePath, ec))
+        return 0u;
+    const auto size = std::filesystem::file_size(nativePath, ec);
+    return ec ? 0u : size;
 }
 
 
 bool
 osgEarth::Util::removeDirectory(const std::string& path)
 {
-    if (!osgDB::fileExists(path))
+    const std::filesystem::path nativePath(OSGDB_STRING_TO_FILENAME(path));
+    std::error_code ec;
+    const auto status = std::filesystem::status(nativePath, ec);
+    if (status.type() == std::filesystem::file_type::not_found)
         return true;
-
-    if (osgDB::fileType(path) != osgDB::DIRECTORY)
+    if (!std::filesystem::is_directory(status))
         return false;
 
-    const osgDB::DirectoryContents contents = osgDB::getDirectoryContents(path);
-    for (osgDB::DirectoryContents::const_iterator i = contents.begin(); i != contents.end(); ++i)
-    {
-        if (*i == "." || *i == "..")
-            continue;
-
-        const std::string child = osgDB::concatPaths(path, *i);
-        bool removed = false;
-        if (osgDB::fileType(child) == osgDB::DIRECTORY)
-        {
-            removed = removeDirectory(child);
-        }
-        else
-        {
-#ifdef OSG_USE_UTF8_FILENAME
-            removed = _wunlink(OSGDB_STRING_TO_FILENAME(child).c_str()) == 0;
-#else
-            removed = ::unlink(child.c_str()) == 0;
-#endif
-        }
-
-        if (!removed)
-            return false;
-    }
-
-#ifdef OSG_USE_UTF8_FILENAME
-    return _wrmdir(OSGDB_STRING_TO_FILENAME(path).c_str()) == 0;
-#else
-    return ::rmdir(path.c_str()) == 0;
-#endif
+    std::filesystem::remove_all(nativePath, ec);
+    return !ec;
 }
 
 

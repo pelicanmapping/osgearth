@@ -1381,9 +1381,6 @@ namespace
     };
 }
 
-// C++14 requires storage when INVALID_MESH is bound to a reference (e.g., in test assertions).
-constexpr ChonkGeometryPage::MeshId ChonkGeometryPage::INVALID_MESH;
-
 ChonkGeometryPage::ChonkGeometryPage() : _storage(Chonk::create())
 {
     _storage->name() = "Chonk geometry page";

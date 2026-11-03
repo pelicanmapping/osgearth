@@ -23,24 +23,14 @@ set(OSGEARTH_PATCH_VERSION 1)
 set(OSGEARTH_VERSION ${OSGEARTH_MAJOR_VERSION}.${OSGEARTH_MINOR_VERSION}.${OSGEARTH_PATCH_VERSION})
 
 # Increment this each time the ABI changes
-set(OSGEARTH_SOVERSION 199)
+set(OSGEARTH_SOVERSION 200)
 
-# Forces a build that complies with the C++14 API and uses polyfills to do so
-# for C++17 types like variant, optional, and string_view.
-# Temporary solution until we can use native C++17 across the board.
-option(OSGEARTH_BUILD_WITH_CPP14_POLYFILLS "Build osgEarth with C++14 polyfills for std C++17 types" OFF)
-
-if(OSGEARTH_BUILD_WITH_CPP14_POLYFILLS)
-    message(STATUS "Building with polyfills to support C++14!")
-    set(OSGEARTH_HAVE_CPP14_POLYFILLS ON)
-    set(CMAKE_CXX_STANDARD 14)
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
-    set(CMAKE_CXX_EXTENSIONS OFF)
-else()
+# Use C++17 by default and honor newer standards requested by a parent project.
+if(NOT CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD MATCHES "^(98|11|14)$")
     set(CMAKE_CXX_STANDARD 17)
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
-    set(CMAKE_CXX_EXTENSIONS OFF)
 endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(OSGEARTH_BUILDING_SDK ON)
 

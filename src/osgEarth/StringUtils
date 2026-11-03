@@ -10,6 +10,7 @@
 #include <osg/Vec4>
 #include <osg/Vec4ub>
 #include <string>
+#include <string_view>
 #include <cstdint>
 #include <algorithm>
 #include <vector>
@@ -65,7 +66,7 @@ namespace osgEarth {
         }
 
         //! Returns a lower-case version of the input string.
-        inline std::string toLower(const std::string& input) {
+        inline std::string toLower(std::string_view input) {
             std::string output(input);
             std::transform(output.begin(), output.end(), output.begin(), [&](unsigned char c) {
                 return toLower(c); });

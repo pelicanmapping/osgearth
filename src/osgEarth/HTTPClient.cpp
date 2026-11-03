@@ -67,13 +67,35 @@ namespace osgEarth
             if (_stream) _stream->write(ptr, realsize);
         }
 
+        // Collects one header line from curl (not NUL-terminated). A status line starts a new response
+        // (e.g. after a redirect or proxy CONNECT), so only the final response's headers are kept.
+        // Repeated fields are combined into one comma-separated value per RFC 9110 5.3, matching names
+        // case-insensitively, so e.g. a second Cache-Control field can't hide a no-store in the first.
         void writeHeader(const char* ptr, size_t realsize)
         {
-            std::string header(ptr);
+            std::string header(ptr, realsize);
+            if (header.compare(0, 5, "HTTP/") == 0)
+            {
+                _headers.clear();
+                return;
+            }
+
             std::size_t colon = header.find_first_of(':');
             if (colon != std::string::npos && colon > 0 && colon < header.length() - 1)
             {
-                _headers[header.substr(0, colon)] = header.substr(colon + 1);
+                std::string name = Strings::trim(header.substr(0, colon));
+                std::string value = Strings::trim(header.substr(colon + 1));
+
+                for (auto& existing : _headers)
+                {
+                    if (ciEquals(existing.first, name))
+                    {
+                        if (!value.empty())
+                            existing.second = existing.second.empty() ? value : existing.second + ", " + value;
+                        return;
+                    }
+                }
+                _headers[name] = value;
             }
         }
 
@@ -237,6 +259,213 @@ namespace osgEarth
             r.add("HTTP Request Headers", request.getHeadersAsConfig());
         }
         result.setMetadata(meta);
+    }
+
+    // HTTP caching rules (RFC 9111) derived from the headers of a stored response.
+    // osgEarth's URL cache is a private, single-user cache, so "private" responses may be stored
+    // and "s-maxage" (shared caches only) is ignored.
+    struct HTTPCacheDirectives
+    {
+        bool noStore = false;     // the response must not be written to the cache
+        bool noCache = false;     // the stored response must be revalidated before every use
+        bool hasMaxAge = false;   // Cache-Control max-age was given (takes precedence over Expires)
+        TimeSpan maxAge = 0;      // max-age in seconds
+        bool hasExpires = false;  // an Expires header was given
+        TimeStamp expires = 0;    // parsed Expires; 0 when unparseable, which means already expired
+        TimeStamp date = 0;       // parsed Date header; 0 when absent or unparseable
+        TimeSpan age = 0;         // seconds the response had already spent in upstream caches (Age header)
+    };
+
+    // Metadata key under which the URL cache records when a response was received (or last revalidated), in
+    // seconds since the epoch. Cache backends' own timestamps can't serve as this: MemCache reports 0, and
+    // size-limited RocksDB/LevelDB bins refresh theirs on every read.
+    const char* HTTP_CACHE_RECEIVED_AT = "osgEarth-Received-At";
+
+    // Parses a delta-seconds header value. Per RFC 9111 an invalid value means "already stale", so it yields 0.
+    TimeSpan parseDeltaSeconds(const std::string& value)
+    {
+        std::string v = Strings::trim(value);
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"')
+            v = v.substr(1, v.size() - 2);
+        if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos)
+            return 0;
+        // drop leading zeros so the length check below only clamps genuinely huge values
+        auto firstDigit = v.find_first_not_of('0');
+        if (firstDigit == std::string::npos)
+            return 0;
+        v = v.substr(firstDigit);
+        // clamp absurdly large values instead of overflowing
+        return v.size() > 9 ? (TimeSpan)999999999 : (TimeSpan)std::stol(v);
+    }
+
+    // Returns the time a cached response was received, from the HTTP_CACHE_RECEIVED_AT metadata the URL cache
+    // writes. Entries stored before that existed fall back to the cache backend's timestamp.
+    TimeStamp getReceivedTime(const Config& meta, TimeStamp fallback)
+    {
+        const std::string value = meta.value(HTTP_CACHE_RECEIVED_AT);
+        if (!value.empty() && value.find_first_not_of("0123456789") == std::string::npos)
+            return (TimeStamp)std::stoll(value);
+        return fallback;
+    }
+
+    // Returns headers with the URL cache's receive-time record set to receivedAt.
+    Config withReceivedTime(Config headers, TimeStamp receivedAt)
+    {
+        headers.remove(HTTP_CACHE_RECEIVED_AT);
+        headers.add(HTTP_CACHE_RECEIVED_AT, std::to_string((long long)receivedAt));
+        return headers;
+    }
+
+    // Reads the Cache-Control, Pragma, Expires, Date and Age headers of a response into caching rules.
+    // Header names are matched case-insensitively (Config keys are). A response with neither max-age nor
+    // Expires has no explicit freshness lifetime, leaving it up to the CachePolicy.
+    // Returns all values of the named header joined with ", ". Header collection already combines repeated
+    // fields, but stored metadata may still hold duplicates, and none of their directives may be missed.
+    std::string joinHeaderFields(const Config& headers, const std::string& name)
+    {
+        std::string joined;
+        for (auto& field : headers.children(name))
+        {
+            if (!field.value().empty())
+                joined += (joined.empty() ? "" : ", ") + field.value();
+        }
+        return joined;
+    }
+
+    // Splits a directive list (Cache-Control, Pragma) at commas outside quoted strings, honoring backslash
+    // escapes inside them (RFC 9110 5.6.4), so a quoted value like "a\",b" can't swallow the next directive.
+    // Returns trimmed, non-empty directives with quotes left in place.
+    std::vector<std::string> splitDirectives(const std::string& value)
+    {
+        std::vector<std::string> result;
+        std::string current;
+        bool inQuotes = false;
+        for (std::size_t i = 0; i < value.size(); ++i)
+        {
+            char c = value[i];
+            if (inQuotes && c == '\\' && i + 1 < value.size())
+            {
+                current += c;
+                current += value[++i];
+                continue;
+            }
+            if (c == '"')
+                inQuotes = !inQuotes;
+
+            if (c == ',' && !inQuotes)
+            {
+                current = Strings::trim(current);
+                if (!current.empty())
+                    result.push_back(current);
+                current.clear();
+            }
+            else
+            {
+                current += c;
+            }
+        }
+        current = Strings::trim(current);
+        if (!current.empty())
+            result.push_back(current);
+        return result;
+    }
+
+    HTTPCacheDirectives getCacheDirectives(const Config& headers)
+    {
+        HTTPCacheDirectives d;
+
+        const std::string cacheControl = joinHeaderFields(headers, "cache-control");
+
+        for (auto& token : splitDirectives(cacheControl))
+        {
+            std::string name = token, value;
+            auto eq = token.find('=');
+            if (eq != std::string::npos)
+            {
+                name = Strings::trim(token.substr(0, eq));
+                value = token.substr(eq + 1);
+            }
+            name = toLower(name);
+
+            if (name == "no-store")
+            {
+                d.noStore = true;
+            }
+            else if (name == "no-cache")
+            {
+                // no-cache="field" only restricts reuse of the named fields, but we store whole responses,
+                // so treat both forms the same.
+                d.noCache = true;
+            }
+            else if (name == "max-age" && !d.hasMaxAge)
+            {
+                d.hasMaxAge = true;
+                d.maxAge = parseDeltaSeconds(value);
+            }
+        }
+
+        // HTTP/1.0 servers express no-cache with Pragma; it's ignored when a Cache-Control field is present.
+        if (!headers.hasChild("cache-control"))
+        {
+            for (auto& token : splitDirectives(joinHeaderFields(headers, "pragma")))
+            {
+                if (ciEquals(token, "no-cache"))
+                    d.noCache = true;
+            }
+        }
+
+        // An unparseable Expires (e.g. "0", or empty) parses to 0, which means already expired. hasChild rather
+        // than hasValue so that an empty Expires still counts as present.
+        if (headers.hasChild("expires"))
+        {
+            d.hasExpires = true;
+            d.expires = DateTime(Strings::trim(headers.value("expires"))).asTimeStamp();
+        }
+
+        if (headers.hasValue("date"))
+        {
+            d.date = DateTime(Strings::trim(headers.value("date"))).asTimeStamp();
+        }
+
+        if (headers.hasValue("age"))
+        {
+            d.age = parseDeltaSeconds(headers.value("age"));
+        }
+
+        return d;
+    }
+
+    // Whether a cached response received at receivedAt must be fetched again (or revalidated) at time now,
+    // according to the caching headers the server sent with it (RFC 9111 sections 4.2.1 and 4.2.3).
+    bool isCachedResponseStale(const HTTPCacheDirectives& d, TimeStamp receivedAt, TimeStamp now)
+    {
+        if (d.noCache || d.noStore)
+            return true;
+
+        TimeSpan lifetime = 0;
+        if (d.hasMaxAge)
+        {
+            lifetime = d.maxAge;
+        }
+        else if (d.hasExpires)
+        {
+            // Measure Expires against the server's Date so client/server clock skew doesn't matter;
+            // without a Date, the time we received the response stands in for it.
+            TimeStamp base = d.date > 0 ? d.date : receivedAt;
+            lifetime = d.expires > base ? (TimeSpan)(d.expires - base) : 0;
+        }
+        else
+        {
+            // no explicit freshness: leave it to the CachePolicy
+            return false;
+        }
+
+        // The age when received is the larger of the Age header and how long ago the server generated it
+        // (Date); add the time it has spent in our cache since.
+        TimeSpan apparentAge = (d.date > 0 && receivedAt > d.date) ? (TimeSpan)(receivedAt - d.date) : 0;
+        TimeSpan initialAge = d.age > apparentAge ? d.age : apparentAge;
+        TimeSpan currentAge = initialAge + (now > receivedAt ? (TimeSpan)(now - receivedAt) : 0);
+        return currentAge >= lifetime;
     }
 }
 
@@ -441,6 +670,9 @@ HTTPResponse::setHeadersFromConfig(const Config& conf)
 {
     if (_parts.size() > 0)
     {
+        // Replace rather than add: Headers compares names case-sensitively, so adding could leave a stale
+        // "Cache-Control" next to a new "cache-control".
+        _parts[0]->_headers.clear();
         for (auto& i : conf.children())
         {
             _parts[0]->_headers[i.key()] = i.value();
@@ -1570,29 +1802,45 @@ HTTPClient::doGet(const HTTPRequest&    request,
 
     bool gotFromCache = false;
 
+    // Validator for a conditional GET when the cached copy is stale
+    std::string cachedLastModified;
+
+    // The cached body and headers, kept to re-store the entry when the server answers 304 Not Modified
+    std::string cachedBody;
+    Config cachedHeaders;
+
     //Try to read result from the cache.
     if (bin)
     {
         ReadResult result = bin->readString(uri.cacheKey(), options);
         if (result.succeeded())
-        {            
+        {
             gotFromCache = true;
+            cachedBody = result.getString();
+            cachedHeaders = result.metadata();
 
-            // If the cache-control header contains no-cache that means that it's ok to store the result in the cache, but it must be requested
-            // from the server each time it is it requested.
-            bool noCache = false;
-            std::string cacheControl = result.metadata().value("cache-control");
-            if (cacheControl.find("no-cache") != std::string::npos)
+            // Honor the freshness the server declared when the response was stored (Cache-Control max-age/no-cache,
+            // Expires, Pragma) in addition to the CachePolicy. Responses that declare nothing are governed by the
+            // CachePolicy alone.
+            HTTPCacheDirectives directives = getCacheDirectives(cachedHeaders);
+            TimeStamp receivedAt = getReceivedTime(cachedHeaders, result.lastModifiedTime());
+            expired =
+                isCachedResponseStale(directives, receivedAt, DateTime().asTimeStamp()) ||
+                cachePolicy->isExpired(result.lastModifiedTime());
+
+            // Revalidate with If-Modified-Since only. We deliberately do not send If-None-Match: some servers
+            // (e.g. Google's 3D Tiles root) return the same ETag for bodies that embed per-request session tokens,
+            // so a 304 there would keep serving an expired session.
+            if (expired)
             {
-                noCache = true;
+                cachedLastModified = Strings::trim(result.metadata().value("last-modified"));
             }
 
-            expired = noCache || cachePolicy->isExpired(result.lastModifiedTime());
-            result.setIsFromCache(true);            
+            result.setIsFromCache(true);
 
             HTTPResponse cacheResponse(HTTPResponse::CATEGORY_SUCCESS);
             osg::ref_ptr<HTTPResponse::Part> part = new HTTPResponse::Part();
-            part->_stream << result.getString();
+            part->_stream << cachedBody;
             std::string contentType = result.metadata().value("content-type");
             cacheResponse.setMimeType(contentType);
             cacheResponse.getParts().push_back(part);
@@ -1604,13 +1852,62 @@ HTTPClient::doGet(const HTTPRequest&    request,
 
     if ((expired || !gotFromCache) && cachePolicy->usage() != CachePolicy::USAGE_CACHE_ONLY)
     {
-        HTTPResponse remoteResponse = _impl->doGet(request, options, progress);
+        HTTPRequest remoteRequest(request);
 
-        if (remoteResponse.getCode() == ReadResult::RESULT_NOT_MODIFIED)
+        // A 304 only vouches for the cached body if the condition was ours. If the caller supplied its own
+        // condition, the 304 refers to the caller's copy, so we leave the request alone and pass it through.
+        bool revalidatingCachedCopy = false;
+        if (gotFromCache && !cachedLastModified.empty())
         {
-            // Touch the cached item to update it's last modified timestamp so it doesn't expire again immediately.
+            bool callerHasCondition = false;
+            for (auto& header : remoteRequest.getHeaders())
+            {
+                callerHasCondition = callerHasCondition ||
+                    ciEquals(header.first, "If-Modified-Since") ||
+                    ciEquals(header.first, "If-None-Match");
+            }
+            if (!callerHasCondition)
+            {
+                remoteRequest.addHeader("If-Modified-Since", cachedLastModified);
+                revalidatingCachedCopy = true;
+            }
+        }
+
+        HTTPResponse remoteResponse = _impl->doGet(remoteRequest, options, progress);
+
+        const TimeStamp receivedAt = DateTime().asTimeStamp();
+
+        if (remoteResponse.getCode() == HTTPResponse::NOT_MODIFIED && revalidatingCachedCopy)
+        {
+            // Still valid: keep the cached body. Per RFC 9111 4.3.4 the 304's headers (new Date, Cache-Control,
+            // Expires...) replace the stored ones, and the receive time restarts the freshness lifetime.
+            Config merged = cachedHeaders;
+            // The stored Age described the original response; only the 304's own Age (if any) applies now,
+            // otherwise an old Age >= max-age would make the entry stale again right after revalidation.
+            merged.remove("age");
+            const Config notModifiedHeaders = remoteResponse.getHeadersAsConfig();
+            for (auto& header : notModifiedHeaders.children())
+            {
+                if (ciEquals(header.key(), "content-length"))
+                    continue;
+                merged.remove(header.key());
+                merged.add(header.key(), header.value());
+            }
+            merged = withReceivedTime(merged, receivedAt);
+            response.setHeadersFromConfig(merged);
+
             if (bin)
-                bin->touch(uri.cacheKey());
+            {
+                if (getCacheDirectives(merged).noStore)
+                {
+                    bin->remove(uri.cacheKey());
+                }
+                else
+                {
+                    osg::ref_ptr<StringObject> stringObject = new StringObject(cachedBody);
+                    bin->write(uri.cacheKey(), stringObject, merged, options);
+                }
+            }
         }
         else
         {
@@ -1620,8 +1917,18 @@ HTTPClient::doGet(const HTTPRequest&    request,
             {
                 if (bin != nullptr)
                 {
-                    osg::ref_ptr< StringObject> stringObject = new StringObject(response.getPartAsString(0));
-                    bin->write(uri.cacheKey(), stringObject, response.getHeadersAsConfig(), options);
+                    Config headers = response.getHeadersAsConfig();
+                    if (getCacheDirectives(headers).noStore)
+                    {
+                        // The server forbids storing this response; drop any copy stored before it said so.
+                        if (gotFromCache)
+                            bin->remove(uri.cacheKey());
+                    }
+                    else
+                    {
+                        osg::ref_ptr< StringObject> stringObject = new StringObject(response.getPartAsString(0));
+                        bin->write(uri.cacheKey(), stringObject, withReceivedTime(headers, receivedAt), options);
+                    }
                 }
             }
         }

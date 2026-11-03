@@ -329,7 +329,7 @@ private:
                 if (source.hasMatrix)
                 {
                     node.has_matrix = 1;
-                    for (int c = 0; c < 16; ++c) node.matrix[c] = static_cast<cgltf_float>(source.matrix.ptr()[c]);
+                    for (int c = 0; c < 16; ++c) node.matrix[c] = source.matrix.ptr()[c];
                 }
                 else
                 {

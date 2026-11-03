@@ -58,11 +58,17 @@ CesiumIonResource::open(const URI& server,
     _resourceUrl = doc["url"].asString();
     _resourceToken = doc["accessToken"].asString();
 
-    // Configure the accept header
-    std::stringstream buf2;
-    //buf2 << "*/*;access_token=" << _resourceToken;
-    buf2 << "Bearer " << _resourceToken << std::endl;
-    _acceptHeader = buf2.str();
+    // A resource can be opened more than once, so nothing from a previous asset may survive.
+    _acceptHeader.clear();
+    _externalType.clear();
+    _externalOptions = Json::Value();
+
+    // Configure the accept header. External assets have no Ion token, and must not send an
+    // authorization header at all because the third-party host would reject it.
+    if (!_resourceToken.empty())
+    {
+        _acceptHeader = "Bearer " + _resourceToken;
+    }
 
     if (doc.isMember("externalType"))
     {
@@ -70,6 +76,13 @@ CesiumIonResource::open(const URI& server,
         if (doc.isMember("options"))
         {
             _externalOptions = doc["options"];
+
+            // External assets (e.g. Google Photorealistic Tiles) keep their location under
+            // "options", and any credentials they need are already in that URL.
+            if (_externalOptions.isMember("url"))
+            {
+                _resourceUrl = _externalOptions["url"].asString();
+            }
         }
     }
 
@@ -239,6 +252,10 @@ CesiumIon3DTilesLayer::init()
 Status
 CesiumIon3DTilesLayer::openImplementation()
 {
+    Status parentStatus = VisibleLayer::openImplementation();
+    if (parentStatus.isError())
+        return parentStatus;
+
     const char* key = ::getenv("OSGEARTH_CESIUMION_KEY");
     if (key)
         _key = key;
@@ -257,39 +274,21 @@ CesiumIon3DTilesLayer::openImplementation()
         _key,
         getReadOptions());
 
-    URI serverURI;
-    if (status.isOK())
+    if (status.isError())
+        return status;
+
+    if (ionResource._resourceUrl.empty())
     {
-        URIContext uriContext;
+        return Status(Status::ResourceUnavailable, "Asset endpoint did not return a tileset URL");
+    }
+
+    URIContext uriContext;
+    if (!ionResource._acceptHeader.empty())
+    {
         uriContext.addHeader("authorization", ionResource._acceptHeader);
-        serverURI = URI(ionResource._resourceUrl, uriContext);
     }
 
-    Status parentStatus = VisibleLayer::openImplementation();
-    if (parentStatus.isError())
-        return parentStatus;
-
-    ReadResult rr = serverURI.readString();
-    if (rr.failed())
-    {
-        return Status(Status::ResourceUnavailable, Stringify() << "Error loading tileset: " << rr.errorDetail());
-    }
-
-    //OE_NOTICE << "Read tileset " << rr.getString() << std::endl;
-
-    Tileset* tileset = Tileset::create(rr.getString(), serverURI.full());
-    if (!tileset)
-    {
-        return Status(Status::GeneralError, "Bad tileset");
-    }
-
-    // Clone the read options
-    osg::ref_ptr< osgDB::Options > readOptions = osgEarth::Registry::instance()->cloneOrCreateOptions(this->getReadOptions());
-
-    _tilesetNode = new ThreeDTilesetNode(tileset, ionResource._acceptHeader, getSceneGraphCallbacks(), readOptions.get());
-    _tilesetNode->setMaximumScreenSpaceError(*options().maximumScreenSpaceError());
-
-    return STATUS_OK;
+    return openTileset(URI(ionResource._resourceUrl, uriContext), ionResource._acceptHeader);
 }
 
 REGISTER_OSGEARTH_LAYER(cesiumion3dtiles, CesiumIon3DTilesLayer);

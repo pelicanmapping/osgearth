@@ -1464,9 +1464,12 @@ ChonkGeometryPage::MeshId
 ChonkGeometryPageBuilder::addMesh(osg::Node* node, float farScale, float nearScale)
 {
     if (!node || !_page || !_textures) return ChonkGeometryPage::INVALID_MESH;
-    PageEligibility eligibility;
-    node->accept(eligibility);
-    if (!eligibility.valid) return ChonkGeometryPage::INVALID_MESH;
+    if (enforceChonkEligibility())
+    {
+        PageEligibility eligibility;
+        node->accept(eligibility);
+        if (!eligibility.valid) return ChonkGeometryPage::INVALID_MESH;
+    }
     // The same encoder writes legacy assets and pages, including all materials.
     return append([&](Chonk* storage)
     {

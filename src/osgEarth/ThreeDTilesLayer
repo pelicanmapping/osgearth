@@ -26,6 +26,9 @@ namespace osgEarth { namespace Contrib
             META_LayerOptions(osgEarth, Options, VisibleLayer::Options);
             OE_OPTION(URI, url);
             OE_OPTION(float, maximumScreenSpaceError);
+            //! Lights content whose glTF materials are KHR_materials_unlit, generating any normals it is missing.
+            //! Default is false, which respects the extension. Costs load time and memory on every tile.
+            OE_OPTION(bool, ignoreUnlit, false);
             OE_OPTION(bool, nvgl, true);
             //! false shows backfaces on all content; true (default) culls per each glTF material's doubleSided
             OE_OPTION(bool, backfaceCulling, true);

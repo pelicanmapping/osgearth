@@ -64,6 +64,7 @@ TEST_CASE("FeatureImageLayer refreshes dynamic styles and geometry")
 {
     OGRFeatureSource::Options sourceOptions;
     sourceOptions.l2CacheSize() = 8u;
+    sourceOptions.geoInterp() = GEOINTERP_GREAT_CIRCLE;
     osg::ref_ptr<OGRFeatureSource> source = new OGRFeatureSource(sourceOptions);
     source->setGeometry(GeometryUtils::geometryFromWKT(
         "POLYGON((-160 10, -110 10, -110 60, -160 60, -160 10))"));
@@ -84,6 +85,7 @@ TEST_CASE("FeatureImageLayer refreshes dynamic styles and geometry")
     osg::ref_ptr<Map> map = new Map();
     map->addLayer(layer.get());
     REQUIRE(layer->getStatus().isOK());
+    REQUIRE(source->getFeatureProfile()->geoInterp().isSetTo(GEOINTERP_GREAT_CIRCLE));
 
     TileKey keys[] = {
         TileKey(0, 0, 0, layer->getProfile()),
@@ -149,7 +151,7 @@ TEST_CASE("FeatureImageLayer refreshes dynamic styles and geometry")
 
     SECTION("Replacing the feature source refreshes cached tiles")
     {
-        osg::ref_ptr<OGRFeatureSource> replacement = new OGRFeatureSource();
+        osg::ref_ptr<OGRFeatureSource> replacement = new OGRFeatureSource(sourceOptions);
         replacement->setGeometry(GeometryUtils::geometryFromWKT(
             "POLYGON((-125 10, -110 10, -110 60, -125 60, -125 10))"));
         REQUIRE(replacement->open().isOK());
@@ -159,6 +161,7 @@ TEST_CASE("FeatureImageLayer refreshes dynamic styles and geometry")
     }
 
     REQUIRE(layer->getRevision() > revision);
+    REQUIRE(layer->getFeatureSource()->getFeatureProfile()->geoInterp().isSetTo(GEOINTERP_GREAT_CIRCLE));
     for (const auto& key : keys)
         REQUIRE(sample(key) == expected);
 }

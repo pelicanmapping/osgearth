@@ -685,6 +685,8 @@ OGRFeatureSource::openImplementation()
 void
 OGRFeatureSource::dirty()
 {
+    FeatureSource::dirty();
+
     if (_profile.valid())
     {
         setFeatureProfile(new FeatureProfile(_profile->getExtent()));

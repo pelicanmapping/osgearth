@@ -141,3 +141,33 @@ intercepting BLContext operations, and targets a newer Blend2D API than this
 project's current vcpkg build. This implementation uses Slughorn's native Canvas
 path API. A future shared Blend2D path producer could reduce duplicated style
 conversion without exposing C++20 SDK types in osgEarth headers.
+
+## Dynamic style and geometry edits
+
+For an editable layer, disable persistent caching **before** opening it or adding
+it to the map:
+
+```cpp
+featureImageLayer->setCachePolicy(osgEarth::CachePolicy::NO_CACHE);
+```
+
+`setStyleSheet(newStyleSheet)` updates the session and requests a tile refresh.
+After editing the existing stylesheet in place, call `featureImageLayer->dirty()`;
+setting the same stylesheet pointer again is not a change notification.
+After modifying geometry in a writable or in-memory feature source, call
+`featureImageLayer->dirty()` to invalidate the source's feature cache, refresh its
+data extents, and request new tiles. Editing a feature returned by a cursor does
+not necessarily update the underlying source; use that source's editing API.
+
+The revision-based in-memory tile cache supports these refreshes, but persistent
+rendered-image caches are not invalidated by `dirty()`. Leaving persistent caching
+enabled can therefore show old and new styles at different zoom levels.
+
+Coordinate edits with application rendering/paging; these calls do not make
+concurrent mutation of styles or geometry safe. Tiles regenerate asynchronously,
+so a refresh is not an atomic replacement of all visible tiles.
+
+For `FeatureModelLayer`, replacing the stylesheet already rebuilds the model.
+Call its `dirty()` method after in-place style or source-geometry edits. A generic
+`ModelLayer` does not provide feature editing; use `FeatureModelLayer` for that
+workflow.

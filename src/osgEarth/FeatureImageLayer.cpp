@@ -206,7 +206,7 @@ FeatureImageLayer::setFeatureSource(FeatureSource* fs)
             {
                 // with a new feature source, we need to re-establish
                 // the data extents and open a new session.
-                updateSession();
+                dirty();
             }
         }
     }
@@ -218,11 +218,18 @@ FeatureImageLayer::setStyleSheet(StyleSheet* value)
     if (getStyleSheet() != value)
     {
         options().styleSheet().setLayer(value);
-        if (_global._session.valid())
-        {
-            _global._session->setStyles(getStyleSheet());
-        }
+        dirty();
     }
+}
+
+void
+FeatureImageLayer::dirty()
+{
+    if (getFeatureSource())
+        getFeatureSource()->dirty();
+
+    updateSession();
+    ImageLayer::dirty();
 }
 
 void

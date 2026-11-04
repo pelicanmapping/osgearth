@@ -5,17 +5,17 @@ mode uses the existing feature rasterizer. Optional `vector` mode evaluates
 Slughorn curves and centerline strokes on the GPU, preserving smooth edges when
 zooming past the source LOD.
 
-Enable `OSGEARTH_ENABLE_SLUGHORN` in CMake (default: OFF) to build Slughorn
-statically and enable `FeatureImage` layers with `mode="vector"`. Use the normal
-`configure.bat` and `build.bat` workflow on Windows. The implementation requires
-a C++20-capable compiler for the private Slughorn translation unit and SDK core.
-osgEarth's public headers require C++17.
+vcpkg installs Slughorn as a regular dependency from the repository's overlay port.
+Enable `OSGEARTH_ENABLE_SLUGHORN` in CMake (default OFF) to use
+`FeatureImage` layers with `mode="vector"`. The core library and osgEarth's
+Slughorn implementation file require C++20. osgEarth's public headers require C++17.
 
-CMake downloads a pinned, SHA512-verified Slughorn source archive. It builds
-only the core, with no Python, examples, or optional SDK backends. For offline
-builds, set `FETCHCONTENT_SOURCE_DIR_OSGEARTH_SLUGHORN` to a checkout of the
-pinned revision before configuring. The revision and checksum are in
-`cmake/Slughorn.cmake`; the shader depends on that revision's atlas format.
+For other builds, CMake looks for an installed Slughorn package first. Set
+`Slughorn_DIR` to the directory containing `SlughornConfig.cmake` if needed.
+If the package is absent, CMake fetches and verifies the same pinned archive
+and builds only the core. For an offline fallback, point
+`FETCHCONTENT_SOURCE_DIR_OSGEARTH_SLUGHORN` at a checkout of the revision in
+`cmake/ports/slughorn/source.cmake`. The shader depends on that revision's atlas format.
 
 ## Earth file
 

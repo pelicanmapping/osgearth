@@ -10,6 +10,9 @@ set(OSGEARTH_PUBLIC_DEPENDENCIES)
 # for both building the osgEarth.lib AND for building consumer libraries.
 if(NOT OSGEARTH_BUILD_SHARED_LIBS)
     add_definitions(-DOSGEARTH_LIBRARY_STATIC)
+    if(OSGEARTH_ENABLE_SLUGHORN)
+        list(APPEND OSGEARTH_PUBLIC_DEPENDENCIES Slughorn)
+    endif()
 endif()
 
 if(OSGEARTH_BUILD_IMGUI_NODEKIT)

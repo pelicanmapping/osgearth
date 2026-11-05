@@ -365,6 +365,9 @@ ImageLayer::createImage(const TileKey& key, ProgressCallback* progress)
 
     GeoImage result = createImageInKeyProfile(key, progress);
 
+    if (!result.valid() && progress && progress->isCanceled())
+        return result;
+
     // Post-cache operations:
 
     if (!_postLayers.empty())
@@ -535,10 +538,10 @@ ImageLayer::createImageInKeyProfile(const TileKey& key, ProgressCallback* progre
         result = assembleImage( key, progress );
     }
 
-    // Check for cancelation before writing to a cache:
+    // Preserve a failed read when the callback was canceled to schedule its retry.
     if (progress && progress->isCanceled())
     {
-        return GeoImage::INVALID;
+        return result.valid() ? GeoImage::INVALID : result;
     }
 
     // Check against a no-data image.
@@ -633,7 +636,7 @@ ImageLayer::assembleImage(const TileKey& key, ProgressCallback* progress)
                     subKey.makeParent();
 
                 if (progress && progress->isCanceled())
-                    return {};
+                    return subTile.valid() ? GeoImage::INVALID : subTile;
             }
 
             if (subTile.valid())

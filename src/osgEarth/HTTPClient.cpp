@@ -236,6 +236,19 @@ namespace osgEarth
         return true;
     }
 
+    // Map a transport or HTTP failure to the same public result for all payload types.
+    ReadResult::Code readErrorCode(const HTTPResponse& response)
+    {
+        if (response.isCanceled()) return ReadResult::RESULT_CANCELED;
+        const unsigned code = response.getCode();
+        if (response.isTimedOut() || code == 408 || code == 504) return ReadResult::RESULT_TIMEOUT;
+        if (code == 401 || code == 403) return ReadResult::RESULT_UNAUTHORIZED;
+        if (code == HTTPResponse::NOT_FOUND) return ReadResult::RESULT_NOT_FOUND;
+        if (code == HTTPResponse::NOT_MODIFIED) return ReadResult::RESULT_NOT_MODIFIED;
+        if (response.getCodeCategory() == HTTPResponse::CATEGORY_SERVER_ERROR) return ReadResult::RESULT_SERVER_ERROR;
+        return ReadResult::RESULT_UNKNOWN_ERROR;
+    }
+
     void setMetadata(ReadResult& result, const HTTPRequest& request, const HTTPResponse& response)
     {
         // be sure to install the response headers at the top level:
@@ -257,6 +270,14 @@ namespace osgEarth
         {
             r.add("HTTP Response Code", std::to_string(response.getCode()));
             r.add("HTTP Request Headers", request.getHeadersAsConfig());
+        }
+        result.setDuration(response.getDuration());
+        if (result.failed() && result.errorDetail().empty())
+        {
+            if (!response.getMessage().empty())
+                result.setErrorDetail(response.getMessage());
+            else if (response.getCode() >= 400)
+                result.setErrorDetail("HTTP " + std::to_string(response.getCode()));
         }
         result.setMetadata(meta);
     }
@@ -591,8 +612,9 @@ _response_code( rhs._response_code ),
 _parts( rhs._parts ),
 _mimeType( rhs._mimeType ),
 _canceled( rhs._canceled ),
-_duration_s(0.0),
-_lastModified(0u),
+_duration_s(rhs._duration_s),
+_lastModified(rhs._lastModified),
+_message(rhs._message),
 _fromCache(rhs._fromCache)
 {
     //nop
@@ -600,7 +622,7 @@ _fromCache(rhs._fromCache)
 
 unsigned
 HTTPResponse::getCode() const {
-    return _response_code;
+    return isTimedOut() ? 0u : static_cast<unsigned>(_response_code);
 }
 
 unsigned
@@ -961,8 +983,10 @@ namespace
             if (res == CURLE_ABORTED_BY_CALLBACK || res == CURLE_OPERATION_TIMEDOUT)
             {
                 // CURLE_ABORTED_BY_CALLBACK means ProgressCallback cancelation.
-                HTTPResponse response;
-                response.setCanceled(true);
+                curl_slist_free_all(headers);
+                HTTPResponse response = res == CURLE_OPERATION_TIMEDOUT ? HTTPResponse::timeout() : HTTPResponse();
+                response.setCanceled(res == CURLE_ABORTED_BY_CALLBACK);
+                response.setDuration(OE_STOP_TIMER(get_duration));
                 response.setMessage(std::string(curl_easy_strerror(res)));
                 return response;
             }
@@ -997,7 +1021,7 @@ namespace
                     response_code = s_simResponseCode;
             }
 
-            HTTPResponse response( response_code );
+            HTTPResponse response(res == CURLE_OK ? response_code : 0L);
 
 
 
@@ -1175,25 +1199,23 @@ CURLHTTPImplementationFactory::create() const
 #ifdef OSGEARTH_USE_WININET_FOR_HTTP
 namespace
 {
-    std::string GetLastErrorAsString()
+    // Capture the failing WinInet operation before handle cleanup changes the thread's last error.
+    HTTPResponse winInetFailure(DWORD error, const char* operation)
     {
-        //Get the error message, if any.
-        DWORD errorMessageID = ::GetLastError();
-        if(errorMessageID == 0)
-            return std::string("Error Code 0"); //No error message has been recorded
-
-        LPSTR messageBuffer = 0L;
-        size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&messageBuffer, 0, NULL);
-
-        std::string message(messageBuffer, size);
-
-        //Free the buffer.
-        LocalFree(messageBuffer);
-
-        message = Stringify() << "[Code " << errorMessageID << "] " << message;
-
-        return message;
+        HTTPResponse response = error == ERROR_INTERNET_TIMEOUT ? HTTPResponse::timeout() : HTTPResponse();
+        response.setCanceled(error == ERROR_INTERNET_OPERATION_CANCELLED);
+        LPSTR buffer = nullptr;
+        DWORD size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+            FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, error, 0, reinterpret_cast<LPSTR>(&buffer), 0, nullptr);
+        std::string detail = std::string(operation) + " (WinInet " + std::to_string(error) + ")";
+        if (buffer)
+        {
+            detail += ": " + Strings::trim(std::string(buffer, size));
+            LocalFree(buffer);
+        }
+        response.setMessage(detail);
+        OE_WARN << LC << detail << std::endl;
+        return response;
     }
 
     class WinInetImplementation : public HTTPClient::Implementation
@@ -1240,8 +1262,8 @@ namespace
 
             if( !hInternet )
             {
-                OE_WARN << LC << "InternetOpen failed: " << GetLastErrorAsString() << std::endl;
-                return HTTPResponse(0);
+                auto failure = winInetFailure(GetLastError(), "InternetOpen");
+                return failure;
             }
 
             // clears any session cookies..?
@@ -1259,9 +1281,9 @@ namespace
 
             if ( !InternetCrackUrl(url.c_str(), 0, 0L, &urlcomp) )
             {
-                OE_WARN << LC << "InternetCrackUrl failed for " << url << ": " << GetLastErrorAsString() << std::endl;
+                auto failure = winInetFailure(GetLastError(), "InternetCrackUrl");
                 InternetCloseHandle( hInternet );
-                return HTTPResponse(0);
+                return failure;
             }
 
             WORD port =
@@ -1305,9 +1327,9 @@ namespace
 
             if ( !hConnection )
             {
-                OE_WARN << LC << "InternetConnect failed for " << url << ": " << GetLastErrorAsString() << std::endl;
+                auto failure = winInetFailure(GetLastError(), "InternetConnect");
                 InternetCloseHandle( hInternet );
-                return HTTPResponse(0);
+                return failure;
             }
 
             // Enable automatic HTTP decompression of known types.
@@ -1326,10 +1348,10 @@ namespace
 
             if ( !hRequest )
             {
-                OE_WARN << LC << "HttpOpenRequest failed for " << url << ": " << GetLastErrorAsString() << std::endl;
+                auto failure = winInetFailure(GetLastError(), "HttpOpenRequest");
                 InternetCloseHandle( hConnection );
                 InternetCloseHandle( hInternet );
-                return HTTPResponse(0);
+                return failure;
             }
 
             const char* headers = "Accept-Encoding: gzip, deflate";
@@ -1352,21 +1374,21 @@ namespace
 
                     if ( dialogResult != ERROR_SUCCESS )
                     {
-                        OE_WARN << LC << "InternetErrorDlg failed to produce client cert " << url << ": " << GetLastErrorAsString() << std::endl;
+                        auto failure = winInetFailure(dialogResult, "InternetErrorDlg");
                         InternetCloseHandle( hRequest );
                         InternetCloseHandle( hConnection );
                         InternetCloseHandle( hInternet );
-                        return HTTPResponse(0);
+                        return failure;
                     }
                 }
 
                 else
                 {
-                    OE_WARN << LC << "HttpSendRequest failed to open " << url << ": " << GetLastErrorAsString() << std::endl;
+                    auto failure = winInetFailure(errorNum, "HttpSendRequest");
                     InternetCloseHandle( hRequest );
                     InternetCloseHandle( hConnection );
                     InternetCloseHandle( hInternet );
-                    return HTTPResponse(0);
+                    return failure;
                 }
             }
 
@@ -1401,12 +1423,16 @@ namespace
                 osg::ref_ptr<HTTPResponse::Part> part = new HTTPResponse::Part();
 
                 DWORD numBytesRead = 0;
-                while( InternetReadFile(hRequest, buffer, 4096, &numBytesRead) && numBytesRead )
+                BOOL readOK;
+                while ((readOK = InternetReadFile(hRequest, buffer, sizeof(buffer), &numBytesRead)) && numBytesRead)
                 {
                     part->_stream << std::string(buffer, numBytesRead);
                 }
 
-                response.getParts().push_back( part.get() );
+                if (readOK)
+                    response.getParts().push_back(part.get());
+                else
+                    response = winInetFailure(GetLastError(), "InternetReadFile");
             }
 
             InternetCloseHandle( hRequest );
@@ -1895,6 +1921,7 @@ HTTPClient::doGet(const HTTPRequest&    request,
             }
             merged = withReceivedTime(merged, receivedAt);
             response.setHeadersFromConfig(merged);
+            response.setDuration(remoteResponse.getDuration());
 
             if (bin)
             {
@@ -1938,6 +1965,10 @@ HTTPClient::doGet(const HTTPRequest&    request,
         {
             OE_PROFILING_ZONE_TEXT("cancelled");
         }        
+    }
+    else if (!gotFromCache && cachePolicy->isCacheOnly())
+    {
+        response.setMessage("Resource is missing from the cache and cache-only mode is enabled");
     }
     return response;
 }
@@ -2088,13 +2119,7 @@ HTTPClient::doReadImage(const HTTPRequest&    request,
     }
     else
     {
-        result = ReadResult(
-            response.isCanceled() ? ReadResult::RESULT_CANCELED :
-            response.getCode() == HTTPResponse::NOT_FOUND ? ReadResult::RESULT_NOT_FOUND :
-            response.getCode() == HTTPResponse::NOT_MODIFIED ? ReadResult::RESULT_NOT_MODIFIED :
-            response.getCode() == HTTPResponse::FORBIDDEN ? ReadResult::RESULT_UNAUTHORIZED :
-            response.getCodeCategory() == HTTPResponse::CATEGORY_SERVER_ERROR ? ReadResult::RESULT_SERVER_ERROR :
-            ReadResult::RESULT_UNKNOWN_ERROR);
+        result = ReadResult(readErrorCode(response));
 
         // for request errors, return an error result with the part data intact
         // so the user can parse it as needed. We only do this for readString.
@@ -2197,12 +2222,7 @@ HTTPClient::doReadNode(const HTTPRequest&    request,
     }
     else
     {
-        result = ReadResult(
-            response.isCanceled() ? ReadResult::RESULT_CANCELED :
-            response.getCode() == HTTPResponse::NOT_FOUND ? ReadResult::RESULT_NOT_FOUND :
-            response.getCode() == HTTPResponse::NOT_MODIFIED ? ReadResult::RESULT_NOT_MODIFIED :
-            response.getCodeCategory() == HTTPResponse::CATEGORY_SERVER_ERROR ? ReadResult::RESULT_SERVER_ERROR :
-            ReadResult::RESULT_UNKNOWN_ERROR);
+        result = ReadResult(readErrorCode(response));
 
         // for request errors, return an error result with the part data intact
         // so the user can parse it as needed. We only do this for readString.
@@ -2303,12 +2323,7 @@ HTTPClient::doReadObject(const HTTPRequest&    request,
     }
     else
     {
-        result = ReadResult(
-            response.isCanceled() ? ReadResult::RESULT_CANCELED :
-            response.getCode() == HTTPResponse::NOT_FOUND ? ReadResult::RESULT_NOT_FOUND :
-            response.getCode() == HTTPResponse::NOT_MODIFIED ? ReadResult::RESULT_NOT_MODIFIED :
-            response.getCodeCategory() == HTTPResponse::CATEGORY_SERVER_ERROR ? ReadResult::RESULT_SERVER_ERROR :
-            ReadResult::RESULT_UNKNOWN_ERROR);
+        result = ReadResult(readErrorCode(response));
 
         // for request errors, return an error result with the part data intact
         // so the user can parse it as needed. We only do this for readString.
@@ -2373,12 +2388,7 @@ HTTPClient::doReadString(const HTTPRequest&    request,
     }
     else
     {
-        result = ReadResult(
-            response.isCanceled() ? ReadResult::RESULT_CANCELED :
-            response.getCode() == HTTPResponse::NOT_FOUND ? ReadResult::RESULT_NOT_FOUND :
-            response.getCode() == HTTPResponse::NOT_MODIFIED ? ReadResult::RESULT_NOT_MODIFIED :
-            response.getCodeCategory() == HTTPResponse::CATEGORY_SERVER_ERROR ? ReadResult::RESULT_SERVER_ERROR :
-            ReadResult::RESULT_UNKNOWN_ERROR);
+        result = ReadResult(readErrorCode(response));
         
         // for request errors, return an error result with the part data intact
         // so the user can parse it as needed. We only do this for readString.

@@ -1259,7 +1259,8 @@ TMSImageLayer::createImageImplementation(const TileKey& key, ProgressCallback* p
     if (r.succeeded())
         return GeoImage(r.releaseImage(), key.getExtent());
     else
-        return GeoImage(Status(r.errorDetail()));
+        return GeoImage(Status(r.errorDetail().empty() ? r.getResultCodeString() :
+            r.getResultCodeString() + ": " + r.errorDetail()));
 }
 
 Status
@@ -1486,7 +1487,7 @@ TMSElevationLayer::createHeightFieldImplementation(const TileKey& key, ProgressC
             return GeoHeightField(hf, key.getExtent());
         }
 
-        return GeoHeightField::INVALID;
+        return GeoHeightField(geoImage.getStatus());
     }
 }
 

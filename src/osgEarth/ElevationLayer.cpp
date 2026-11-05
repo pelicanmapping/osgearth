@@ -504,10 +504,10 @@ ElevationLayer::createHeightFieldInKeyProfile(const TileKey& key, ProgressCallba
                 applyVerticalDatumTransformation = false;
             }
 
-            // Check for cancelation before writing to a cache
+            // A retry also cancels the callback. Preserve its source error when no data was produced.
             if (progress && progress->isCanceled())
             {
-                return GeoHeightField::INVALID;
+                return result.valid() ? GeoHeightField::INVALID : result;
             }
 
             // The const_cast is safe here because we just created the
@@ -564,7 +564,7 @@ ElevationLayer::createHeightFieldInKeyProfile(const TileKey& key, ProgressCallba
             // No luck on any path:
             if ( !hf.valid() )
             {
-                return GeoHeightField::INVALID;
+                return result.valid() ? GeoHeightField::INVALID : result;
             }
         }
 

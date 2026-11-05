@@ -262,13 +262,18 @@ URI::mergeConfig(const Config& conf)
 
 namespace
 {
-    // convert an osgDB::ReaderWriter::ReadResult to an osgEarth::ReadResult
-    ReadResult toReadResult( osgDB::ReaderWriter::ReadResult& rr )
+    // Keep decoder and unsupported-format errors distinct from genuinely missing files.
+    ReadResult readError(const osgDB::ReaderWriter::ReadResult& rr)
     {
-        if ( rr.validObject() )
-            return ReadResult( rr.getObject() );
-        else
-            return ReadResult( ReadResult::RESULT_NOT_FOUND );
+        using OSGResult = osgDB::ReaderWriter::ReadResult;
+        auto code = ReadResult::RESULT_READER_ERROR;
+        if (rr.status() == OSGResult::FILE_NOT_FOUND)
+            code = ReadResult::RESULT_NOT_FOUND;
+        else if (rr.status() == OSGResult::FILE_NOT_HANDLED || rr.status() == OSGResult::NOT_IMPLEMENTED)
+            code = ReadResult::RESULT_NO_READER;
+        ReadResult error(code);
+        error.setErrorDetail(rr.message().empty() ? rr.statusMessage() : rr.message());
+        return error;
     }
 
     // Utility to redirect a local file read if it has an archive name in the URI
@@ -290,7 +295,7 @@ namespace
                     archiveName, osgDB::ReaderWriter::READ, 4096, opt );
 
                 if (!result.validArchive())
-                    return ReadResult(); // error
+                    return readError(result);
 
                 osgDB::Archive* archive = result.getArchive();
 
@@ -308,7 +313,7 @@ namespace
                 }
                 else
                 {
-                    return ReadResult();
+                    return readError(rr);
                 }
             }
         }
@@ -419,7 +424,7 @@ namespace
         ReadResult fromFile( const std::string& uri, const osgDB::Options* opt ) {
             osgDB::ReaderWriter::ReadResult osgRR = osgDB::Registry::instance()->readObject(uri, opt);
             if (osgRR.validObject()) return ReadResult(osgRR.takeObject());
-            else return ReadResult(osgRR.message());
+            else return readError(osgRR);
         }
     };
 
@@ -440,7 +445,7 @@ namespace
         ReadResult fromFile( const std::string& uri, const osgDB::Options* opt ) {
             osgDB::ReaderWriter::ReadResult osgRR = osgDB::Registry::instance()->readNode(uri, opt);
             if (osgRR.validNode()) return ReadResult(osgRR.takeNode());
-            else return ReadResult(osgRR.message());
+            else return readError(osgRR);
         }
         ReadResult postProcess(ReadResult& r, const osgDB::Options* opt) {
 #ifdef SUPPORT_MAX_TEXTURE_SIZE
@@ -486,7 +491,7 @@ namespace
                 ReadResult rr(osgRR.takeImage());
                 return postProcess(rr, opt);
             }
-            else return ReadResult(osgRR.message());
+            else return readError(osgRR);
         }
         ReadResult postProcess(ReadResult& r, const osgDB::Options* opt) const
         {
@@ -549,6 +554,9 @@ namespace
         PERFORMANCEAPI_INSTRUMENT_FUNCTION();
         PERFORMANCEAPI_INSTRUMENT_DATA("url", inputURI.full().c_str());
 #endif
+        if (progress && progress->isCanceled())
+            return ReadResult::RESULT_CANCELED;
+
         ScopedGate<std::string> gatelock(uri_gate, inputURI.full());
 
         //osg::Timer_t startTime = osg::Timer::instance()->tick();
@@ -663,13 +671,6 @@ namespace
                             {
                                 result = reader.fromHTTP(uri, remoteOptions.get(), progress, result.lastModifiedTime());
                             }
-
-                            // Check for cancellation before a cache write
-                            if (progress && progress->isCanceled())
-                            {
-                                NetworkMonitor::end(handle, "Canceled");
-                                return 0L;
-                            }
                         }
                     }
                 }
@@ -677,8 +678,13 @@ namespace
                 // Check for cancelation before a potential cache write
                 if (progress && progress->isCanceled())
                 {
-                    NetworkMonitor::end(handle, "Canceled");
-                    return 0L;
+                    // A recoverable HTTP failure can cancel the callback to request a retry.
+                    // Retain that failure; discard a successful payload when the caller canceled the work.
+                    if (result.succeeded())
+                        result = ReadResult(ReadResult::RESULT_CANCELED);
+                    auto label = result.code() == ReadResult::RESULT_CANCELED ? "Canceled" : result.getResultCodeString();
+                    NetworkMonitor::end(handle, label, result.errorDetail());
+                    return result;
                 }
 
                 if (result.getObject() && !gotResultFromCallback)

@@ -2319,8 +2319,9 @@ GeoHeightField::init()
         }
     }
 
-    else if (!_heightField.valid())
+    else if (_status.isOK())
     {
+        // A caller supplying an error already knows why the heightfield is missing.
         _status.set(Status::GeneralError, "invalid heightfield");
     }
 }

@@ -114,6 +114,12 @@ namespace osgEarth { namespace Util
         /** Gets the HTTP response code (Code) in this response */
         unsigned getCode() const;
 
+        //! Construct a transport timeout without inventing an HTTP status code.
+        static HTTPResponse timeout() { return HTTPResponse(TRANSPORT_TIMEOUT); }
+
+        //! True when the transport deadline elapsed before a complete response arrived.
+        bool isTimedOut() const { return _response_code == TRANSPORT_TIMEOUT; }
+
         /** Gets the HTTP response code category for this response */
         unsigned getCodeCategory() const;
 
@@ -170,6 +176,7 @@ namespace osgEarth { namespace Util
         Config getHeadersAsConfig() const;
 
     private:
+        static constexpr long TRANSPORT_TIMEOUT = -1;
         Parts       _parts;
         long        _response_code;
         std::string _mimeType;

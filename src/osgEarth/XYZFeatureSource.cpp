@@ -3,6 +3,7 @@
  * MIT License
  */
 #include <osgEarth/XYZFeatureSource>
+#include <osgEarth/XYZ>
 #include <osgEarth/OgrUtils>
 #include <osgEarth/FeatureCursor>
 #include <osgEarth/Filter>
@@ -88,6 +89,7 @@ XYZFeatureSource::openImplementation()
 
     // set up the URL template
     _template = options().url()->full();
+    _rotateChoices.clear();
     _rotateStart = _template.find('[');
     _rotateEnd = _template.find(']');
     if (_rotateStart != std::string::npos && _rotateEnd != std::string::npos && _rotateEnd - _rotateStart > 1)
@@ -409,23 +411,7 @@ XYZFeatureSource::createURL(const Query& query) const
         replaceIn(location, "{-y}", Stringify() << inverted_tileY);
         replaceIn(location, "{z}", Stringify() << level);
 
-        std::string cacheKey;
-
-        if (!_rotateChoices.empty())
-        {
-            cacheKey = location;
-            unsigned index = (++_rotate_iter) % _rotateChoices.size();
-            replaceIn(location, _rotateString, Stringify() << _rotateChoices[index]);
-        }
-
-
-        URI uri(location, options().url()->context());
-        if (!cacheKey.empty())
-        {
-            uri.setCacheKey(Cache::makeCacheKey(location, "uri"));
-        }
-
-        return uri;
+        return XYZ::makeTileURI(location, options().url()->context(), _rotateString, _rotateChoices, _rotate_iter);
     }
     return URI();
 }

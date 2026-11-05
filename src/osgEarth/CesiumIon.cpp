@@ -184,7 +184,7 @@ CesiumIonImageLayer::openImplementation()
         if (_imageLayer)
         {
             _imageLayer->setName(getName());
-            status = _imageLayer->open();
+            status = _imageLayer->open(getReadOptions());
             if (status.isError())
                 return status;
             setProfile(_imageLayer->getProfile());

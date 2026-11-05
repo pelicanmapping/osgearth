@@ -67,7 +67,7 @@ namespace osgEarth
         std::string _rotateChoices;
         std::string _rotateString;
         std::string::size_type _rotateStart, _rotateEnd;
-        mutable std::atomic_int _rotate_iter;
+        mutable std::atomic_int _rotate_iter{ 0 };
         
         bool getFeatures(const std::string& buffer, const TileKey& key, const std::string& mimeType, FeatureList& features) const;
         //! Decodes one FlatGeobuf tile from memory (through GDAL's /vsimem); false if it cannot be read.

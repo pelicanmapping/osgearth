@@ -358,7 +358,8 @@ namespace osgEarth
             std::vector< Layer > _layers;
 
             osg::ref_ptr< ResourceLibrary > _spriteLibrary;
-            static ResourceLibrary* loadSpriteLibrary(const URI& sprite);
+            //! Loads the atlas and index with the same read options as the style.
+            static ResourceLibrary* loadSpriteLibrary(const URI& sprite, const osgDB::Options* options);
         };
     }
 

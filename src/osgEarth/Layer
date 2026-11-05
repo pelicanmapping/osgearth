@@ -479,7 +479,7 @@ namespace osgEarth
         mutable Threading::ReadWriteMutex _inuse_mutex;
 
         //! Resolves inherited and local cache policies, opens this layer's bin, and stores
-        //! the settings in the read options. Disables caching if the bin cannot be opened.
+        //! the settings in the read options. A failed bin preserves an explicit cache-only policy.
         void updateCacheSettings();
 
         //! Prepares the layer for rendering if necessary.  

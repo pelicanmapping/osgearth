@@ -269,11 +269,19 @@ namespace osgEarth { namespace Util
         //! @return true if the key exists, false otherwise.
         inline bool touch(const K& key)
         {
+            return touch(key, [](V&) {});
+        }
+
+        //! Update an existing value and its recency under the LRU lock. The callback must not reenter this cache.
+        template<typename FUNC>
+        bool touch(const K& key, FUNC&& update)
+        {
             if (capacity == 0)
                 return false;
             std::scoped_lock L(mutex);
             auto it = map.find(key);
             if (it != map.end()) {
+                update(it->second->second);
                 if (it->second != std::prev(cache.end()))
                     cache.splice(cache.end(), cache, it->second);
                 return true;

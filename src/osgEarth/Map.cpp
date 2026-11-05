@@ -142,6 +142,11 @@ Map::init()
     // Generate a UID.
     _uid = osgEarth::createUID();
 
+    if (!_readOptions.valid())
+    {
+        _readOptions = new osgDB::Options();
+    }
+
     // Set up the map's profile
     if (options().profile().isSet())
         setProfile(Profile::create(options().profile().get()));
@@ -158,12 +163,6 @@ Map::init()
         OE_INFO << LC
             << "Setting default cache policy from map ("
             << options().cachePolicy()->usageString() << ")" << std::endl;
-    }
-
-    // the map-side dbOptions object holds I/O information for all components.
-    if (!_readOptions.valid())
-    {
-        _readOptions = new osgDB::Options();
     }
 
     if (!options().osgOptionString()->empty())
@@ -274,6 +273,7 @@ Map::setProfile(const Profile* value)
     if (value)
     {
         _profile = value;
+        _readOptions->setPluginStringData("osgEarth.mapProfileSignature", value->getHorizSignature());
 
         // create a "proxy" profile to use when querying elevation layers with a vertical datum
         if (_profile.valid() && _profile->getSRS()->getVerticalDatum() != 0L )

@@ -536,7 +536,8 @@ TileLayer::getCacheBin(const Profile* profile)
             // store it in the cache bin.
             std::string data = meta->getConfig().toJSON(false);
             osg::ref_ptr<StringObject> temp = new StringObject(data);
-            bin->write(metaKey, temp.get(), getReadOptions());
+            if (cacheSettings->cachePolicy()->isCacheWriteable())
+                bin->write(metaKey, temp.get(), getReadOptions());
 
             bin->setMetadata(meta.get());
         }

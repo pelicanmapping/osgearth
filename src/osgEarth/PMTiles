@@ -25,9 +25,13 @@ namespace osgEarth {
         };
 
 
+        class RasterArchive;
+
         class ChunkedReader
         {
         public:
+            //! Destroy the file or S3 reader owned by the archive driver.
+            virtual ~ChunkedReader() = default;
             virtual bool read(uint64_t offset, uint32_t length, std::string& result) const = 0;
         };
 
@@ -107,7 +111,7 @@ namespace osgEarth
         virtual ~PMTilesImageLayer() {}
 
     private:
-        mutable PMTiles::Driver _driver;
+        std::shared_ptr<PMTiles::RasterArchive> _archive;
     };
 
     class OSGEARTH_EXPORT PMTilesElevationLayer : public ElevationLayer
@@ -137,7 +141,7 @@ namespace osgEarth
         virtual ~PMTilesElevationLayer() {}
 
     private:
-        mutable PMTiles::Driver _driver;
+        std::shared_ptr<PMTiles::RasterArchive> _archive;
     };
 
     class OSGEARTH_EXPORT PMTilesFeatureSource : public TiledFeatureSource

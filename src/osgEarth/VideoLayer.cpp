@@ -51,7 +51,7 @@ VideoLayer::openImplementation()
         return Status(Status::ConfigurationError, "Missing required url");
     }
 
-    osg::ref_ptr< osg::Image > image = options().url()->readImage().getImage();
+    osg::ref_ptr< osg::Image > image = options().url()->readImage(getReadOptions()).getImage();
     if (image.valid())
     {
         osg::ImageStream* is = dynamic_cast<osg::ImageStream*>(image.get());

@@ -423,13 +423,15 @@ ElevationLayer::createHeightFieldInKeyProfile(const TileKey& key, ProgressCallba
 
     // Try the L2 memory cache first:
     bool fromMemCache = false;
+    optional<TimeStamp> sourceTime;
     if ( _memCache.valid() )
     {
         memCacheKey = std::to_string(getRevision()) + cacheKey;
 
         CacheBin* bin = _memCache->getOrCreateDefaultBin();
         ReadResult cacheResult = bin->readObject(memCacheKey, 0L);
-        if ( cacheResult.succeeded() )
+        auto written = cacheResult.metadata().value("source_time", cacheResult.lastModifiedTime());
+        if (cacheResult.succeeded() && !policy.isExpired(written))
         {
             result = GeoHeightField(
                 static_cast<osg::HeightField*>(cacheResult.releaseObject()),
@@ -452,6 +454,7 @@ ElevationLayer::createHeightFieldInKeyProfile(const TileKey& key, ProgressCallba
         // Now attempt to read from the cache. Since the cached data is stored in the
         // map profile, we can try this first.
         bool fromCache = false;
+        TimeStamp cachedTime = 0;
 
         osg::ref_ptr< osg::HeightField > cachedHF;
 
@@ -460,7 +463,8 @@ ElevationLayer::createHeightFieldInKeyProfile(const TileKey& key, ProgressCallba
             ReadResult r = cacheBin->readObject(cacheKey, nullptr);
             if ( r.succeeded() )
             {
-                bool expired = policy.isExpired(r.lastModifiedTime());
+                cachedTime = r.lastModifiedTime();
+                bool expired = policy.isExpired(cachedTime);
                 cachedHF = r.get<osg::HeightField>();
                 if ( cachedHF && validateHeightField(cachedHF.get()) )
                 {
@@ -571,6 +575,8 @@ ElevationLayer::createHeightFieldInKeyProfile(const TileKey& key, ProgressCallba
         if ( hf.valid() )
         {
             result = GeoHeightField( hf.get(), key.getExtent() );
+            if (hf == cachedHF && _memCache.valid())
+                sourceTime = cachedTime;
         }
     }
 
@@ -584,7 +590,9 @@ ElevationLayer::createHeightFieldInKeyProfile(const TileKey& key, ProgressCallba
     if ( result.valid() && !fromMemCache && _memCache.valid() )
     {
         CacheBin* bin = _memCache->getOrCreateDefaultBin();
-        bin->write(memCacheKey, result.getHeightField(), 0L);
+        Config metadata;
+        metadata.set("source_time", sourceTime);
+        bin->write(memCacheKey, result.getHeightField(), metadata, nullptr);
     }
 
     return result;

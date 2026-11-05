@@ -168,8 +168,10 @@ URI::URI()
 URI::URI(const URI& rhs) :
 _baseURI(rhs._baseURI),
 _fullURI(rhs._fullURI),
+_cacheKey(rhs._cacheKey),
+_cacheMirrors(rhs._cacheMirrors),
 _context(rhs._context),
-_cacheKey(rhs._cacheKey)
+_optionString(rhs._optionString)
 {
     //nop
 }
@@ -413,7 +415,7 @@ namespace
         ReadResult fromCallback( URIReadCallback* cb, const std::string& uri, const osgDB::Options* opt ) { return cb->readObject(uri, opt); }
         ReadResult fromHTTP( const URI& uri, const osgDB::Options* opt, ProgressCallback* p, TimeStamp lastModified )
         {
-            HTTPRequest req(uri.full());
+            HTTPRequest req(uri.full(), uri.cacheKey(), uri.cacheMirrors());
             req.getHeaders() = uri.context().getHeaders();
             if (lastModified > 0)
             {
@@ -434,7 +436,7 @@ namespace
         ReadResult fromCallback( URIReadCallback* cb, const std::string& uri, const osgDB::Options* opt ) { return cb->readNode(uri, opt); }
         ReadResult fromHTTP(const URI& uri, const osgDB::Options* opt, ProgressCallback* p, TimeStamp lastModified )
         {
-            HTTPRequest req(uri.full());
+            HTTPRequest req(uri.full(), uri.cacheKey(), uri.cacheMirrors());
             req.getHeaders() = uri.context().getHeaders();
             if (lastModified > 0)
             {
@@ -472,7 +474,7 @@ namespace
             return postProcess(r, opt);
         }
         ReadResult fromHTTP(const URI& uri, const osgDB::Options* opt, ProgressCallback* p, TimeStamp lastModified ) {
-            HTTPRequest req(uri.full());
+            HTTPRequest req(uri.full(), uri.cacheKey(), uri.cacheMirrors());
             req.getHeaders() = uri.context().getHeaders();
 
             if (lastModified > 0)
@@ -527,7 +529,7 @@ namespace
         }
         ReadResult fromHTTP(const URI& uri, const osgDB::Options* opt, ProgressCallback* p, TimeStamp lastModified )
         {
-            HTTPRequest req(uri.full());
+            HTTPRequest req(uri.full(), uri.cacheKey(), uri.cacheMirrors());
             req.getHeaders() = uri.context().getHeaders();
             if (lastModified > 0)
             {
@@ -601,6 +603,13 @@ namespace
 
             // check if there's a URI cache in the options.
             URIResultCache* memCache = URIResultCache::from( localOptions.get() );
+            if (memCache && uri.isRemote())
+            {
+                // Decoded objects do not retain all the freshness information of the HTTP response.
+                const auto* settings = CacheSettings::get(localOptions.get());
+                if (settings && (settings->cachePolicy()->maxAge().isSet() || settings->cachePolicy()->minTime().isSet()))
+                    memCache = nullptr;
+            }
             if ( memCache )
             {
                 auto cached = memCache->get(uri);

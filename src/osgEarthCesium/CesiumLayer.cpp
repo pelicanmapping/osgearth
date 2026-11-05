@@ -71,8 +71,6 @@ CesiumNative3DTilesLayer::openImplementation()
     if (parentStatus.isError())
         return parentStatus;
 
-    osg::ref_ptr< osgDB::Options > readOptions = osgEarth::Registry::instance()->cloneOrCreateOptions(this->getReadOptions());
-
     std::string token = options().token().get();
     if (token.empty())
     {
@@ -87,7 +85,8 @@ CesiumNative3DTilesLayer::openImplementation()
         {
             overlays.push_back(*_options->rasterOverlay());
         }
-        _tilesetNode = new CesiumTilesetNode(_options->url()->full(), _options->server()->full(), token, *_options->maximumScreenSpaceError(), overlays);
+        _tilesetNode = new CesiumTilesetNode(_options->url()->full(), _options->server()->full(), token,
+            *_options->maximumScreenSpaceError(), overlays, getReadOptions());
     }
     else if (_options->assetId().isSet())
     {
@@ -96,7 +95,8 @@ CesiumNative3DTilesLayer::openImplementation()
         {
             overlays.push_back(*_options->rasterOverlay());
         }
-        _tilesetNode = new CesiumTilesetNode(*_options->assetId(), _options->server()->full(), token, *_options->maximumScreenSpaceError(), overlays);
+        _tilesetNode = new CesiumTilesetNode(*_options->assetId(), _options->server()->full(), token,
+            *_options->maximumScreenSpaceError(), overlays, getReadOptions());
     }
 
     if (!_tilesetNode.valid())

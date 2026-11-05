@@ -456,7 +456,7 @@ ImageLayer::createImageInKeyProfile(const TileKey& key, ProgressCallback* progre
         memCacheKey = Stringify() << std::to_string(getRevision()) << "/" << key.str() << "/" << key.getProfile()->getHorizSignature();
         CacheBin* bin = _memCache->getOrCreateDefaultBin();
         ReadResult result = bin->readObject(memCacheKey, nullptr);
-        if (result.succeeded())
+        if (result.succeeded() && (policy.isCacheOnly() || !policy.isExpired(result.lastModifiedTime())))
         {
             return GeoImage(static_cast<osg::Image*>(result.releaseObject()), key.getExtent());
         }

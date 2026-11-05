@@ -4,6 +4,7 @@
  */
 #include <osgEarth/HTTPClient>
 #include <osgEarth/Progress>
+#include <osgEarth/Registry>
 #include <osgEarth/Metrics>
 #include <osgEarth/Version>
 #include <osgEarth/ImageUtils>
@@ -355,6 +356,27 @@ namespace osgEarth
 
     // Splits a directive list (Cache-Control, Pragma) at commas outside quoted strings, honoring backslash
     // escapes inside them (RFC 9110 5.6.4), so a quoted value like "a\",b" can't swallow the next directive.
+    // Separate representations selected by request headers, including credentials and byte ranges.
+    // Conditional validators describe a cached copy and do not identify a different representation.
+    std::string requestVariant(const Headers& headers)
+    {
+        std::vector<std::pair<std::string, std::string>> fields;
+        for (const auto& header : headers)
+        {
+            auto name = toLower(header.first);
+            if (name != "if-modified-since" && name != "if-none-match")
+                fields.emplace_back(std::move(name), header.second);
+        }
+        std::sort(fields.begin(), fields.end());
+        std::string variant;
+        for (const auto& field : fields)
+        {
+            variant += std::to_string(field.first.size()) + ":" + field.first;
+            variant += std::to_string(field.second.size()) + ":" + field.second;
+        }
+        return variant;
+    }
+
     // Returns trimmed, non-empty directives with quotes left in place.
     std::vector<std::string> splitDirectives(const std::string& value)
     {
@@ -499,10 +521,20 @@ HTTPRequest::HTTPRequest( const std::string& url )
     osgEarth::replaceIn(_url, " ", "%20");
 }
 
+HTTPRequest::HTTPRequest(const std::string& url, const std::string& cacheKey,
+    std::shared_ptr<const std::vector<std::string>> mirrors) :
+    HTTPRequest(url)
+{
+    _cacheKey = cacheKey;
+    _cacheMirrors = std::move(mirrors);
+}
+
 HTTPRequest::HTTPRequest( const HTTPRequest& rhs ) :
 _parameters( rhs._parameters ),
 _headers(rhs._headers),
-_url( rhs._url )
+_url( rhs._url ),
+_cacheKey(rhs._cacheKey),
+_cacheMirrors(rhs._cacheMirrors)
 {
     //nop
 }
@@ -1806,6 +1838,8 @@ HTTPClient::doGet(const HTTPRequest&    request,
     initialize();
 
     URI uri(request.getURL());
+    const auto& resourceKey = request.getCacheKey().empty() || !request.getParameters().empty() ?
+        uri.cacheKey() : request.getCacheKey();
 
     // URL caching
     CacheBin* bin = nullptr;
@@ -1821,7 +1855,26 @@ HTTPClient::doGet(const HTTPRequest&    request,
             //bin = cacheSettings->getCacheBin();
         }
     }
+    // Standalone URI reads have no map options. Honor the configured registry cache and offline policy.
+    else
+    {
+        auto* registry = Registry::instance();
+        registry->resolveCachePolicy(cachePolicy);
+        if (cachePolicy->isCacheEnabled())
+        {
+            auto* cache = registry->getDefaultCache();
+            if (cache)
+                bin = cache->getOrCreateDefaultBin();
+        }
+    }
 
+    const std::string variant = bin ? requestVariant(request.getHeaders()) : std::string();
+    // Old URL-only entries cannot establish which credentials or representation produced them.
+    const auto cacheKey = [&](const std::string& resource)
+    {
+        return variant.empty() ? resource : Cache::makeCacheKey(resource + "\n" + variant, "uri");
+    };
+    const std::string key = cacheKey(resourceKey);
     bool expired = false;
 
     HTTPResponse response;
@@ -1835,24 +1888,58 @@ HTTPClient::doGet(const HTTPRequest&    request,
     std::string cachedBody;
     Config cachedHeaders;
 
-    //Try to read result from the cache.
+    // Legacy entries can exist under more than one mirror. Prefer any fresh copy to a network refresh.
+    auto getLegacyKeys = [&]()
+    {
+        std::vector<std::string> keys;
+        if (resourceKey != uri.cacheKey())
+        {
+            keys.push_back(cacheKey(uri.cacheKey()));
+            if (request.getCacheMirrors())
+            {
+                for (const auto& mirror : *request.getCacheMirrors())
+                {
+                    URI alternate(HTTPRequest(mirror).getURL());
+                    if (alternate.cacheKey() != uri.cacheKey())
+                        keys.push_back(cacheKey(alternate.cacheKey()));
+                }
+            }
+        }
+        return keys;
+    };
+
     if (bin)
     {
-        ReadResult result = bin->readString(uri.cacheKey(), options);
+        ReadResult result = bin->readString(key, options);
+        const auto now = ::time(nullptr);
+        // Both the server and the layer policy can require a refresh.
+        auto isExpired = [&](const ReadResult& record)
+        {
+            const auto received = getReceivedTime(record.metadata(), record.lastModifiedTime());
+            const auto written = record.lastModifiedTime() > 0 ? record.lastModifiedTime() : received;
+            return cachePolicy->isExpired(written) ||
+                isCachedResponseStale(getCacheDirectives(record.metadata()), received, now);
+        };
+
+        if (!result.succeeded())
+        {
+            for (const auto& legacyKey : getLegacyKeys())
+            {
+                auto alternate = bin->readString(legacyKey, options);
+                if (alternate.succeeded())
+                {
+                    result = alternate;
+                    if (!isExpired(result))
+                        break;
+                }
+            }
+        }
         if (result.succeeded())
         {
             gotFromCache = true;
             cachedBody = result.getString();
             cachedHeaders = result.metadata();
-
-            // Honor the freshness the server declared when the response was stored (Cache-Control max-age/no-cache,
-            // Expires, Pragma) in addition to the CachePolicy. Responses that declare nothing are governed by the
-            // CachePolicy alone.
-            HTTPCacheDirectives directives = getCacheDirectives(cachedHeaders);
-            TimeStamp receivedAt = getReceivedTime(cachedHeaders, result.lastModifiedTime());
-            expired =
-                isCachedResponseStale(directives, receivedAt, DateTime().asTimeStamp()) ||
-                cachePolicy->isExpired(result.lastModifiedTime());
+            expired = isExpired(result);
 
             // Revalidate with If-Modified-Since only. We deliberately do not send If-None-Match: some servers
             // (e.g. Google's 3D Tiles root) return the same ETag for bodies that embed per-request session tokens,
@@ -1923,16 +2010,18 @@ HTTPClient::doGet(const HTTPRequest&    request,
             response.setHeadersFromConfig(merged);
             response.setDuration(remoteResponse.getDuration());
 
-            if (bin)
+            if (bin && cachePolicy->isCacheWriteable())
             {
                 if (getCacheDirectives(merged).noStore)
                 {
-                    bin->remove(uri.cacheKey());
+                    bin->remove(key);
+                    for (const auto& legacyKey : getLegacyKeys())
+                        bin->remove(legacyKey);
                 }
                 else
                 {
                     osg::ref_ptr<StringObject> stringObject = new StringObject(cachedBody);
-                    bin->write(uri.cacheKey(), stringObject, merged, options);
+                    bin->write(key, stringObject, merged, options);
                 }
             }
         }
@@ -1942,19 +2031,23 @@ HTTPClient::doGet(const HTTPRequest&    request,
 
             if (response.isOK())
             {
-                if (bin != nullptr)
+                if (bin && cachePolicy->isCacheWriteable())
                 {
                     Config headers = response.getHeadersAsConfig();
                     if (getCacheDirectives(headers).noStore)
                     {
                         // The server forbids storing this response; drop any copy stored before it said so.
                         if (gotFromCache)
-                            bin->remove(uri.cacheKey());
+                        {
+                            bin->remove(key);
+                            for (const auto& legacyKey : getLegacyKeys())
+                                bin->remove(legacyKey);
+                        }
                     }
                     else
                     {
                         osg::ref_ptr< StringObject> stringObject = new StringObject(response.getPartAsString(0));
-                        bin->write(uri.cacheKey(), stringObject, withReceivedTime(headers, receivedAt), options);
+                        bin->write(key, stringObject, withReceivedTime(headers, receivedAt), options);
                     }
                 }
             }

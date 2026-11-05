@@ -7,6 +7,7 @@
 
 #include "Export"
 #include <osg/Group>
+#include <osgDB/Options>
 
 namespace osgEarth { namespace Cesium
 {
@@ -17,6 +18,14 @@ namespace osgEarth { namespace Cesium
     public:
         CesiumTilesetNode(unsigned int assetID, const std::string& server = "", const std::string& token = "", float maximumScreenSpaceError = 16.0f, std::vector<int> overlays = std::vector<int>());
         CesiumTilesetNode(const std::string& url, const std::string& server = "", const std::string& token = "", float maximumScreenSpaceError = 16.0f, std::vector<int> overlays = std::vector<int>());
+
+        //! Open an ion tileset using its owning layer's cache and request options.
+        CesiumTilesetNode(unsigned int assetID, const std::string& server, const std::string& token,
+            float maximumScreenSpaceError, std::vector<int> overlays, const osgDB::Options* readOptions);
+
+        //! Open a URL tileset using its owning layer's cache and request options.
+        CesiumTilesetNode(const std::string& url, const std::string& server, const std::string& token,
+            float maximumScreenSpaceError, std::vector<int> overlays, const osgDB::Options* readOptions);
 
         ~CesiumTilesetNode();
 

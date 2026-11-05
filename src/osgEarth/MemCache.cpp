@@ -15,7 +15,12 @@ using namespace osgEarth;
 
 namespace
 {
-    using MemCacheEntry = std::pair<osg::ref_ptr<const osg::Object>, Config>;
+    struct MemCacheEntry
+    {
+        osg::ref_ptr<const osg::Object> object;
+        Config metadata;
+        TimeStamp written;
+    };
     using MemCacheLRU = LRUCache<std::string, MemCacheEntry>;
 
     struct MemCacheBin : public CacheBin
@@ -35,13 +40,14 @@ namespace
 
             if (cached.has_value())
             {
+                const auto& entry = cached.value();
 #ifdef CLONE_DATA
-                return ReadResult( 
-                   osg::clone(rec.value().first.get(), osg::CopyOp::DEEP_COPY_ALL),
-                   rec.value().second );
+                ReadResult result(osg::clone(entry.object.get(), osg::CopyOp::DEEP_COPY_ALL), entry.metadata);
 #else
-                return ReadResult(const_cast<osg::Object*>(cached.value().first.get()), cached.value().second);
+                ReadResult result(const_cast<osg::Object*>(entry.object.get()), entry.metadata);
 #endif
+                result.setLastModifiedTime(entry.written);
+                return result;
             }
             else
             {
@@ -65,9 +71,9 @@ namespace
             {
 #ifdef CLONE_DATA
                 osg::ref_ptr<const osg::Object> cloned = osg::clone(object, osg::CopyOp::DEEP_COPY_ALL);
-                _lru.insert( key, std::make_pair(cloned.get(), meta) );
+                _lru.insert( key, MemCacheEntry{ cloned.get(), meta, ::time(nullptr) } );
 #else
-                _lru.insert( key, std::make_pair(object, meta) );
+                _lru.insert( key, MemCacheEntry{ object, meta, ::time(nullptr) } );
 #endif
                 return true;
             }
@@ -83,13 +89,12 @@ namespace
 
         bool touch(const std::string& key) override
         {
-            // just doing a get will put it at the front of the LRU list
-            return _lru.touch(key);
+            return _lru.touch(key, [](MemCacheEntry& entry) { entry.written = ::time(nullptr); });
         }
 
         RecordStatus getRecordStatus( const std::string& key ) override
         {
-            // ignore minTime; MemCache does not support expiration
+            // Record status only reports existence; callers apply their own freshness policy.
             return _lru.get(key).has_value() ? STATUS_OK : STATUS_NOT_FOUND;
         }
 

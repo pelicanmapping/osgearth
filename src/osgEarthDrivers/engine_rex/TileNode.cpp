@@ -1359,12 +1359,20 @@ TileNode::areSubTilesDormant() const
 }
 
 void
-TileNode::removeSubTiles()
+TileNode::removeSubTiles(osg::NodeList& retired)
 {
+    // Keep ownership across removeChildren and future resets; destruction happens after handoff.
+    retired.insert(retired.end(), _children.begin(), _children.end());
     _childrenReady = false;
     for(int i=0; i<(int)getNumChildren(); ++i)
     {
-        getChild(i)->releaseGLObjects(nullptr);
+        auto* child = getSubTile(i);
+        // Descendants may remain in the registry after an ancestor expires. Disconnect
+        // their graph and weak parent links here, before a worker can destroy the ancestor.
+        child->_parentTile = nullptr;
+        if (child->getNumChildren() != 0)
+            child->removeSubTiles(retired);
+        child->releaseGLObjects(nullptr);
     }
     this->removeChildren(0, this->getNumChildren());
 

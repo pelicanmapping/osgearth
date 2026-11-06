@@ -7,6 +7,7 @@
 
 #include "Common"
 #include "TileNode"
+#include "TileReleaser"
 #include <osgEarth/FrameClock>
 #include <osg/Group>
 
@@ -27,13 +28,17 @@ namespace osgEarth { namespace REX
         //! Set the frame clock to use
         void setFrameClock(const FrameClock* value) { _clock = value; }
 
+        //! Teardown only, with traversal stopped: finish cleanup before engine services are destroyed.
+        void drain() { _releaser.drain(); }
+
     public: // osg::Node
         void traverse(osg::NodeVisitor& nv) override;
 
     protected:
         TerrainOptionsAPI _options;
         TileNodeRegistry* _tiles;
-        std::vector<osg::observer_ptr<TileNode> > _deadpool;
+        std::vector<osg::ref_ptr<TileNode>> _deadpool;
+        TileReleaser _releaser;
         unsigned _frameLastUpdated;
         const FrameClock* _clock;
     };

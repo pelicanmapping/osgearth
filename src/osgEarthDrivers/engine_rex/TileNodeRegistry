@@ -75,13 +75,14 @@ namespace osgEarth { namespace REX
 
         //! Collect dormant tiles. This is called by UnloaderGroup
         //! during update/event to remove dormant scene graphs.
+        //! Output retains ownership so registry removal cannot destroy orphan tiles on the caller.
         void collectDormantTiles(
             osg::NodeVisitor& nv,
             double olderThanTime,       // collect only if tile is older than this time
             unsigned olderThanFrame,    // collect only if tile is older than this frame
             float fartherThanRange,     // collect only if tile is farther away than this distance (meters)
             unsigned maxCount,          // maximum number of tiles to collect
-            std::vector<osg::observer_ptr<TileNode> >& output);   // put dormant tiles here
+            std::vector<osg::ref_ptr<TileNode>>& output);   // put dormant tiles here
 
         //! Update traversal
         void update(osg::NodeVisitor&);

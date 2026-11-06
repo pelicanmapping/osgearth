@@ -123,8 +123,74 @@ this process). Both smoke runs opened the viewer and exited normally.
 - Use the identified resources to evaluate reuse and GPU-completion-aware
   retirement; do not move GL deletion to a worker without a valid shared context
   and correct synchronization.
-- Offload tile CPU destruction from the frame thread, including TileNode, geometry
-  and KdTree teardown. Resource tracing does not implement that offloading.
+- Tile CPU destruction offloading is implemented; verify in the next capture that
+  `Destroy expired tiles` and the associated geometry/KdTree frees run on a worker,
+  with short `Retire expired tiles` scopes on the frame thread.
+
+## Tile CPU destruction offloading
+
+REX retains strong references while collecting expired tiles, including registry-only
+orphans. During update traversal it detaches the expired subtrees, clears their weak
+parent links, and makes the existing null-state GL-release requests. Clearing descendant
+links on update prevents the cleanup worker from modifying graph parent lists or
+invalidating parent pointers still used by registered descendants.
+
+The existing jobs system then releases the retained references on `oe.rex.destroy`.
+There are at most two outstanding batches per unloader; expiry pauses when both slots
+are occupied, without waiting on the frame thread. This bounds queued batches, not
+bytes or total resident tiles: existing per-frame expiry limits still apply, and a
+subtree can contain additional descendants. Engine teardown drains its outstanding
+jobs before destroying engine services. Normal frame traversal never joins the worker.
+
+Superluminal scopes use the existing API integration:
+
+- `Retire expired tiles`: collection, graph detachment and handoff on update.
+- `Destroy expired tiles`: reference release and CPU teardown on a worker.
+
+Actual GL deletion remains with the existing context-aware resource managers. Other
+owners can keep resources alive after the worker drops its references; this does not
+promise that every shared resource's final release occurs on that worker. OSG's global
+deferred DeleteHandler, if enabled by another application/threading mode, is respected
+and can move actual destruction to its own flush. The current single-threaded
+`osgearth_imgui` configuration does not install that handler.
+
+A transient Google Benchmark compared the original synchronous `removeSubTiles` body
+against the new implementation on identical complete four-child TileNode trees. Each
+leaf owned a 65x65 OSG geometry and a built KdTree. Setup and cleanup waiting were outside
+the manual caller-time measurement; the asynchronous measurement also included checks
+that detached nodes had no children or parent links. Results are medians of three runs
+of ten iterations, RelWithDebInfo, resource JSONL tracing disabled:
+
+| Mesh-bearing leaf tiles | Synchronous caller time | Offloaded caller time | Offloaded completion latency |
+| --- | ---: | ---: | ---: |
+| 4 | 0.166 ms | 0.005 ms | 0.192 ms |
+| 64 | 3.134 ms | 0.053 ms | 2.035 ms |
+| 256 | 9.241 ms | 0.193 ms | 8.685 ms |
+
+Completion latency includes waiting for background destruction; it is not worker CPU
+time. These isolated results demonstrate reduced caller blocking, not an application
+FPS guarantee or elimination of allocator contention. The next interactive capture
+must verify the real scene. Keep raw benchmark results alongside the capture
+artifacts when repeating this comparison.
+
+Transient checks verified exact destruction counts, worker versus caller thread,
+update-thread GL-release requests, registry-only orphan expiry, outstanding future
+references, external owners, the two-batch admission limit, and shutdown draining.
+The validation sources were removed from the repository after running.
+
+The final `build.bat` install completed successfully. A viewer smoke run opened and
+closed normally and confirmed that the frame-thread affinity remains `0xFFFFFF`.
+The installed REX plugin contains the two new profiling scopes and no transient
+validation exports.
+
+Existing-suite baseline comparison: temporarily restoring only the pre-change REX
+sources reproduced the same glTF test access violation and the same four ordinary
+failures. With hidden worker tests and the crashing `glTF converts channels and
+factors to shared PBR materials` case excluded, both baseline and final builds had
+172 cases (168 passed, 4 failed) and 5,678 assertions (5,674 passed, 4 failed).
+Failures were in Chonk page state validation, Chonk PBR conversion, glTF default
+materials, and the PBR rendering subprocess. These remain separate existing issues;
+the suite is not wholly passing. The tile-offload benchmark's behavioral checks passed.
 
 ## Validation
 

@@ -233,7 +233,7 @@ TileNodeRegistry::collectDormantTiles(
     unsigned oldestAllowableFrame,
     float farthestAllowableRange,
     unsigned maxTiles,
-    std::vector<osg::observer_ptr<TileNode>>& output)
+    std::vector<osg::ref_ptr<TileNode>>& output)
 {
     std::lock_guard<std::mutex> lock(_mutex);
 

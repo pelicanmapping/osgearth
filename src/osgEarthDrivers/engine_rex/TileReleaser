@@ -1,0 +1,79 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/Threading>
+#include <osgEarth/Metrics>
+#include <osg/Group>
+#ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
+#include <Superluminal/PerformanceAPI.h>
+#endif
+
+namespace osgEarth { namespace REX
+{
+    /** Update-thread handoff for detached tile graphs. The job system must outlive this object.
+     * Holds at most two batches; the unloader postpones expiry while both are outstanding.
+     * External owners can extend a node's life beyond the worker's release.
+     */
+    class TileReleaser
+    {
+    public:
+        //! Create a single cleanup worker using the existing job system, before frame traversal starts.
+        TileReleaser()
+        {
+            _job.name = "Destroy expired tiles";
+            _job.pool = jobs::get_pool("oe.rex.destroy", 1);
+            _job.pool->set_can_steal_work(false);
+            _job.group = jobs::jobgroup::create();
+        }
+
+        //! Drain this unloader's jobs during teardown; never called by the normal expiry traversal.
+        ~TileReleaser()
+        {
+            _job.group->join();
+        }
+
+        //! Teardown only: finish submitted CPU destruction before engine-owned services disappear.
+        void drain()
+        {
+            _job.group->join();
+        }
+
+        //! Update thread only: whether another batch can be accepted without waiting for cleanup.
+        bool available() const
+        {
+            return _job.group->count() < 2;
+        }
+
+        /** Update thread only, after available(): take all references, leaving nodes empty.
+         * Detach graph parents and request GL release before calling; the worker needs no GL context.
+         * Call only while the job system is running. Allocation failures propagate to the caller.
+         */
+        void release(osg::NodeList& nodes)
+        {
+            if (nodes.empty())
+                return;
+
+            // All callable copies share one container. Clear it inside the job so the last
+            // dispatch-side callable copy cannot accidentally destroy tiles on the frame thread.
+            auto batch = std::make_shared<osg::NodeList>();
+            batch->swap(nodes);
+            jobs::dispatch([batch]()
+            {
+                OE_PROFILING_ZONE_NAMED("Destroy expired tiles");
+#ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
+                PERFORMANCEAPI_INSTRUMENT("Destroy expired tiles");
+#endif
+                batch->clear();
+            }, _job);
+        }
+
+        TileReleaser(const TileReleaser&) = delete;
+        TileReleaser& operator=(const TileReleaser&) = delete;
+
+    private:
+        jobs::context _job;
+    };
+} }

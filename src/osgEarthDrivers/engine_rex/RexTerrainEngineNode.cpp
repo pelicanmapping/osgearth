@@ -155,6 +155,9 @@ RexTerrainEngineNode::RexTerrainEngineNode() :
 
 RexTerrainEngineNode::~RexTerrainEngineNode()
 {
+    if (_unloader.valid())
+        _unloader->drain();
+
     if (_ppUID > 0)
         Registry::instance()->getShaderFactory()->removePreProcessorCallback(_ppUID);
 }

@@ -77,8 +77,9 @@ namespace osgEarth { namespace REX
         /** Whether all 3 quadtree siblings of this tile are dormant */
         bool areSiblingsDormant() const;
 
-        /** Removed any sub tiles from the scene graph. Please call from a safe thread only (update) */
-        void removeSubTiles();
+        /** Update thread only: detach subtiles and request GL release, retaining them in retired.
+         * The caller must hand off retired after dropping its other temporary tile references. */
+        void removeSubTiles(osg::NodeList& retired);
 
         /** Notifies this tile that another tile has come into existence. */
         void notifyOfArrival(TileNode* that);

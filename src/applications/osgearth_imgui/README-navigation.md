@@ -17,7 +17,7 @@ Keyboard and mouse controls also work without a gamepad, including on other plat
 | Map | Pan focal point | Orbit focal point | Zoom out / in |
 | Fly | Forward/back and strafe | Look around | Descend / ascend |
 | Walk | Forward/back and strafe | Look around | Unused |
-| Drive | Steer; forward/back also operates pedals | Look around the cab | Brake then reverse / throttle |
+| Drive | Steer; forward/back also operates pedals | Hold left/right to glance; release to face forward | Brake then reverse / throttle |
 
 LB slows movement to one quarter speed; RB increases it to four times speed.
 A returns to the map home viewpoint, or to the camera position saved when entering
@@ -48,6 +48,13 @@ terrain. Walk and Drive settle onto terrain beneath the current camera, preservi
 heading and starting with a level view. If destination terrain is not loaded,
 they hold position; they resample as terrain arrives. Heights use the map's vertical
 datum and position calculations use double precision, including across the dateline.
+
+Drive uses a gently filtered horizontal look rate, limited to 90 degrees either side of the vehicle.
+Small stick deflections turn the view slowly; larger deflections turn it faster. Releasing horizontal
+look smoothly returns the view to the vehicle heading with a damped spring, including while steering.
+The default Look speed is 60 degrees/second and is adjustable in the Camera panel.
+Left/right arrows and right-mouse dragging also recenter smoothly on release. Vertical pitch retains
+its existing behavior. Walk and Fly are unchanged.
 
 Drive is an arcade in-cab model with acceleration, braking/reverse, coasting and a
 2.7 m wheelbase steering model. Free look does not steer the vehicle. This prototype

@@ -242,7 +242,8 @@ namespace osgEarth
                         "%.1f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
                         navigation->setSpeed(speed / (drive ? 3.6 : 1.0));
                     float lookSpeed = static_cast<float>(osg::RadiansToDegrees(navigation->getLookSpeed()));
-                    if (ImGuiLTable::SliderFloat("Look speed (deg/s)", &lookSpeed, 10.0f, 240.0f, "%.0f", 0))
+                    if (ImGuiLTable::SliderFloat("Look speed (deg/s)",
+                        &lookSpeed, 10.0f, 240.0f, "%.0f", 0))
                         navigation->setLookSpeed(osg::DegreesToRadians(lookSpeed));
                     float height = static_cast<float>(navigation->getEyeHeight());
                     if (ImGuiLTable::SliderFloat(fly ? "Terrain clearance (m)" : "Eye height (m)",
@@ -268,8 +269,10 @@ namespace osgEarth
             ImGui::Separator();
             if (drive)
             {
-                ImGui::TextWrapped("Left stick: steer. RT: throttle. LT: brake, then reverse. Right stick: look around.");
-                ImGui::TextWrapped("Keyboard: W/S throttle/brake/reverse, A/D steer. Right mouse drag or arrows: look.");
+                ImGui::TextWrapped("Left stick: steer. RT: throttle. LT: brake, then reverse.");
+                ImGui::TextWrapped("Right stick: look left/right up to 90 degrees; release to ease back forward. Up/down: pitch.");
+                ImGui::TextWrapped("Keyboard: W/S pedals, A/D steer. Hold arrows or right mouse drag to look.");
+                ImGui::TextWrapped("Release horizontal look to smoothly recenter on the vehicle heading.");
             }
             else
             {

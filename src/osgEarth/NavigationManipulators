@@ -48,7 +48,7 @@ namespace osgEarth
         void levelView() { _pitch = 0.0; _lookYaw = 0.0; }
         /** Supply one normalized controller sample on the event traversal thread. */
         void setGamepadState(const GamepadState& state) { _gamepad = state; }
-        /** Release all inputs and stop motion immediately; does not change the camera pose. */
+        /** Release all inputs and stop motion immediately; Drive also recenters its horizontal look offset. */
         void stop();
         /** Set maximum movement speed in m/s; finite positive values only. Thread-safe. */
         void setSpeed(double value);
@@ -70,6 +70,10 @@ namespace osgEarth
         NavigationManipulator(double speed, double eyeHeight);
         /** Integrate this dedicated movement model for one bounded time step. */
         virtual void step(const GamepadState& input, double dt) = 0;
+        /** Apply normalized stick/key look input for one time step; defaults to angular-rate control. */
+        virtual void applyLookInput(const osg::Vec2d& input, double dt);
+        /** Whether a right-mouse look drag is held; event traversal thread only. */
+        bool isMouseLookActive() const { return _dragging; }
         /** Change heading and pitch; Drive overrides this to look independently of steering. */
         virtual void look(double yaw, double pitch);
         /** Reset model-specific velocity/orientation state after input loss or pose changes. */
@@ -135,7 +139,7 @@ namespace osgEarth
     class OSGEARTH_EXPORT DriveManipulator : public NavigationManipulator
     {
     public:
-        /** Start with a 25 m/s top speed and 1.5 m camera height above terrain. */
+        /** Start with a 25 m/s top speed, 1.5 m eye height, and 60 degree/s look speed. */
         DriveManipulator();
         /** Identify this dedicated camera controller. */
         const char* className() const override { return "DriveManipulator"; }
@@ -148,12 +152,14 @@ namespace osgEarth
     protected:
         /** Integrate throttle, braking, coasting and speed-dependent steering, then follow terrain. */
         void step(const GamepadState&, double dt) override;
-        /** Look around the cab without changing vehicle heading. */
+        /** Ease into horizontal look rates within +/-90 degrees; neutral input smoothly recenters unless dragging. */
+        void applyLookInput(const osg::Vec2d& input, double dt) override;
+        /** Drag the view within +/-90 degrees of vehicle heading, retaining ordinary pitch control. */
         void look(double yaw, double pitch) override;
-        /** Stop the vehicle while preserving the current camera direction. */
+        /** Stop the vehicle and recenter horizontal look without changing vehicle heading or camera pitch. */
         void resetMotion() override;
     private:
-        double _velocity = 0.0;
+        double _velocity = 0.0, _lookYawRate = 0.0;
         std::atomic<double> _displayVelocity{ 0.0 }, _acceleration{ 6.0 };
     };
 

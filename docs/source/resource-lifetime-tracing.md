@@ -112,9 +112,14 @@ this process). Both smoke runs opened the viewer and exited normally.
 
 ## Investigation action list
 
-- **Next: evaluate recycling and reuse, starting with TileDrawable KdTree refitting.**
-  Keep the completed retirement fixes as the baseline. Validate triangle coverage,
-  intersection behavior and reader synchronization before reusing tree storage.
+- **Implemented: TileDrawable KdTree freelist and reusable build storage.**
+  Detached snapshots return through ObjectReleaser; published trees are never rebuilt
+  in place. The vsync-on capture confirmed 95.8% Main-thread reuse. Next, diagnose
+  cache misses and reduce synchronous terrain rebuild bursts. See the benchmark,
+  ownership and capture details below.
+- **Deferred: swap-window disposal scheduling.** Evaluate cooperative disposal
+  chunks during the normal vsync-on swap wait after the recycling capture. Do not
+  suspend a worker holding allocator locks or wait for cleanup on the frame thread.
 - **Deferred: buffer upload/allocation investigation.** Revisit the native OSG
   buffer identity and Chonk compile costs after the recycling work. Preserve the
   capture evidence below; this work remains open but is not the next priority.
@@ -610,3 +615,113 @@ The final build.bat install succeeded after removing the transient sources and
 exports. The installed REX plugin hash matches the final built plugin. The viewer
 smoke test opened and closed successfully; frame-thread affinity remains
 `0xFFFFFF` (all 24 logical CPUs allowed by the process).
+
+
+## REX KdTree recycling (November 6)
+
+GeometryPool now owns a shared, engine-local KdTreePool. TileDrawable leases an
+unused tree, copies the current mesh into its retained vertex array and rebuilds
+all partitions and primitive membership. It publishes that completed snapshot,
+then sends the old snapshot through ObjectReleaser. Final tile destruction also
+returns its snapshot. No active tree is refitted or modified in place.
+
+The disposal worker admits only sole-owned stock trees with sole-owned vertex
+arrays and no tree/vertex observers. Trees with external owners, custom tree
+subclasses, names or user-data containers are not recycled. Rejected snapshots
+follow normal OSG reference-counted destruction; external owners can delay it.
+The cache does not replace scene-graph synchronization: callers must still protect
+traversal/publication and retain snapshots they access independently. Custom OSG
+builders/prototypes keep the original clone-and-build path. A missing builder,
+failed build or GL_PATCHES preserves the previous behavior.
+
+Idle retention is capped at 64 trees / 32 MiB of vector capacity, plus eight build
+workspaces / 8 MiB of scratch capacity per engine. Active snapshots and in-flight
+builds are outside these idle limits. A miss allocates rather than waiting for a
+return; excess storage is released through the existing worker. Leased scratch
+contains the axis list, partition order, primitive centers and reorder buffer.
+Temporary Geometry wrappers are eliminated. The builder accumulates source bounds
+while collecting primitives, including degeneracies, avoiding a separate bound
+traversal. The adapted OSG builder retains its original primitive IDs, partition
+rules and bound padding; its upstream license accompanies the source and install.
+
+The existing Superluminal integration records `Build pooled terrain KdTree` with
+`reuse` or `miss` data and `Recycle terrain KdTree` on the disposal path. Small
+retirement carriers/job bookkeeping still allocate; cold misses, capacity growth
+and other terrain allocations remain possible. This is not an allocation-free
+frame path, nor does it eliminate tree partitioning work.
+
+Transient Google Benchmark probes called the actual installed TileDrawable paths.
+Both variants used the same binary: a stock-algorithm custom builder selected the
+old clone/temp-geometry path, while the default stock builder selected pooling.
+Medians of five repetitions; each repetition averaged eight samples of twenty
+batches after four warmup batches. Every timed batch processes eight tiles.
+Setup, final destruction and disposal draining were outside caller timing; both
+variants used the existing offloaded retirement. RelWithDebInfo, resource tracing
+off, no GL context or vsync in these CPU microbenchmarks:
+
+| Workload (8 tiles) | Original rebuild | Recycled storage | Change |
+| --- | ---: | ---: | ---: |
+| Elevation update, 17x17 | 0.237248 ms | 0.193227 ms | 18.6% faster |
+| Elevation update, 65x65 | 3.314669 ms | 3.394459 ms | 2.4% slower |
+| Tile construction, 17x17 | 0.190663 ms | 0.163028 ms | 14.5% faster |
+| Tile construction, 65x65 | 3.056365 ms | 2.573936 ms | 15.8% faster |
+
+The large elevation-update case does not establish a throughput improvement.
+The next real-scene capture must establish whether reduced allocation/free traffic
+reduces contention hitches. A warmed validation reused the same tree, vertex
+storage, node storage and packed-index storage across twenty rebuilds.
+
+Validation passed 72 exact comparisons against stock OSG across six primitive
+modes, three mesh sizes, elevation changes, coincident/fully-degenerate vertices
+and nondefault build options. Comparisons covered every node, bound, primitive ID,
+index and vertex. Additional checks passed for external tree/vertex owners,
+observers, 120 concurrent builds, bounded idle retention, real TileDrawable
+accelerated/primitive intersections, old-snapshot immutability, custom and absent
+builders, and GL_PATCHES. Existing `[pagednode],[texturearena]` tests passed 268
+assertions in 19 cases. The temporary probes were removed from the repository.
+
+Results: `D:/Captures/kdtree-pool-benchmarks.{json,txt}` and
+`D:/Captures/kdtree-pool-tests.txt`; the transient probe sources are preserved
+alongside them. The first implementation's mixed timings are retained separately
+as `kdtree-pool-initial-benchmarks.{json,txt}`.
+
+Next capture: run normally with **vsync on** (omit `--novsync`, or explicitly use
+`--vsync`). Check reuse/miss frequency, frame-thread KdTree build waits, worker
+recycling and the worst post-startup frames. **Swap-window disposal scheduling**,
+**buffer upload identity/cost**, and **Prestige asphalt sharing** remain deferred.
+
+The final `build.bat` build/install succeeded after removing transient probes and
+exports. The installed REX plugin hash matches the final built plugin. Both new
+Superluminal scope names are present; validation exports are absent. A 180-frame
+viewer smoke test with `--vsync` opened and exited normally (exit 0).
+
+
+## Vsync-on freelist capture (November 6, 12:07)
+
+Superluminal's exported event data confirms 6,735 reused terrain trees out of
+7,033 Main-thread builds after startup (95.8%). Reused Main builds had a 0.031 ms
+median and 0.749 ms maximum. All-thread reuse was 89.0%. All 16,452 recycle events
+ran on oe.dispose, with no sampled KdTree destruction on Main. This pool currently
+covers REX TileDrawable trees only; ordinary feature/model/pager KdTrees still use
+OSG's builder. Shared ObjectReleaser retirement does not imply pooled construction.
+
+Allocation stalls remain on misses: at 15.119 s, a new node-vector reserve caused
+5.754 ms of heap waiting inside a 5.900 ms build. The surrounding frame still took
+16.640 ms. Texture upload also triggered 6.657 ms of driver VirtualFree/decommit
+at 7.657 s, within a 16.518 ms frame. Vsync slack absorbed these costs in this run.
+
+Ignoring the first five seconds and final Windows caption interaction, 1,369
+swap-completion intervals had median 16.670 ms and p99 16.957 ms. Two exceeded
+20 ms: 33.327 ms at 20.084 s (driver work plus vertical-blank wait) and 24.827 ms
+at 25.851 s (synchronous terrain refinement and draw setup). The latter performed
+140 tree builds, 104 reused and 36 misses. Recycling storage does not eliminate
+rebuild CPU work. These CPU intervals do not directly measure GPU presentation.
+
+Next: diagnose miss occupancy/size/return timing before tuning retention, and
+budget or reduce synchronous terrain rebuild bursts. Keep **swap-window disposal
+scheduling**, **buffer upload identity/cost**, and **Prestige asphalt sharing**
+deferred; texture-upload driver decommit is still present. The different workload
+and vsync setting prevent a controlled before/after performance claim.
+
+Full report and evidence: `D:/Captures/2026-11-06_12-07-12_analysis.md`,
+`2026-11-06_12-07-12_evidence.json` and `2026-11-06_12-07-12_pooled-builds.csv`.

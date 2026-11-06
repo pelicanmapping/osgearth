@@ -16,6 +16,7 @@
 #include <osgEarth/TileMesher>
 #include <osgEarth/ObjectReleaser>
 #include <osg/Geometry>
+#include "KdTreePool"
 
 namespace osgEarth
 {
@@ -288,6 +289,9 @@ namespace osgEarth
         //! Shared per-pool client; tiles copy this handle to retire replaced CPU intersection trees.
         const ObjectReleaser::Client& getKdTreeReleaser() const { return _kdTreeReleaser; }
 
+        //! Shared engine-local cache; detached snapshots and scratch storage have bounded retention.
+        const std::shared_ptr<KdTreePool>& getKdTreePool() const { return _kdTreePool; }
+
         //! Gets the Geometry associated with a tile key, creating a new one if
         //! necessary and storing it in the pool.
         void getPooledGeometry(
@@ -321,6 +325,7 @@ namespace osgEarth
         osg::ref_ptr<SharedDrawElements> _defaultPrimSet;
         ObjectReleaser::Client _releaser;
         ObjectReleaser::Client _kdTreeReleaser;
+        std::shared_ptr<KdTreePool> _kdTreePool;
 
         void createKeyForTileKey(
             const TileKey& tileKey,

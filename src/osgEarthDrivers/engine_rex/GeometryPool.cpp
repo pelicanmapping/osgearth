@@ -19,6 +19,7 @@ using namespace osgEarth::REX;
 GeometryPool::GeometryPool() :
     _releaser(Registry::instance()->getObjectReleaser()->createClient("REX geometry pool")),
     _kdTreeReleaser(Registry::instance()->getObjectReleaser()->createClient("REX replaced KdTrees")),
+    _kdTreePool(std::make_shared<KdTreePool>(_kdTreeReleaser)),
     _enabled(true),
     _debug(false)
 {

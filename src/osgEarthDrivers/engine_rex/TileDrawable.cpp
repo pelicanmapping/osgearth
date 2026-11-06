@@ -9,6 +9,7 @@
 #include <osgEarth/ImageUtils>
 #include <osgEarth/Math>
 #include <osg/KdTree>
+#include <typeinfo>
 
 using namespace osg;
 using namespace osgEarth::REX;
@@ -55,14 +56,16 @@ TileDrawable::TileDrawable(
     const TileKey& key,
     SharedGeometry* geometry,
     int tileSize,
-    const ObjectReleaser::Client& kdTreeReleaser) :
+    const ObjectReleaser::Client& kdTreeReleaser,
+    const std::shared_ptr<KdTreePool>& kdTreePool) :
     osg::Drawable(),
     _key(key),
     _geom(geometry),
     _tileSize(tileSize),
     _bboxRadius(1.0),
     _bboxCB(NULL),
-    _kdTreeReleaser(kdTreeReleaser)
+    _kdTreeReleaser(kdTreeReleaser),
+    _kdTreePool(kdTreePool)
 {
     // builds the initial mesh.
     setElevationRaster(nullptr, osg::Matrixf::identity());
@@ -70,7 +73,23 @@ TileDrawable::TileDrawable(
 
 TileDrawable::~TileDrawable()
 {
-    //nop
+    // Detach before returning storage; a pooled tree must never remain published on this drawable.
+    osg::ref_ptr<osg::Shape> outgoing = getShape();
+    setShape(nullptr);
+    retireShape(outgoing);
+}
+
+void
+TileDrawable::retireShape(osg::ref_ptr<osg::Shape>& shape)
+{
+    if (_pooledShape)
+        _kdTreePool->retire(shape);
+    else if (shape)
+    {
+        ObjectReleaser::Objects retired{shape.get()};
+        shape = nullptr;
+        _kdTreeReleaser.release(retired);
+    }
 }
 
 void
@@ -145,34 +164,37 @@ TileDrawable::setElevationRaster(Texture::Ptr image, const osg::Matrixf& scaleBi
     }
 
 
-    // Make a temporary geometry to build kdtrees on and copy the shape over
-    if (_geom->getDrawElements()->getMode() != GL_PATCHES)
+    osg::ref_ptr<osg::KdTreeBuilder> configured = osgDB::Registry::instance()->getKdTreeBuilder();
+    if (_geom->getDrawElements()->getMode() != GL_PATCHES && configured)
     {
-        osg::ref_ptr<osg::Geometry> tempGeom = new osg::Geometry;
-        osg::Vec3Array* tempVerts = new osg::Vec3Array;
-        tempVerts->reserve(_mesh.size());
-        for (unsigned int i = 0; i < _mesh.size(); i++)
+        osg::ref_ptr<osg::Shape> replacement;
+        bool pooled = false;
+        // Honor user-defined builders/prototypes; only the stock OSG algorithm uses reusable storage.
+        if (typeid(*configured) == typeid(osg::KdTreeBuilder) && configured->_kdTreePrototype &&
+            typeid(*configured->_kdTreePrototype) == typeid(osg::KdTree) &&
+            !configured->_kdTreePrototype->getVertices() && configured->_kdTreePrototype->getNodes().empty() &&
+            configured->_kdTreePrototype->getPrimitiveIndices().empty() &&
+            configured->_kdTreePrototype->getVertexIndices().empty() &&
+            !configured->_kdTreePrototype->getUserDataContainer() && configured->_kdTreePrototype->getName().empty())
         {
-            tempVerts->push_back(_mesh[i]);
+            replacement = _kdTreePool->build(_mesh, _geom->getDrawElements(), configured->_buildOptions);
+            pooled = true;
         }
-        tempGeom->setVertexArray(tempVerts);
-        tempGeom->addPrimitiveSet(_geom->getDrawElements());
-
-        osg::ref_ptr<osg::KdTreeBuilder> kdTreeBuilder = osgDB::Registry::instance()->getKdTreeBuilder();
-        if (kdTreeBuilder)
-        {            
-            kdTreeBuilder = kdTreeBuilder->clone();
-            tempGeom->accept(*kdTreeBuilder);
-            if (tempGeom->getShape())
-            {
-                ObjectReleaser::Objects retired;
-                if (getShape())
-                    retired.emplace_back(getShape());
-                setShape(tempGeom->getShape());
-                // Publish current intersections immediately, even when the expiry queue gate is full.
-                // Holding the old shape across setShape keeps its last unref off this thread.
-                _kdTreeReleaser.release(retired);
-            }
+        else
+        {
+            osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry;
+            geometry->setVertexArray(new osg::Vec3Array(_mesh.begin(), _mesh.end()));
+            geometry->addPrimitiveSet(_geom->getDrawElements());
+            osg::ref_ptr<osg::KdTreeBuilder> builder = configured->clone();
+            geometry->accept(*builder);
+            replacement = geometry->getShape();
+        }
+        if (replacement)
+        {
+            osg::ref_ptr<osg::Shape> outgoing = getShape();
+            setShape(replacement);
+            retireShape(outgoing);
+            _pooledShape = pooled;
         }
     }
 

@@ -147,6 +147,12 @@ void NavigationManipulator::setEyeHeight(double value)
     if (std::isfinite(value) && value > 0.0) _eyeHeight = std::clamp(value, 0.1, 100.0);
 }
 
+void NavigationManipulator::applyLookInput(const osg::Vec2d& input, double dt)
+{
+    look(std::clamp(input.x(), -1.0, 1.0) * getLookSpeed() * dt,
+        std::clamp(input.y(), -1.0, 1.0) * getLookSpeed() * dt);
+}
+
 void NavigationManipulator::look(double yaw, double pitch)
 {
     _heading = std::remainder(_heading + yaw, 2.0 * osg::PI);
@@ -274,8 +280,7 @@ bool NavigationManipulator::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIA
         for (int i = 0; i < count; ++i)
         {
             const double elapsed = dt / count;
-            look(std::clamp(input.look.x(), -1.0, 1.0) * getLookSpeed() * elapsed,
-                std::clamp(input.look.y(), -1.0, 1.0) * getLookSpeed() * elapsed);
+            applyLookInput(input.look, elapsed);
             step(input, elapsed);
         }
         aa.requestContinuousUpdate(true);
@@ -347,7 +352,10 @@ void WalkManipulator::step(const GamepadState& input, double dt)
     if (constrain(candidate, true)) _eye = candidate;
 }
 
-DriveManipulator::DriveManipulator() : NavigationManipulator(25.0, 1.5) { }
+DriveManipulator::DriveManipulator() : NavigationManipulator(25.0, 1.5)
+{
+    setLookSpeed(osg::DegreesToRadians(60.0));
+}
 
 void DriveManipulator::setAcceleration(double value)
 {
@@ -356,13 +364,53 @@ void DriveManipulator::setAcceleration(double value)
 
 void DriveManipulator::resetMotion()
 {
+    _lookYaw = 0.0;
+    _lookYawRate = 0.0;
     _velocity = 0.0;
     _displayVelocity = 0.0;
 }
 
+void DriveManipulator::applyLookInput(const osg::Vec2d& input, double dt)
+{
+    const double axis = std::clamp(input.x(), -1.0, 1.0);
+    if (axis != 0.0)
+    {
+        // Integrate a filtered angular rate exactly, so stick changes ease in consistently at any frame rate.
+        constexpr double response = 0.12;
+        const double targetRate = axis * getLookSpeed();
+        const double decay = std::exp(-dt / response);
+        _lookYaw += targetRate * dt + (_lookYawRate - targetRate) * response * (1.0 - decay);
+        _lookYawRate = targetRate + (_lookYawRate - targetRate) * decay;
+    }
+    else if (!isMouseLookActive())
+    {
+        // An exact critically damped spring returns to the vehicle heading without a position discontinuity.
+        constexpr double spring = 6.0;
+        const double decay = std::exp(-spring * dt);
+        const double slope = _lookYawRate + spring * _lookYaw;
+        _lookYaw = (_lookYaw + slope * dt) * decay;
+        _lookYawRate = (_lookYawRate - spring * slope * dt) * decay;
+        if (std::abs(_lookYaw) < osg::DegreesToRadians(0.05) &&
+            std::abs(_lookYawRate) < osg::DegreesToRadians(0.5))
+        {
+            _lookYaw = 0.0;
+            _lookYawRate = 0.0;
+        }
+    }
+    else
+        _lookYawRate = 0.0;
+
+    const double limit = osg::DegreesToRadians(90.0);
+    _lookYaw = std::clamp(_lookYaw, -limit, limit);
+    if ((_lookYaw >= limit && _lookYawRate > 0.0) || (_lookYaw <= -limit && _lookYawRate < 0.0))
+        _lookYawRate = 0.0;
+    look(0.0, std::clamp(input.y(), -1.0, 1.0) * getLookSpeed() * dt);
+}
+
 void DriveManipulator::look(double yaw, double pitch)
 {
-    _lookYaw = std::clamp(_lookYaw + yaw, -osg::DegreesToRadians(120.0), osg::DegreesToRadians(120.0));
+    if (yaw != 0.0) _lookYawRate = 0.0;
+    _lookYaw = std::clamp(_lookYaw + yaw, -osg::DegreesToRadians(90.0), osg::DegreesToRadians(90.0));
     _pitch = std::clamp(_pitch + pitch, -osg::DegreesToRadians(85.0), osg::DegreesToRadians(85.0));
 }
 

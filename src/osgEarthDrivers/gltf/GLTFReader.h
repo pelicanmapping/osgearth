@@ -59,6 +59,7 @@
  *   gltfSkipImagery                    do not load any textures
  *   gltfSkipPBRTextures                load base color textures only
  *   gltfSkipNormals                    do not generate missing normals
+ *   gltfIgnoreUnlit                    treat KHR_materials_unlit materials as lit
  *   gltfForceReload                    bypass the shared material cache
  *   gltfDisableExternalAssetInstancing one ExternalNode per external reference
  */
@@ -138,6 +139,7 @@ public:
         bool skipImagery = false;
         bool skipPBRTextures = false;
         bool skipNormals = false;
+        bool ignoreUnlit = false;
         bool forceReload = false;
         bool prepareTextures = false;
         bool instanceExternalAssets = true;
@@ -156,6 +158,7 @@ public:
                 else if (token == "gltfSkipImagery") flags.skipImagery = true;
                 else if (token == "gltfSkipPBRTextures") flags.skipPBRTextures = true;
                 else if (token == "gltfSkipNormals") flags.skipNormals = true;
+                else if (token == "gltfIgnoreUnlit") flags.ignoreUnlit = true;
                 else if (token == "gltfForceReload") flags.forceReload = true;
                 else if (token == "gltfPrepareTextures") flags.prepareTextures = true;
                 else if (token == "gltfDisableExternalAssetInstancing") flags.instanceExternalAssets = false;
@@ -340,6 +343,11 @@ public:
             const cgltf_result result = cgltf_parse(&parseOptions, bytes, size, &data);
             if (result != cgltf_result_success)
                 return fail(std::string("cgltf: ") + resultString(result));
+
+            // Everything downstream (lighting, normals, maps) then treats these like any other lit material.
+            if (Flags::parse(options).ignoreUnlit)
+                for (cgltf_size i = 0; i < data->materials_count; ++i)
+                    data->materials[i].unlit = false;
 
             for (cgltf_size i = 0; i < data->extensions_required_count; ++i)
             {

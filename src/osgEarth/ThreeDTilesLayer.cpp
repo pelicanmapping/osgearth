@@ -54,6 +54,7 @@ ThreeDTilesLayer::Options::getConfig() const
     Config conf = VisibleLayer::Options::getConfig();
     conf.set("url", _url);
     conf.set("max_sse", _maximumScreenSpaceError);
+    conf.set("ignore_unlit", ignoreUnlit());
     conf.set("nvgl", nvgl());
     conf.set("backface_culling", backfaceCulling());
     return conf;
@@ -65,6 +66,7 @@ ThreeDTilesLayer::Options::fromConfig( const Config& conf )
     _maximumScreenSpaceError.init(15.0f);
     conf.get("url", _url);
     conf.get("max_sse", _maximumScreenSpaceError);
+    conf.get("ignore_unlit", ignoreUnlit());
     conf.get("nvgl", nvgl());
     conf.get("backface_culling", backfaceCulling());
 }
@@ -133,6 +135,11 @@ ThreeDTilesLayer::openTileset(const URI& url, const std::string& authorizationHe
         {
             return convertContent(node, factory, renderBin, twoSidedRenderBin);
         };
+    }
+
+    if (*options().ignoreUnlit())
+    {
+        readOptions->setOptionString(readOptions->getOptionString() + " gltfIgnoreUnlit");
     }
 
     _tilesetNode = new ThreeDTilesetNode(tileset, authorizationHeader, getSceneGraphCallbacks(), readOptions.get(), processContent);

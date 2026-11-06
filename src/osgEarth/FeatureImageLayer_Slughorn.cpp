@@ -246,6 +246,29 @@ namespace
             {
                 if (!feature->getGeometry()) continue;
                 osg::ref_ptr<Feature> copy = new Feature(*feature);
+                // Buffered Web Mercator tiles can extend past the date line. Clip in the source CRS before
+                // projection wraps those vertices to the opposite longitude and folds polygon rings.
+                if (copy->getSRS() && extent.getSRS()->isGeographic() &&
+                    copy->getSRS()->isHorizEquivalentTo(SpatialReference::get("spherical-mercator")))
+                {
+                    Bounds world;
+                    const Bounds bounds = copy->getGeometry()->getBounds();
+                    if (copy->getSRS()->getBounds(world) &&
+                        (bounds.xMin() < world.xMin() || bounds.xMax() > world.xMax()))
+                    {
+                        // Latitude does not wrap; preserve the tile's north/south buffer.
+                        world.yMin() = std::min(world.yMin(), bounds.yMin());
+                        world.yMax() = std::max(world.yMax(), bounds.yMax());
+#ifdef OSGEARTH_HAVE_GEOS
+                        osg::ref_ptr<Geometry> cropped = copy->getGeometry()->crop(world);
+                        if (!cropped.valid())
+                            throw std::runtime_error("cannot clip buffered Mercator geometry");
+                        copy->setGeometry(cropped.get());
+#else
+                        throw std::runtime_error("Mercator date-line clipping requires GEOS");
+#endif
+                    }
+                }
                 copy->transform(extent.getSRS());
                 if (!copy->getSRS()->isHorizEquivalentTo(extent.getSRS()))
                     throw std::runtime_error("feature reprojection failed");
@@ -546,7 +569,9 @@ FeatureImageLayer::createTexture(const TileKey& key, ProgressCallback* progress)
         if (progress && progress->isCanceled()) return {};
         OE_DEBUG << "[FeatureImageLayer] " << getName() << " " << key.str()
             << ": raster fallback: " << e.what() << std::endl;
-        GeoImage image = createImageImplementation(key, progress);
+        // Rasterize in the layer's native profile, then reproject the image. Calling the implementation
+        // directly with a map-profile key would repeat the same geometry-wrap problem in the fallback.
+        GeoImage image = const_cast<FeatureImageLayer*>(this)->createImage(key, progress);
         if (!image.valid()) return {};
         auto texture = dataTexture(image.takeImage().get());
         texture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);

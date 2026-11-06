@@ -10,6 +10,7 @@
 #include <osgEarth/Capabilities>
 #include <osgEarth/Registry>
 #include <osgEarth/Notify>
+#include "ResourceLifetimeTrace.h"
 
 #include <osg/GraphicsContext>
 #include <osg/ContextData>
@@ -450,9 +451,39 @@ namespace
 
 }
 
+namespace
+{
+    //! Add exact CPU swap intervals to the resource trace while preserving an application's existing callback.
+    struct ResourceTraceSwapCallback : osg::GraphicsContext::SwapCallback
+    {
+        osg::ref_ptr<osg::GraphicsContext::SwapCallback> next;
+
+        //! Keep the previous callback alive for as long as this diagnostic wrapper is installed.
+        explicit ResourceTraceSwapCallback(osg::GraphicsContext::SwapCallback* callback) : next(callback) { }
+
+        //! Delegate exactly once; no extra flush, finish, fence, or GL error query is issued.
+        void swapBuffersImplementation(osg::GraphicsContext* gc) override
+        {
+            auto* state = gc->getState();
+            auto* stamp = state ? state->getFrameStamp() : nullptr;
+            detail::ResourceTraceScope trace("resource.swap", nullptr, state ? int(state->getContextID()) : -1,
+                false, stamp ? std::int64_t(stamp->getFrameNumber()) : -1);
+            if (next) next->swapBuffersImplementation(gc);
+            else gc->swapBuffersImplementation();
+        }
+    };
+}
+
 void
 CustomRealizeOperation::operator()(osg::Object* object)
 {
+    if (detail::resourceTraceEnabled())
+    {
+        auto* gc = dynamic_cast<osg::GraphicsContext*>(object);
+        if (gc && !dynamic_cast<ResourceTraceSwapCallback*>(gc->getSwapCallback()))
+            gc->setSwapCallback(new ResourceTraceSwapCallback(gc->getSwapCallback()));
+    }
+
     if (_vsync.isSet())
     {
         osgViewer::GraphicsWindow* win = dynamic_cast<osgViewer::GraphicsWindow*>(object);
@@ -628,6 +659,7 @@ GLObjectPool::watch(GLObject::Ptr object)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _objects.emplace_back(object);
+    detail::ResourceTraceScope trace("resource.create", object.get(), int(getContextID()), true);
 }
 
 void
@@ -743,6 +775,12 @@ GLObjectPool::releaseOrphans(const osg::GraphicsContext* gc)
             continue;
         }
 
+        // Capture the first observed orphan without changing the deletion/recycling policy.
+        if (object.use_count() == 1 && bytes_remaining > 0 && object->_orphan_frames == 0)
+        {
+            detail::ResourceTraceScope trace("resource.orphan", object.get(), int(getContextID()));
+        }
+
         // the object is not referenced anywhere else but here,
         // and we've satisfied the byte-slice and time-slice requirements,
         // release its memory and drop it from the tracker pool.
@@ -750,6 +788,7 @@ GLObjectPool::releaseOrphans(const osg::GraphicsContext* gc)
             bytes_remaining > 0 &&
             object->_orphan_frames++ >= _frames_to_delay_deletion)
         {
+            detail::ResourceTraceScope trace("resource.pool_delete", object.get(), int(getContextID()));
             const int object_size = object->size();
             object->release();
             bytes_remaining -= object_size;
@@ -795,6 +834,7 @@ GLObject::debugLabel(const std::string& category, const std::string& uniqueid)
     // Keep the label for error reports even without a GL debug context.
     _category = category;
     _uid = uniqueid;
+    detail::ResourceTraceScope trace("resource.label", this);
 
     if (GLUtils::isGLDebuggingEnabled())
     {
@@ -946,6 +986,7 @@ GLBuffer::create(GLenum target, osg::State& state, GLsizei sizeHint, GLsizei chu
     if (object)
     {
         object->_target = target;
+        detail::ResourceTraceScope trace("resource.recycle", object.get(), int(state.getContextID()));
         return object;
     }
     else
@@ -1047,6 +1088,7 @@ GLBuffer::bufferData(GLsizei datasize, const GLvoid* data, GLbitfield flags) con
 
     _alloc_size = alloc_size;
     _immutable = false;
+    detail::ResourceTraceScope trace("resource.buffer_storage", this);
 }
 
 void
@@ -1081,6 +1123,7 @@ GLBuffer::bufferStorage(GLsizei datasize, const GLvoid* data, GLbitfield flags) 
     }
 
     _immutable = true;
+    detail::ResourceTraceScope trace("resource.buffer_storage", this);
 }
 
 void
@@ -1109,6 +1152,7 @@ GLBuffer::bufferStorage(GLsizei buffersize, GLsizei datasize, const GLvoid* data
     }
 
     _immutable = true;
+    detail::ResourceTraceScope trace("resource.buffer_storage", this);
 }
 
 void
@@ -1174,6 +1218,7 @@ GLBuffer::bindBufferBase(GLuint index) const
 void
 GLBuffer::release()
 {
+    detail::ResourceTraceScope trace("resource.delete_buffer", valid() ? this : nullptr);
     if (_name != 0)
     {
         OE_DEVEL << LC << "GLBuffer::release, name=" << name() << std::endl;
@@ -1468,6 +1513,7 @@ GLTexture::Ptr
 GLTexture::wrap(GLenum target, GLuint name, osg::State& state)
 {
     Ptr object(new GLTexture(target, name, state));
+    detail::ResourceTraceScope trace("resource.borrow_osg_texture", object.get(), int(state.getContextID()), true);
     // not adding it to the watcher; caller is responsible for resources.
     return object;
 }
@@ -1495,6 +1541,7 @@ GLTexture::create(GLenum target, osg::State& state, const Profile& profileHint)
     Ptr object = GLObjectPool::get(state)->recycle<GLTexture>(comp);
     if (object)
     {
+        detail::ResourceTraceScope trace("resource.recycle", object.get(), int(state.getContextID()));
         return object;
     }
     else
@@ -1633,6 +1680,7 @@ GLTexture::isResident(const osg::State& state) const
 void
 GLTexture::release()
 {
+    detail::ResourceTraceScope trace("resource.delete_texture", valid() ? this : nullptr);
     OE_DEVEL << LC << "GLTexture::release, name=" << name() << std::endl;
     if (_handle != 0)
     {        
@@ -1687,6 +1735,7 @@ GLTexture::storage2D(const Profile& profile)
 
 
         _size = _profile._size;
+        detail::ResourceTraceScope trace("resource.texture_storage", this);
     }
 }
 
@@ -1712,6 +1761,7 @@ GLTexture::storage3D(const Profile& profile)
         glTexParameterf(_target, GL_TEXTURE_MAX_ANISOTROPY_EXT, profile._maxAnisotropy);
 
         _size = _profile._size;
+        detail::ResourceTraceScope trace("resource.texture_storage", this);
     }
 }
 
@@ -2122,6 +2172,7 @@ namespace
         void operator()(osg::GraphicsContext* context) override
         {
             osg::State* state = context->getState();
+            detail::ResourceTraceScope trace("resource.ico_compile_and_flush", nullptr, int(state->getContextID()));
             osg::GLExtensions* ext = state->get<osg::GLExtensions>();
             if (ext->glBindVertexArray && ext->glIsVertexArray && ext->glIsBuffer)
             {

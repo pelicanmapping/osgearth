@@ -464,6 +464,7 @@ TerrainTileModelFactory::addElevation(
             }
 
             model->elevation.texture->category() = LABEL_ELEVATION;
+            model->elevation.texture->name() = key.str() + ":elevation";
 
             model->elevation.minHeight = minh;
             model->elevation.maxHeight = maxh;

@@ -623,6 +623,7 @@ set(TARGET_SRC
     GeoTransform.cpp
     GLSLChunker.cpp
     GLUtils.cpp
+    ResourceLifetimeTrace.cpp
     GraticuleLabelingEngine.cpp
     HeightFieldUtils.cpp
     Horizon.cpp

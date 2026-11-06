@@ -8,6 +8,7 @@
 #include "Math"
 #include "Metrics"
 #include "Utils"
+#include "ResourceLifetimeTrace.h"
 
 #include <osg/State>
 #include <osg/Texture1D>
@@ -651,6 +652,8 @@ Texture::releaseGLObjects(osg::State* state, bool force) const
             //<< "' name=" << gc._gltexture->name()
             //<< " handle=" << gc._gltexture->handle(*state) << std::endl;
 
+            detail::ResourceTraceScope trace("resource.texture_release_immediate", gc._gltexture.get(),
+                int(state->getContextID()));
             // will activate the releaser
             gc._gltexture->release(); // redundant?
             gc._gltexture = nullptr;
@@ -661,6 +664,7 @@ Texture::releaseGLObjects(osg::State* state, bool force) const
         // rely on the Releaser to get around to it
         for (unsigned i = 0; i < _globjects.size(); ++i)
         {
+            detail::ResourceTraceScope trace("resource.texture_detach", _globjects[i]._gltexture.get());
             // will activate the releaser(s)
             _globjects[i]._gltexture = nullptr;
         }

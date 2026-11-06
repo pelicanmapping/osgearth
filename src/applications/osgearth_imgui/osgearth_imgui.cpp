@@ -91,6 +91,9 @@ main(int argc, char** argv)
         OE_NOTICE << LC << "ICO vertex-array/index-buffer protection enabled" << std::endl;
     }
     viewer.setThreadingModel(viewer.SingleThreaded);
+    // Let the frame thread use the process's allowed CPUs instead of OSG pinning it to CPU 0.
+    viewer.setUseConfigureAffinity(false);
+    viewer.setProcessorAffinity(OpenThreads::Affinity());
     viewer.setCameraManipulator(new EarthManipulator(arguments));
 
     // Load the earth file.

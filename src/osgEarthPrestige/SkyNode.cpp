@@ -82,7 +82,7 @@ namespace
         return result;
     }
 
-    //! Builds a VBO triangle that cannot affect scene bounds or be frustum culled.
+    //! Builds a clip-space VBO triangle with frustum culling disabled; callers must disable near/far calculation.
     osg::ref_ptr<osg::Geometry> triangle(osg::Program* shader)
     {
         osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry;
@@ -553,7 +553,15 @@ struct SkyNode::Impl
             if (cloudEnvironmentState) cv.popStateSet();
         }
         f.scheduled = true;
+        // Clip-space vertices are not world geometry. Near/far calculation would reject them as
+        // behind the eye when looking upward, even though frustum culling is disabled on the drawable.
+        const auto nearFarMode = cv.getComputeNearFarMode();
+        const auto inheritanceMask = cv.getInheritanceMask();
+        cv.setComputeNearFarMode(osg::CullSettings::DO_NOT_COMPUTE_NEAR_FAR);
         f.background->accept(cv);
+        cv.setComputeNearFarMode(nearFarMode);
+        // The setter also changes inheritance; preserve it for later camera traversals.
+        cv.setInheritanceMask(inheritanceMask);
         owner.osgEarth::SkyNode::traverse(cv);
         if (cloudState) cv.popStateSet();
         cv.popStateSet();

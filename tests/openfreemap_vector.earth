@@ -1,0 +1,130 @@
+<!-- OpenFreeMap TileJSON: https://tiles.openfreemap.org/planet/latest
+     The source resolves the current tile URL, zoom limits, and attribution from TileJSON when opened.
+     Requires MVT/Protobuf support and OSGEARTH_ENABLE_SLUGHORN=ON for GPU vector rendering.
+     XYZ uses top-origin {y}. Source levels 0-14; closer views inherit the level-14 vector atlas.
+     This is a geometry-only basemap: text/icons would trigger FeatureImage raster fallback. -->
+<map name="OpenFreeMap - FeatureImage vector mode">
+    <XYZFeatures name="openfreemap-data">
+        <url>https://tiles.openfreemap.org/planet/latest</url>
+        <layers>landcover,landuse,park,water,waterway,building,transportation,boundary</layers>
+    </XYZFeatures>
+
+    <!-- Styles paint in document order, with roads above buildings and water.
+         Pixel widths are measured at the source tile resolution and scale when overzooming. -->
+    <FeatureImage name="OpenFreeMap vectors" mode="vector">
+        <features>openfreemap-data</features>
+        <background_color>#f2efe9</background_color>
+        <styles>
+            <style type="text/css"><![CDATA[
+                landcover {
+                    select: feature.properties.mvt_layer === 'landcover';
+                    fill: #dce7cb;
+                }
+                woodland {
+                    select: feature.properties.mvt_layer === 'landcover' && feature.properties['class'] === 'wood';
+                    fill: #b8d3a7;
+                }
+                sand {
+                    select: feature.properties.mvt_layer === 'landcover' && feature.properties['class'] === 'sand';
+                    fill: #eee1b7;
+                }
+                ice {
+                    select: feature.properties.mvt_layer === 'landcover' && feature.properties['class'] === 'ice';
+                    fill: #f4faff;
+                }
+                landuse {
+                    select: feature.properties.mvt_layer === 'landuse';
+                    fill: #e5e0d8;
+                }
+                parks {
+                    select: feature.properties.mvt_layer === 'park';
+                    fill: #c4dfb2;
+                }
+                water {
+                    select: feature.properties.mvt_layer === 'water';
+                    fill: #a9cee2;
+                }
+                waterways {
+                    select: feature.properties.mvt_layer === 'waterway';
+                    stroke: #91bdd5;
+                    stroke-width: 1px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                buildings {
+                    select: feature.properties.mvt_layer === 'building';
+                    fill: #d5c5b7;
+                    stroke: #b8a596;
+                    stroke-width: 0.4px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                paths {
+                    select: feature.properties.mvt_layer === 'transportation' &&
+                        ['path', 'track', 'pedestrian'].indexOf(feature.properties['class']) >= 0;
+                    stroke: #c6ac8e;
+                    stroke-width: 0.8px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                minor_roads {
+                    select: feature.properties.mvt_layer === 'transportation' &&
+                        ['minor', 'service', 'tertiary'].indexOf(feature.properties['class']) >= 0;
+                    stroke: #ffffff;
+                    stroke-width: 1.5px;
+                    stroke-outline: #c7c1b7;
+                    stroke-outline-width: 0.4px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                major_roads {
+                    select: feature.properties.mvt_layer === 'transportation' &&
+                        ['primary', 'secondary'].indexOf(feature.properties['class']) >= 0;
+                    stroke: #ffe3a3;
+                    stroke-width: 2px;
+                    stroke-outline: #c5a86d;
+                    stroke-outline-width: 0.4px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                highways {
+                    select: feature.properties.mvt_layer === 'transportation' &&
+                        ['motorway', 'trunk'].indexOf(feature.properties['class']) >= 0;
+                    stroke: #efba86;
+                    stroke-width: 2.5px;
+                    stroke-outline: #bd946d;
+                    stroke-outline-width: 0.5px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                railways {
+                    select: feature.properties.mvt_layer === 'transportation' &&
+                        ['rail', 'transit'].indexOf(feature.properties['class']) >= 0;
+                    stroke: #8e8b86;
+                    stroke-width: 0.7px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                boundaries {
+                    select: feature.properties.mvt_layer === 'boundary' &&
+                        feature.properties.admin_level == 2 && feature.properties.maritime != 1;
+                    stroke: #ad91b1;
+                    stroke-width: 1px;
+                    stroke-opacity: 0.7;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+            ]]></style>
+        </styles>
+    </FeatureImage>
+
+    <options>
+        <terrain color="#f2efe9"/>
+    </options>
+    <viewpoints home="0" time="0">
+        <viewpoint name="London" long="-0.12" lat="51.505" height="0" heading="0" pitch="-90" range="12000m"/>
+        <viewpoint name="World" long="10" lat="20" height="0" heading="0" pitch="-90" range="22000000m"/>
+        <viewpoint name="Manhattan" long="-73.985" lat="40.748" height="0" heading="0" pitch="-90" range="8000m"/>
+        <viewpoint name="Vector detail" long="-0.12" lat="51.505" height="0" heading="0" pitch="-90" range="600m"/>
+    </viewpoints>
+</map>

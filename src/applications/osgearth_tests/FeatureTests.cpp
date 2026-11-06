@@ -8,10 +8,203 @@
 #include <osgEarth/Feature>
 #include <osgEarth/Geometry>
 #include <osgEarth/GeometryUtils>
+#include <osgEarth/XYZFeatureSource>
+#include <osgEarth/FileUtils>
+#include <osgDB/FileNameUtils>
+#include <osgDB/FileUtils>
+#include <osgDB/fstream>
 
 using namespace osgEarth;
 
 using Vec = std::vector<osg::Vec3d>;
+
+namespace
+{
+    //! Owns temporary metadata and tiles; removes the directory after each offline TileJSON test.
+    struct TileJSONFiles
+    {
+        std::string directory = osgDB::concatPaths(osgDB::getCurrentWorkingDirectory(),
+            Util::getTempName("TileJSONTests_", ""));
+        bool created = Util::makeDirectory(directory);
+
+        //! Removes only this fixture's temporary directory.
+        ~TileJSONFiles()
+        {
+            if (created)
+                Util::removeDirectory(directory);
+        }
+
+        //! Writes a fixture resource and fails the test if the write fails.
+        std::string write(const std::string& name, const std::string& data) const
+        {
+            REQUIRE(created);
+            const auto path = osgDB::concatPaths(directory, name);
+            osgDB::ofstream output(path.c_str(), std::ios::binary);
+            output << data;
+            output.close();
+            REQUIRE(output.good());
+            return path;
+        }
+    };
+}
+
+//! Checks metadata defaults, coverage versus tile-grid extent, and preservation of the original configuration.
+TEST_CASE("XYZFeatures opens TileJSON without explicit tile settings", "[feature][tilejson]")
+{
+    TileJSONFiles files;
+    const auto url = files.write("latest", R"({"tilejson":"3.0.0","tiles":["{z}_{x}_{y}.pbf"],
+        "minzoom":2,"maxzoom":14,"attribution":"Test data","bounds":[-10,-20,30,40]})");
+    osg::ref_ptr<XYZFeatureSource> source = new XYZFeatureSource();
+    source->setURL(URI(url));
+    REQUIRE(source->open().isOK());
+    CHECK(source->getURL().full() == URI(url).full());
+    CHECK(source->getFormat() == "pbf");
+    CHECK(source->getMinLevel() == 2);
+    CHECK(source->getMaxLevel() == 14);
+    CHECK(source->getAttribution() == "Test data");
+    CHECK_FALSE(source->isWritable());
+    const auto fp = source->getFeatureProfile();
+    REQUIRE(fp);
+    CHECK(fp->getFirstLevel() == 2);
+    CHECK(fp->getMaxLevel() == 14);
+    CHECK(fp->getSRS()->isMercator());
+    const auto coverage = fp->getExtent().transform(SpatialReference::get("wgs84"));
+    CHECK(coverage.xMin() == Approx(-10));
+    CHECK(coverage.yMax() == Approx(40));
+    CHECK(fp->getTilingProfile()->getExtent().width() > fp->getExtent().width());
+    const auto config = source->getConfig();
+    CHECK(config.value("url") == url);
+    CHECK_FALSE(config.hasChild("min_level"));
+    CHECK_FALSE(config.hasChild("max_level"));
+    CHECK_FALSE(config.hasChild("format"));
+    CHECK_FALSE(config.hasChild("profile"));
+    CHECK_FALSE(config.hasChild("attribution"));
+}
+
+//! Exercises actual cursor reads through relative XYZ/TMS endpoints, explicit format overrides, and overzooming.
+TEST_CASE("XYZFeatures resolves TileJSON tile requests", "[feature][tilejson]")
+{
+    TileJSONFiles files;
+    std::string scheme = "xyz";
+    SECTION("XYZ") { }
+    SECTION("TMS") { scheme = "tms"; }
+    const auto url = files.write("tiles.json", std::string(R"({"tilejson":"2.2.0",
+        "tiles":["{z}_{x}_{y}.json"],"format":"pbf","minzoom":1,"maxzoom":1,"scheme":")") + scheme + "\"}");
+    files.write(scheme == "xyz" ? "1_0_0.json" : "1_0_1.json", R"({"type":"FeatureCollection","features":[
+        {"type":"Feature","properties":{"marker":"correct tile"},"geometry":{"type":"Point","coordinates":[-90,45]}}
+    ]})");
+    osg::ref_ptr<XYZFeatureSource> source = new XYZFeatureSource();
+    source->setURL(URI(url));
+    source->setFormat("json");
+    REQUIRE(source->open().isOK());
+    const auto profile = source->getFeatureProfile()->getTilingProfile();
+    CHECK(source->insert(TileKey(1, 0, 0, profile), {}, true).isError());
+    for (unsigned level : { 1u, 2u })
+    {
+        auto cursor = source->createFeatureCursor(Query(TileKey(level, 0, 0, profile)));
+        REQUIRE(cursor.valid());
+        REQUIRE(cursor->hasMore());
+        CHECK(cursor->nextFeature()->getString("marker") == "correct tile");
+    }
+}
+
+//! Explicit earth-file settings must override metadata and remain serializable.
+TEST_CASE("XYZFeatures retains explicit TileJSON overrides", "[feature][tilejson]")
+{
+    TileJSONFiles files;
+    const auto url = files.write("tiles.json", R"({"tilejson":"3.0.0","tiles":["{z}_{x}_{y}.pbf"],
+        "minzoom":0,"maxzoom":14,"attribution":"Metadata credit"})");
+    XYZFeatureSource::Options options;
+    options.url() = URI(url);
+    options.minLevel() = 3;
+    options.maxLevel() = 8;
+    options.profile() = ProfileOptions("global-geodetic");
+    options.attribution() = "Explicit credit";
+    osg::ref_ptr<XYZFeatureSource> source = new XYZFeatureSource(options);
+    REQUIRE(source->open().isOK());
+    CHECK(source->getMinLevel() == 3);
+    CHECK(source->getMaxLevel() == 8);
+    CHECK(source->getFeatureProfile()->getSRS()->isGeographic());
+    CHECK(source->getAttribution() == "Explicit credit");
+    CHECK(source->getConfig().value<int>("max_level", -1) == 8);
+}
+
+//! Reopening must resolve a changed metadata endpoint without retaining old zoom limits or tile addresses.
+TEST_CASE("XYZFeatures refreshes TileJSON on reopen", "[feature][tilejson]")
+{
+    TileJSONFiles files;
+    const auto first = files.write("first.json", R"({"tilejson":"3.0.0","tiles":["old/{z}/{x}/{y}.pbf"],
+        "minzoom":2,"maxzoom":6,"attribution":"Old credit"})");
+    files.write("0_0_0.json", R"({"type":"FeatureCollection","features":[
+        {"type":"Feature","properties":{"marker":"new tile"},"geometry":{"type":"Point","coordinates":[0,0]}}
+    ]})");
+    osg::ref_ptr<XYZFeatureSource> source = new XYZFeatureSource();
+    source->setURL(URI(first));
+    REQUIRE(source->open().isOK());
+    source->close();
+    files.write("first.json", R"({"tilejson":"3.0.0","tiles":["{z}_{x}_{y}.json"],
+        "format":"json","maxzoom":1})");
+    REQUIRE(source->open().isOK());
+    CHECK(source->getMinLevel() == 0);
+    CHECK(source->getMaxLevel() == 1);
+    CHECK(source->getFeatureProfile()->getMaxLevel() == 1);
+    CHECK(source->getAttribution().empty());
+    auto cursor = source->createFeatureCursor(Query(TileKey(0, 0, 0, source->getFeatureProfile()->getTilingProfile())));
+    REQUIRE(cursor.valid());
+    REQUIRE(cursor->hasMore());
+    CHECK(cursor->nextFeature()->getString("marker") == "new tile");
+}
+
+//! Optional missing or invalid values use TileJSON defaults instead of unsafe numeric conversions.
+TEST_CASE("XYZFeatures uses TileJSON defaults", "[feature][tilejson]")
+{
+    TileJSONFiles files;
+    const auto url = files.write("tiles.json", R"({"tilejson":"3.0.0","tiles":["{z}/{x}/{y}.pbf"],
+        "minzoom":"bad","maxzoom":999999999999,"bounds":["bad",null,0,0],"attribution":42})");
+    osg::ref_ptr<XYZFeatureSource> source = new XYZFeatureSource();
+    source->setURL(URI(url));
+    REQUIRE(source->open().isOK());
+    CHECK(source->getMinLevel() == 0);
+    CHECK(source->getMaxLevel() == 30);
+    CHECK(source->getAttribution().empty());
+}
+
+//! Malformed manifests fail during open, before tile requests can run.
+TEST_CASE("XYZFeatures rejects unusable TileJSON", "[feature][tilejson]")
+{
+    TileJSONFiles files;
+    const std::vector<std::string> cases = {
+        std::string("not json"), std::string("[]"), std::string("{}"),
+        std::string(R"({"tilejson":"3.0.0","tiles":[]})"),
+        std::string(R"({"tilejson":"3.0.0","tiles":[42]})"),
+        std::string(R"({"tilejson":"3.0.0","tiles":["constant.pbf"]})"),
+        std::string(R"({"tilejson":"3.0.0","tiles":["{z}/{x}/{y}.png"],"format":"png"})"),
+        std::string(R"({"tilejson":"3.0.0","tiles":["{z}/{x}/{y}.pbf"],"minzoom":8,"maxzoom":2})") };
+    osg::ref_ptr<XYZFeatureSource> source = new XYZFeatureSource();
+    source->setURL(URI(osgDB::concatPaths(files.directory, "missing.json")));
+    CHECK(source->open().isError());
+    for (const auto& data : cases)
+    {
+        source = new XYZFeatureSource();
+        source->setURL(URI(files.write("bad.json", data)));
+        CHECK(source->open().isError());
+    }
+}
+
+//! Direct templates keep their existing explicit-settings contract and writable local-file behavior.
+TEST_CASE("XYZFeatures still supports direct templates", "[feature][tilejson]")
+{
+    TileJSONFiles files;
+    osg::ref_ptr<XYZFeatureSource> source = new XYZFeatureSource();
+    source->setURL(URI(osgDB::concatPaths(files.directory, "{z}_{x}_{y}.json")));
+    CHECK(source->open().isError());
+    source->options().profile() = ProfileOptions("spherical-mercator");
+    source->setFormat("json");
+    source->setMinLevel(0);
+    source->setMaxLevel(1);
+    REQUIRE(source->open().isOK());
+    CHECK(source->isWritable());
+}
 
 namespace
 {

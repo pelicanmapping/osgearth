@@ -9,7 +9,7 @@
 namespace osgEarth
 {
     /**
-     * FeatureSource that reads feature tiles from a parameterized "XYZ" source.
+     * FeatureSource that reads feature tiles from an XYZ URL template or a TileJSON metadata URL.
      */
     class OSGEARTH_EXPORT XYZFeatureSource : public TiledFeatureSource
     {
@@ -28,7 +28,8 @@ namespace osgEarth
     public:
         META_Layer(osgEarth, XYZFeatureSource, Options, TiledFeatureSource, xyzfeatures);
 
-        //! Location of the resource
+        //! Tile URL template, or TileJSON URL when no tile placeholders are present.
+        //! TileJSON supplies defaults for format, profile, zoom limits, and attribution at open time.
         void setURL(const URI& value);
         const URI& getURL() const;
 

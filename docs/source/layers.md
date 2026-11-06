@@ -58,4 +58,4 @@ These are the public layer types native to osgEarth.
 | OGRFeatures | OGRFeatureSource | Uses a GDAL/OGR vector driver to read feature data. This is the most common feature source for reading local data (e.g., ESRI Shapefile) |
 | TFSFeatures | TFSFeatureSource | Reads vector features from a server according to the Tiled Feature Service specification (osgEarth proprietary) |
 | WFSFeatures | WFSFeatureSource | OGC Web Feature Service specification (limited implementation) |
-| XYZFeatures | XZYFeatureSource | Generic specification for reading tiled vector data from a server |
+| XYZFeatures | XYZFeatureSource | Tiled vector data from XYZ templates or TileJSON metadata URLs |

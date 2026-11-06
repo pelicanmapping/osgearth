@@ -1,0 +1,179 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarth/Gamepad>
+#include <osgEarth/MapNode>
+#include <osgEarth/GeoData>
+#include <osgEarth/EarthManipulator>
+#include <array>
+#include <set>
+
+namespace osgEarth
+{
+    /** Shared eye-centered camera math and input handling for dedicated navigation manipulators.
+     * Initialize with setNode(), setByMatrix(), and saveHome(); NavigationModeHandler performs this sequence.
+     * Except atomic tuning/status accessors, call on the view's event traversal thread.
+     * Positions use double-precision map world coordinates; MapNode parent transforms are preserved.
+     */
+    class OSGEARTH_EXPORT NavigationManipulator : public osgGA::CameraManipulator
+    {
+    public:
+        /** Observe the scene and locate its MapNode; detaching stops all motion. */
+        void setNode(osg::Node* node) override;
+        /** Return the observed scene; no ownership is transferred. */
+        osg::Node* getNode() override { return _node.get(); }
+        /** Return the observed scene for const callers. */
+        const osg::Node* getNode() const override { return _node.get(); }
+        /** Import an eye pose, dropping roll to keep the horizon aligned with local up. */
+        void setByMatrix(const osg::Matrixd& matrix) override;
+        /** Import a view matrix using the same local-up convention. */
+        void setByInverseMatrix(const osg::Matrixd& matrix) override;
+        /** Return the camera-to-world pose, including the MapNode parent transform. */
+        osg::Matrixd getMatrix() const override;
+        /** Return the world-to-camera view matrix. */
+        osg::Matrixd getInverseMatrix() const override;
+        /** Read keyboard/mouse input and integrate movement on FRAME events. */
+        bool handle(const osgGA::GUIEventAdapter&, osgGA::GUIActionAdapter&) override;
+        /** Clear held inputs and velocity when activated or reset. */
+        void init(const osgGA::GUIEventAdapter&, osgGA::GUIActionAdapter&) override;
+        /** Restore the pose saved on mode entry, then reapply this mode's terrain constraints. */
+        void home(double) override;
+        /** Restore the entry pose and request a redraw. */
+        void home(const osgGA::GUIEventAdapter&, osgGA::GUIActionAdapter&) override;
+        /** Capture the current pose as this activation's home position. */
+        void saveHome();
+        /** Level the eye while preserving heading; use on event traversal when entering a ground mode. */
+        void levelView() { _pitch = 0.0; _lookYaw = 0.0; }
+        /** Supply one normalized controller sample on the event traversal thread. */
+        void setGamepadState(const GamepadState& state) { _gamepad = state; }
+        /** Release all inputs and stop motion immediately; does not change the camera pose. */
+        void stop();
+        /** Set maximum movement speed in m/s; finite positive values only. Thread-safe. */
+        void setSpeed(double value);
+        /** Read the configured movement speed in m/s. Thread-safe. */
+        double getSpeed() const { return _speed.load(); }
+        /** Set look speed in radians/s; finite positive values only. Thread-safe. */
+        void setLookSpeed(double value);
+        /** Read look speed in radians/s. Thread-safe. */
+        double getLookSpeed() const { return _lookSpeed.load(); }
+        /** Set eye height/flight clearance above terrain in meters. Thread-safe. */
+        void setEyeHeight(double value);
+        /** Read eye height/flight clearance in meters. Thread-safe. */
+        double getEyeHeight() const { return _eyeHeight.load(); }
+        /** Whether the most recent terrain constraint found loaded terrain. Thread-safe. */
+        bool hasGround() const { return _hasGround.load(); }
+
+    protected:
+        /** Initialize common navigation with speed in m/s and terrain clearance in meters. */
+        NavigationManipulator(double speed, double eyeHeight);
+        /** Integrate this dedicated movement model for one bounded time step. */
+        virtual void step(const GamepadState& input, double dt) = 0;
+        /** Change heading and pitch; Drive overrides this to look independently of steering. */
+        virtual void look(double yaw, double pitch);
+        /** Reset model-specific velocity/orientation state after input loss or pose changes. */
+        virtual void resetMotion();
+        /** Find height in the map's vertical datum from loaded terrain; false means unavailable. */
+        virtual bool groundHeight(const GeoPoint& point, double& height) const;
+        /** Compute local east/north/up at the eye; false if no valid map coordinate frame exists. */
+        bool axes(osg::Vec3d& east, osg::Vec3d& north, osg::Vec3d& up) const;
+        /** Compute horizontal forward/right, and local up, using the current heading. */
+        bool directions(osg::Vec3d& forward, osg::Vec3d& right, osg::Vec3d& up) const;
+        /** Move by a displacement in meters, converting projected horizontal map units when necessary. */
+        osg::Vec3d displaced(const osg::Vec3d& meters) const;
+        /** Clamp to eye height, or only raise out of terrain for flight; failure leaves the candidate unchanged. */
+        bool constrain(osg::Vec3d& candidate, bool onGround);
+        /** Refresh the MapNode-to-camera reference frame; false when the map is unavailable. */
+        bool updateFrame();
+
+        osg::Vec3d _eye;
+        double _heading = 0.0, _pitch = 0.0, _lookYaw = 0.0;
+        osg::observer_ptr<osg::Node> _node;
+        osg::observer_ptr<MapNode> _map;
+        osg::ref_ptr<const SpatialReference> _srs;
+        osg::Matrixd _mapToWorld, _worldToMap;
+        std::atomic<bool> _hasGround{ false };
+
+    private:
+        GamepadState _gamepad;
+        std::set<int> _keys;
+        std::atomic<double> _speed, _eyeHeight;
+        std::atomic<double> _lookSpeed{ 1.5 };
+        osg::Matrixd _home;
+        double _lastTime = -1.0, _mouseX = 0.0, _mouseY = 0.0;
+        bool _dragging = false;
+    };
+
+    /** Eye-centered free flight: left stick moves/strafe, right stick looks, triggers descend/ascend. */
+    class OSGEARTH_EXPORT FlyManipulator : public NavigationManipulator
+    {
+    public:
+        /** Start with 250 m/s flight speed and 2 m terrain clearance. */
+        FlyManipulator();
+        /** Identify this dedicated camera controller. */
+        const char* className() const override { return "FlyManipulator"; }
+    protected:
+        /** Move in the viewing direction while keeping local up and avoiding loaded terrain. */
+        void step(const GamepadState&, double dt) override;
+    };
+
+    /** Terrain-constrained first-person walking; follows loaded ground, without building collision physics. */
+    class OSGEARTH_EXPORT WalkManipulator : public NavigationManipulator
+    {
+    public:
+        /** Start with 3 m/s walking speed and 1.7 m eye height. */
+        WalkManipulator();
+        /** Identify this dedicated camera controller. */
+        const char* className() const override { return "WalkManipulator"; }
+    protected:
+        /** Move along the local tangent plane and hold position if destination terrain is unavailable. */
+        void step(const GamepadState&, double dt) override;
+    };
+
+    /** Arcade in-cab driving with acceleration, braking/reverse, bicycle steering, and independent free look. */
+    class OSGEARTH_EXPORT DriveManipulator : public NavigationManipulator
+    {
+    public:
+        /** Start with a 25 m/s top speed and 1.5 m camera height above terrain. */
+        DriveManipulator();
+        /** Identify this dedicated camera controller. */
+        const char* className() const override { return "DriveManipulator"; }
+        /** Read signed speed in m/s for UI display. Thread-safe. */
+        double getVelocity() const { return _displayVelocity.load(); }
+        /** Set acceleration in m/s squared; finite positive values only. Thread-safe. */
+        void setAcceleration(double value);
+        /** Read configured acceleration in m/s squared. Thread-safe. */
+        double getAcceleration() const { return _acceleration.load(); }
+    protected:
+        /** Integrate throttle, braking, coasting and speed-dependent steering, then follow terrain. */
+        void step(const GamepadState&, double dt) override;
+        /** Look around the cab without changing vehicle heading. */
+        void look(double yaw, double pitch) override;
+        /** Stop the vehicle while preserving the current camera direction. */
+        void resetMotion() override;
+    private:
+        double _velocity = 0.0;
+        std::atomic<double> _displayVelocity{ 0.0 }, _acceleration{ 6.0 };
+    };
+
+    /** Retains four dedicated manipulators and applies UI mode requests during event traversal. */
+    class OSGEARTH_EXPORT NavigationModeHandler : public osgGA::GUIEventHandler
+    {
+    public:
+        enum Mode { MAP, FLY, WALK, DRIVE };
+        /** Retain the supplied map manipulator (required) and create the three eye-centered manipulators. */
+        explicit NavigationModeHandler(Util::EarthManipulator* mapManipulator);
+        /** Queue a mode change; safe from the GUI thread. */
+        void requestMode(Mode mode) { _requested = static_cast<int>(mode); }
+        /** Return the last activated mode. Thread-safe. */
+        Mode getMode() const { return static_cast<Mode>(_current.load()); }
+        /** Return an owned controller for tuning; pointers remain stable for this handler's lifetime. */
+        osgGA::CameraManipulator* getManipulator(Mode mode) const;
+        /** Transfer the current pose and reset motion on FRAME; does not consume events. */
+        bool handle(const osgGA::GUIEventAdapter&, osgGA::GUIActionAdapter&) override;
+    private:
+        std::array<osg::ref_ptr<osgGA::CameraManipulator>, 4> _manipulators;
+        std::atomic<int> _requested{ -1 }, _current{ MAP };
+    };
+}

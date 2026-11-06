@@ -6,6 +6,7 @@
 #include <osgEarthImGui/ImGuiPanel>
 #include <osgEarth/MapNode>
 #include <osgEarth/EarthManipulator>
+#include <osgEarth/NavigationManipulators>
 #include <atomic>
 #include <cmath>
 
@@ -14,7 +15,7 @@ namespace osgEarth
     using namespace osgEarth::Util;
 
     /**
-     * GUI for the EarthManipulator settings
+     * Camera mode selection and settings for dedicated map, fly, walk, and drive manipulators.
      */
     struct CameraGUI : public ImGuiPanel
     {
@@ -114,6 +115,8 @@ namespace osgEarth
         osg::observer_ptr<osgViewer::View> _view;
         osg::observer_ptr<EarthManipulator> _manipulator;
         osg::ref_ptr<OrbitHandler> _orbit;
+        osg::observer_ptr<NavigationModeHandler> _navigation;
+        osg::observer_ptr<GamepadHandler> _gamepad;
         float _orbitSpeed = 1.5f;
         float _zoomPeriodSeconds = 45.0f;
         float _zoomSpreadPercent = 25.0f;
@@ -148,6 +151,16 @@ namespace osgEarth
         void update(osg::RenderInfo& ri) override
         {
             auto* currentView = view(ri);
+            _navigation = nullptr;
+            _gamepad = nullptr;
+            if (currentView)
+            {
+                for (const auto& handler : currentView->getEventHandlers())
+                {
+                    if (auto* modes = dynamic_cast<NavigationModeHandler*>(handler.get())) _navigation = modes;
+                    if (auto* pad = dynamic_cast<GamepadHandler*>(handler.get())) _gamepad = pad;
+                }
+            }
             auto* man = currentView ? dynamic_cast<EarthManipulator*>(currentView->getCameraManipulator()) : nullptr;
             if (_view.get() != currentView || _manipulator.get() != man)
             {
@@ -185,6 +198,93 @@ namespace osgEarth
             }
         }
 
+        //! Draw mode and input controls; return true after drawing an eye-centered mode's settings.
+        bool drawNavigation(osg::RenderInfo& ri)
+        {
+            osg::ref_ptr<NavigationModeHandler> modes;
+            if (!_navigation.lock(modes)) return false;
+            auto* navigation = dynamic_cast<NavigationManipulator*>(
+                modes->getManipulator(modes->getMode()));
+            auto* drive = dynamic_cast<DriveManipulator*>(navigation);
+            const bool fly = dynamic_cast<FlyManipulator*>(navigation) != nullptr;
+            osg::ref_ptr<GamepadHandler> pad;
+#ifdef _WIN32
+            _gamepad.lock(pad);
+#endif
+            if (ImGuiLTable::Begin("CameraNavigation"))
+            {
+                const char* names[] = { "Map", "Fly", "Walk", "Drive" };
+                const int mode = static_cast<int>(modes->getMode());
+                if (ImGuiLTable::BeginCombo("Navigation mode", names[mode]))
+                {
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        if (ImGui::Selectable(names[i], i == mode))
+                        {
+                            if (_orbit) _orbit->enabled = false;
+                            modes->requestMode(static_cast<NavigationModeHandler::Mode>(i));
+                            view(ri)->requestRedraw();
+                        }
+                        if (i == mode) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGuiLTable::EndCombo();
+                }
+                if (pad)
+                {
+                    bool enabled = pad->getEnabled();
+                    if (ImGuiLTable::Checkbox("Gamepad", &enabled)) pad->setEnabled(enabled);
+                }
+                if (navigation)
+                {
+                    float speed = static_cast<float>(navigation->getSpeed() * (drive ? 3.6 : 1.0));
+                    if (ImGuiLTable::SliderFloat(drive ? "Top speed (km/h)" : "Speed (m/s)", &speed,
+                        fly ? 1.0f : 0.1f, fly ? 10000.0f : drive ? 360.0f : 20.0f,
+                        "%.1f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
+                        navigation->setSpeed(speed / (drive ? 3.6 : 1.0));
+                    float lookSpeed = static_cast<float>(osg::RadiansToDegrees(navigation->getLookSpeed()));
+                    if (ImGuiLTable::SliderFloat("Look speed (deg/s)", &lookSpeed, 10.0f, 240.0f, "%.0f", 0))
+                        navigation->setLookSpeed(osg::DegreesToRadians(lookSpeed));
+                    float height = static_cast<float>(navigation->getEyeHeight());
+                    if (ImGuiLTable::SliderFloat(fly ? "Terrain clearance (m)" : "Eye height (m)",
+                        &height, 0.2f, 10.0f, "%.1f", 0))
+                        navigation->setEyeHeight(height);
+                    if (drive)
+                    {
+                        float acceleration = static_cast<float>(drive->getAcceleration());
+                        if (ImGuiLTable::SliderFloat("Acceleration (m/s2)", &acceleration, 0.5f, 15.0f, "%.1f", 0))
+                            drive->setAcceleration(acceleration);
+                        ImGuiLTable::Text("Speed", "%.1f km/h", drive->getVelocity() * 3.6);
+                    }
+                }
+                ImGuiLTable::End();
+            }
+            if (pad && pad->getEnabled())
+            {
+                if (pad->getController() >= 0) ImGui::Text("XInput controller %d", pad->getController() + 1);
+                else ImGui::TextDisabled("Waiting for an XInput controller");
+                ImGui::TextWrapped("Release sticks, triggers and A after changing modes or returning to the window.");
+            }
+            if (!navigation) return false;
+            ImGui::Separator();
+            if (drive)
+            {
+                ImGui::TextWrapped("Left stick: steer. RT: throttle. LT: brake, then reverse. Right stick: look around.");
+                ImGui::TextWrapped("Keyboard: W/S throttle/brake/reverse, A/D steer. Right mouse drag or arrows: look.");
+            }
+            else
+            {
+                ImGui::TextWrapped("Left stick or WASD: move and strafe. Right stick, arrows or right mouse drag: look.");
+                if (fly) ImGui::TextWrapped("RT/E: ascend. LT/Q: descend.");
+            }
+            ImGui::TextWrapped("LB/Ctrl: slow. RB/Shift: fast. A/Home: return to this mode's entry position.");
+            if (!fly)
+            {
+                ImGui::TextWrapped("Follows terrain beneath the camera; buildings and other obstacles are not colliders.");
+                if (!navigation->hasGround()) ImGui::TextDisabled("Waiting for loaded terrain beneath the camera");
+            }
+            return true;
+        }
+
         void draw(osg::RenderInfo& ri)
         {
             if (!isVisible())
@@ -212,6 +312,11 @@ namespace osgEarth
             }
 
             ImGui::Begin(name(), visible());
+            if (drawNavigation(ri))
+            {
+                ImGui::End();
+                return;
+            }
             if (!_settings)
             {
                 ImGui::TextColored(ImVec4(1, 0, 0, 1), "No earth manipulator");

@@ -188,6 +188,8 @@ SET(TARGET_H
     DrapingTechnique
     DrawInstanced
     EarthManipulator
+    Gamepad
+    NavigationManipulators
     ECEF
     Elevation
     ElevationLayer
@@ -561,6 +563,8 @@ set(TARGET_SRC
     DrapingTechnique.cpp
     DrawInstanced.cpp
     EarthManipulator.cpp
+    Gamepad.cpp
+    NavigationManipulators.cpp
     ECEF.cpp
     Elevation.cpp
     ElevationLayer.cpp
@@ -980,7 +984,7 @@ endif()
 
 # dbghelp?
 if(WIN32)
-    target_link_libraries(${LIB_NAME} PRIVATE dbghelp)
+    target_link_libraries(${LIB_NAME} PRIVATE dbghelp xinput9_1_0 user32)
 endif()
 
 # special purpose - do not remove

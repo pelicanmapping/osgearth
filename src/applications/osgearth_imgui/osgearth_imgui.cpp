@@ -4,6 +4,7 @@
 */
 #include <osgEarthImGui/ImGuiApp>
 #include <osgEarth/EarthManipulator>
+#include <osgEarth/NavigationManipulators>
 #include <osgEarth/ExampleResources>
 #include <osgEarth/GLUtils>
 #include <osgViewer/Viewer>
@@ -65,6 +66,8 @@ usage(const char* name)
 {
     OE_NOTICE
         << "\nUsage: " << name << " file.earth" << std::endl
+        << "  --gamepad: enable Windows XInput (also available in Tools > Camera)" << std::endl
+        << "  Camera modes: Map, Fly, Walk, Drive; WASD moves, right mouse drag looks." << std::endl
         << MapNodeHelper().usage() << std::endl;
     return 0;
 }
@@ -77,6 +80,7 @@ main(int argc, char** argv)
         return usage(argv[0]);
 
     bool extras = arguments.read("--extras");
+    bool gamepad = arguments.read("--gamepad");
 
     osgEarth::initialize(arguments);
 
@@ -184,6 +188,14 @@ main(int argc, char** argv)
             viewer.setCameraManipulator(new osgGA::TrackballManipulator());
         }
         viewer.setSceneData(node);
+        if (mapNode)
+        {
+            // Switching and input updates execute on event traversal, before the active manipulator.
+            viewer.addEventHandler(new NavigationModeHandler(
+                dynamic_cast<EarthManipulator*>(viewer.getCameraManipulator())));
+            viewer.addEventHandler(new GamepadHandler(gamepad));
+            viewer.setRunFrameScheme(osgViewer::ViewerBase::CONTINUOUS);
+        }
         return viewer.run();
     }
     else

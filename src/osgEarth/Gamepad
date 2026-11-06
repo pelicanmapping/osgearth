@@ -1,0 +1,52 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarth/Common>
+#include <osgGA/GUIEventHandler>
+#include <osgGA/CameraManipulator>
+#include <osg/Vec2d>
+#include <atomic>
+
+namespace osgViewer { class View; }
+
+namespace osgEarth
+{
+    /** Platform-independent controller sample. Sticks are [-1,1], triggers [0,1]; home is a press edge. */
+    struct GamepadState
+    {
+        osg::Vec2d move, look;
+        double leftTrigger = 0.0, rightTrigger = 0.0;
+        bool slow = false, fast = false, home = false;
+    };
+
+    /** Polls XInput on Windows and feeds the active navigation manipulator or EarthManipulator.
+     * Install after the mode-switch handler. Requires continuous frames; owns no view or manipulator.
+     * Other platforms retain keyboard/mouse navigation without a controller backend.
+     */
+    class OSGEARTH_EXPORT GamepadHandler : public osgGA::GUIEventHandler
+    {
+    public:
+        /** Enable or disable polling initially; construction does not access hardware. */
+        explicit GamepadHandler(bool enabled = true);
+        /** Thread-safe polling toggle; disabling stops controller motion on the next frame. */
+        void setEnabled(bool value) { _enabled = value; }
+        /** Thread-safe polling preference for UI display. */
+        bool getEnabled() const { return _enabled.load(); }
+        /** Thread-safe connected slot, or -1 when none has been detected. */
+        int getController() const { return _controller.load(); }
+        /** Poll during event traversal and leave normal event delivery intact. */
+        bool handle(const osgGA::GUIEventAdapter&, osgGA::GUIActionAdapter&) override;
+        /** Check native Windows foreground ownership; other window systems return true. */
+        static bool isViewFocused(osgViewer::View* view);
+
+    private:
+        std::atomic<bool> _enabled;
+        std::atomic<int> _controller{ -1 };
+        osg::observer_ptr<osgGA::CameraManipulator> _active;
+        unsigned short _buttons = 0;
+        double _lastTime = -1.0, _nextScan = 0.0;
+        bool _armed = false, _moving = false, _wasEnabled = false;
+    };
+}

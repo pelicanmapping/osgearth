@@ -67,6 +67,9 @@ namespace osgEarth { namespace REX
         //! during the cull traversal to let us know it's still active.
         void touch(TileNode* tile, osg::NodeVisitor& nv);
 
+        //! Invalidates unpublished child jobs even when their parent lies outside a refreshed LOD/extent.
+        unsigned getChildPreparationRevision() const { return _childPreparationRevision.load(); }
+
         //! Number of tiles in the registry.
         unsigned size() const { return _tiles.size(); }
 
@@ -89,6 +92,7 @@ namespace osgEarth { namespace REX
 
     protected:
 
+        std::atomic<unsigned> _childPreparationRevision{0};
         TileTable _tiles;
         Tracker _tracker;
         mutable std::mutex _mutex;

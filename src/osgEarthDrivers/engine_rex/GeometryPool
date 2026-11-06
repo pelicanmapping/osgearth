@@ -292,6 +292,9 @@ namespace osgEarth
         //! Shared engine-local cache; detached snapshots and scratch storage have bounded retention.
         const std::shared_ptr<KdTreePool>& getKdTreePool() const { return _kdTreePool; }
 
+        //! Retires canceled/stale child preparation without destroying its CPU geometry during cull.
+        const ObjectReleaser::Client& getChildReleaser() const { return _childReleaser; }
+
         //! Gets the Geometry associated with a tile key, creating a new one if
         //! necessary and storing it in the pool.
         void getPooledGeometry(
@@ -326,6 +329,7 @@ namespace osgEarth
         ObjectReleaser::Client _releaser;
         ObjectReleaser::Client _kdTreeReleaser;
         std::shared_ptr<KdTreePool> _kdTreePool;
+        ObjectReleaser::Client _childReleaser;
 
         void createKeyForTileKey(
             const TileKey& tileKey,

@@ -57,7 +57,9 @@ TileDrawable::TileDrawable(
     SharedGeometry* geometry,
     int tileSize,
     const ObjectReleaser::Client& kdTreeReleaser,
-    const std::shared_ptr<KdTreePool>& kdTreePool) :
+    const std::shared_ptr<KdTreePool>& kdTreePool,
+    Texture::Ptr initialElevation,
+    const osg::Matrixf& initialMatrix) :
     osg::Drawable(),
     _key(key),
     _geom(geometry),
@@ -68,7 +70,7 @@ TileDrawable::TileDrawable(
     _kdTreePool(kdTreePool)
 {
     // builds the initial mesh.
-    setElevationRaster(nullptr, osg::Matrixf::identity());
+    setElevationRaster(initialElevation, initialMatrix);
 }
 
 TileDrawable::~TileDrawable()

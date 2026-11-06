@@ -44,6 +44,7 @@ TileNodeRegistry::setDirty(
     const CreateTileManifest& manifest)
 {
     std::lock_guard<std::mutex> lock(_mutex);
+    ++_childPreparationRevision;
     
     for( TileTable::iterator i = _tiles.begin(); i != _tiles.end(); ++i )
     {
@@ -162,6 +163,7 @@ TileNodeRegistry::stopListeningFor(
 void
 TileNodeRegistry::releaseAll(osg::State* state)
 {
+    ++_childPreparationRevision;
     std::lock_guard<std::mutex> lock(_mutex);
 
     for (auto& tile : _tiles)

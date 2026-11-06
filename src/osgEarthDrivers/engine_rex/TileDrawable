@@ -71,13 +71,16 @@ namespace osgEarth { namespace REX
     public:
         
         //! construct a new TileDrawable that maintains the in-memory mesh
-        //! for intersection testing. Retains the engine cache and client for safe snapshot recycling.
+        //! for intersection testing, building directly from the supplied initial elevation.
+        //! Retains the engine cache and client for safe snapshot recycling.
         TileDrawable(
             const TileKey& key,
             SharedGeometry* geometry,
             int tileSize,
             const ObjectReleaser::Client& kdTreeReleaser,
-            const std::shared_ptr<KdTreePool>& kdTreePool);
+            const std::shared_ptr<KdTreePool>& kdTreePool,
+            Texture::Ptr initialElevation = nullptr,
+            const osg::Matrixf& initialMatrix = osg::Matrixf::identity());
 
         //! Detaches the final intersection snapshot and submits it for recycling or worker destruction.
         virtual ~TileDrawable();

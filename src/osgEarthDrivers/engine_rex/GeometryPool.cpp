@@ -20,6 +20,7 @@ GeometryPool::GeometryPool() :
     _releaser(Registry::instance()->getObjectReleaser()->createClient("REX geometry pool")),
     _kdTreeReleaser(Registry::instance()->getObjectReleaser()->createClient("REX replaced KdTrees")),
     _kdTreePool(std::make_shared<KdTreePool>(_kdTreeReleaser)),
+    _childReleaser(Registry::instance()->getObjectReleaser()->createClient("REX stale child preparation")),
     _enabled(true),
     _debug(false)
 {
@@ -41,6 +42,7 @@ GeometryPool::GeometryPool() :
 GeometryPool::~GeometryPool()
 {
     _releaser.drain();
+    _childReleaser.drain();
     _kdTreeReleaser.drain();
 }
 

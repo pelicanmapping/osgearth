@@ -114,9 +114,10 @@ this process). Both smoke runs opened the viewer and exited normally.
 
 - **Implemented: TileDrawable KdTree freelist and reusable build storage.**
   Detached snapshots return through ObjectReleaser; published trees are never rebuilt
-  in place. The vsync-on capture confirmed 95.8% Main-thread reuse. Next, diagnose
-  cache misses and reduce synchronous terrain rebuild bursts. See the benchmark,
-  ownership and capture details below.
+  in place. The vsync-on capture confirmed 95.8% Main-thread reuse. Initial elevated
+  child surfaces now build on tile-creation workers. The 12:51:19 capture confirms
+  all 11,056 initial preparations ran there, with cheap Main-thread publication.
+  Later elevation-merge rebuilds and cache misses remain open.
 - **Deferred: swap-window disposal scheduling.** Evaluate cooperative disposal
   chunks during the normal vsync-on swap wait after the recycling capture. Do not
   suspend a worker holding allocator locks or wait for cleanup on the frame thread.
@@ -725,3 +726,111 @@ and vsync setting prevent a controlled before/after performance claim.
 
 Full report and evidence: `D:/Captures/2026-11-06_12-07-12_analysis.md`,
 `2026-11-06_12-07-12_evidence.json` and `2026-11-06_12-07-12_pooled-builds.csv`.
+
+
+## Initial elevated child preparation (November 6)
+
+Async child creation now captures the parent's elevation sampler before dispatch.
+The existing oe.rex.createchild workers construct each child's actual geometry,
+elevated CPU mesh and KdTree together, followed by its surface bounds, child corners
+and horizon data. TileDrawable accepts initial elevation so it does not first build
+an unelevated tree. Unique constrained meshes still use their own vertices and
+primitive indices; the KdTree pool reuses storage, never another tile's topology.
+
+Before attaching any siblings, the scene traversal verifies elevation activation,
+texture identity, sampling matrix and sampler revision, retained image identity and
+modified count, map identity/revision, constraint/mesh-layer revisions, the parent's
+geometry generation, and a registry invalidation generation. The registry generation
+also catches regional/LOD refreshes that exclude the parent or unpublished children.
+This is deliberately conservative: an unrelated explicit invalidation can trigger a
+retry. Terrain source images remain read-only while jobs sample them, following the
+existing terrain-source ownership contract; ref-counting does not make concurrent
+in-place pixel edits safe.
+
+Stale, canceled, abandoned or incomplete preparation never marks children ready. The
+parent remains visible and preparation retries on a later traversal. Rejected future
+handles are retained across reset and released by ObjectReleaser under
+`REX stale child preparation`, closing completion/reset races without destroying
+new meshes on Main. Registration, inherited rendering data and terrain notifications
+remain on the scene thread. Matching prepared elevation passes the existing identity
+guard, so publication does not rebuild the mesh/tree. Both grouped and per-child jobs
+are supported. Explicit synchronous creation remains synchronous. Existing later
+merge/inheritance elevation updates still use their synchronous path; this change
+specifically removes initial child preparation from the cull-thread burst.
+
+The existing Superluminal integration adds these scopes:
+
+- `Prepare elevated terrain child`: worker-side geometry/elevation/tree preparation.
+- `Publish prepared terrain children`: scene-thread attachment/registration.
+- `Reject stale terrain children`: rejected generation, followed by asynchronous retirement.
+
+Transient Google Benchmark tests compare the prior dispatch-flat / initialize-elevated
+workflow against the new actual asynchronous publication path in the same binary.
+Each batch contains 35 parents / 140 children. Reported wall time is caller submission
+plus publication, excluding worker waits, fixture setup and cleanup for both variants;
+it is not total loading latency. Five repetitions, four samples per repetition, six
+batches per sample after two warmups; resource tracing off, RelWithDebInfo:
+
+| Tile size | Previous caller work | Prepared caller work | Reduction |
+| --- | ---: | ---: | ---: |
+| 17x17 | 6.024904 ms | 0.183775 ms | 96.9% |
+| 65x65 | 76.121629 ms | 0.281163 ms | 99.6% |
+
+Validation passed 18 exact surface/picking comparisons, including constrained meshes,
+all four quadrants, grouped and ungrouped jobs, mesh/partition/primitive identity,
+bounds/spheres, child corners and horizon data. Thirteen stale-input cases included
+sampler/texture/matrix/image changes, constraint revision/removal/addition, parent
+geometry replacement and regional invalidation excluding the parent. A blocked-worker
+case changed elevation before queued preparation started: workers used the captured
+input and publication rejected it. Cancellation before/after completion, retries,
+null elevation, absent builders, explicit synchronous creation, later constraint and
+elevation updates, and old-tree immutability also passed. Existing paging/texture
+unit tests passed 268 assertions in 19 cases.
+
+Evidence: `D:/Captures/child-preparation-benchmarks.{json,txt}`,
+`child-preparation-validation.txt`, and `child-preparation-tests.txt`. Transient probe
+sources are preserved there as `ChildPreparationProbe.cpp` and
+`ChildPreparationBenchmarks.cpp`; all probe sources, friends and exports were removed
+from the repository and final binary. No public osgEarth ABI changed.
+
+The final build.bat build/install succeeded. Built and installed REX DLL hashes match:
+`8368CAC382630326CFAB266E99000A820482AD224A77C4C98DBD365F7CB55D5B`.
+A 180-frame viewer smoke test with local composite elevation and vsync enabled exited
+normally (0); its log includes a missing RexEngine.GL4.glsl source warning.
+
+Next capture: use normal **vsync on**. Verify initial KdTree builds beneath worker
+preparation and short publication scopes on Main; inspect stale-result frequency and
+any remaining synchronous elevation-merge bursts. **Buffer upload identity/cost**,
+**swap-window disposal scheduling**, and **Prestige asphalt sharing** remain deferred.
+
+## Vsync-on validation: initial preparation on workers (12:51:19)
+
+Capture: `D:/Captures/2026-11-06_12-51-19_osgearth_imgui.etl`.
+All 11,056 `Prepare elevated terrain child` events ran on the two
+`oe.rex.createchild` workers, each with a pooled KdTree build. Main published 2,541
+sibling groups at an average 0.026 ms per group. The largest burst attached 100
+children in 0.421 ms, within a 16.645 ms frame. No stale-result rejection was
+observed in this run.
+
+The remaining 461 Main-thread pooled builds never overlapped publication; the
+longest (0.913 ms) came through later elevation merge/inheritance. After the first
+five seconds, 391 such builds totaled 51.140 ms. Tree recycling and sampled
+KdTree destruction remained on `oe.dispose`.
+
+Excluding the first five seconds and final caption-button interaction, 1,703
+swap-completion frame intervals had a median of 16.668 ms and p99 of 16.859 ms.
+Only one exceeded 20 ms: 24.349 ms at 32.337 seconds. It contained 12.535 ms in
+native OSG geometry buffer compilation inside ICO, with 98.527% of source-attributed
+samples on the contiguous `glBufferSubData` upload line. Driver execution included
+demand-zero page faults and memory zeroing; this was primarily CPU execution,
+not a long wait or predominantly memory decommit. It contained no terrain-tree
+builds or child publication. A smaller 18.058 ms frame used the same upload path.
+The final 71.757 ms outlier was Windows caption-button tracking in event handling.
+These are CPU swap-completion intervals, not measured GPU presentation times.
+
+Native OSG upload identity and byte count remain uninstrumented, so this capture
+cannot identify the responsible buffer or asset. Buffer uploads, swap-window
+disposal, and Prestige asphalt sharing remain on the deferred action list.
+Publication's longest individual scope (1.022 ms) included 0.769 ms of heap-lock
+wait while resetting future bookkeeping; its enclosing frame still met 16.67 ms.
+Different camera workloads preclude a controlled comparison with earlier captures.

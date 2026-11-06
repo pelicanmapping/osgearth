@@ -1205,8 +1205,10 @@ void ThreeDTileNode::cancelContentRequest()
 {
     if (isContentRequestPending())
     {
+        ObjectReleaser::Objects retired{ ObjectReleaser::hold(_contentFuture) };
         _contentFuture.abandon();
         _requestedContent = false;
+        _tileset->_releaser.release(retired);
     }
 }
 
@@ -1351,14 +1353,24 @@ double ThreeDTileNode::computeScreenSpaceError(osgUtil::CullVisitor* cv)
 
 bool ThreeDTileNode::unloadContent()
 {
+    ObjectReleaser::Objects retired;
+    bool result = unloadContent(retired);
+    _tileset->_releaser.release(retired);
+    return result;
+}
+
+bool ThreeDTileNode::unloadContent(ObjectReleaser::Objects& retired)
+{
     // Don't unload the content of tiles that were loaded immediately.  This shouldn't be called as they aren't tracked, but just in case.
     if (_immediateLoad)
     {
         return false;
     }
 
+    retired.emplace_back(ObjectReleaser::hold(_contentFuture));
     if (_content.valid())
     {
+        retired.emplace_back(_content.get());
         // Don't call releaseGLObjects() here. This runs in the update traversal, possibly while the draw thread is
         // still rendering, and tile content shares state with the tiles that stay loaded (every glTF tile uses
         // the one PBRTexture program), so releasing it would delete GL objects that are in use. Dropping the node
@@ -1640,6 +1652,7 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
 
 ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& authorizationHeader,
     SceneGraphCallbacks* sceneGraphCallbacks, osgDB::Options* options, const ContentProcessor& processContent) :
+    _releaser(Registry::instance()->getObjectReleaser()->createClient("3D Tiles")),
     _processContent(processContent),
     _tileset(tileset),
     _options(options),
@@ -1692,6 +1705,11 @@ ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& author
     _options->setOptionString(optString);
 
     addChild(new ThreeDTilesetContentNode(this, tileset, _options.get()));
+}
+
+ThreeDTilesetNode::~ThreeDTilesetNode()
+{
+    _releaser.drain();
 }
 
 const std::string&
@@ -1896,13 +1914,16 @@ void ThreeDTilesetNode::expireTiles(const osg::NodeVisitor& nv)
 {
     OE_PROFILING_ZONE;
 
+    if (!_releaser.available()) return;
+    ObjectReleaser::Objects retired;
+
     unsigned int frameNumber = nv.getFrameStamp()->getFrameNumber();
     float frameTime = nv.getFrameStamp()->getReferenceTime();
 
     osg::Timer_t startTime = osg::Timer::instance()->tick();
     osg::Timer_t endTime;
 
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::unique_lock<std::mutex> lock(_mutex);
 
     // Max time in ms to allocate to erasing tiles
     float maxTime = 2.0f;
@@ -1919,8 +1940,9 @@ void ThreeDTilesetNode::expireTiles(const osg::NodeVisitor& nv)
             float age = frameTime - tile->getLastCulledFrameTime();
             bool canUnload = tile->getAutoUnload() && age >= _maxAge;
 
-            if (canUnload && tile->unloadContent())
+            if (canUnload && tile->unloadContent(retired))
             {
+                retired.emplace_back(tile.get());
                 tile->_trackerItrValid = false;
                 itr = _tracker.erase(itr);
                 ++numErased;
@@ -1951,6 +1973,8 @@ void ThreeDTilesetNode::expireTiles(const osg::NodeVisitor& nv)
     _tracker.erase(_sentryItr);
     _tracker.push_back(0);
     _sentryItr = --_tracker.end();
+    lock.unlock();
+    _releaser.release(retired);
 }
 
 void ThreeDTilesetNode::traverse(osg::NodeVisitor& nv)

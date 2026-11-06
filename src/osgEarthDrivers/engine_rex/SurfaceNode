@@ -34,6 +34,7 @@ namespace osgEarth { namespace REX
         int _lastFramePassedCull = 0;
 
     public:
+        //! Caches culling data from an already initialized drawable without rebuilding its mesh or KdTree.
         SurfaceNode(const TileKey& tilekey, TileDrawable* drawable);
 
         //! Update the elevation raster associated with this tile
@@ -80,6 +81,9 @@ namespace osgEarth { namespace REX
         bool _horizonCullingPointSet = false;
         osg::Vec3 _childrenCorners[4][8];
         static const bool _enableDebugNodes;
+
+        //! Refreshes bounds, child corners and horizon data from the current mesh on the traversal/creation thread.
+        void updateCullingData();
 
         void addDebugNode(const osg::BoundingBox& box);
         void removeDebugNode(void);

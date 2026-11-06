@@ -331,6 +331,7 @@ SET(TARGET_H
     Notify
     ObjectIDPicker
     ObjectIndex
+    ObjectReleaser
     OGRFeatureSource
     OgrUtils
     optional
@@ -692,6 +693,7 @@ set(TARGET_SRC
     Notify.cpp
     ObjectIDPicker.cpp
     ObjectIndex.cpp
+    ObjectReleaser.cpp
     OGRFeatureSource.cpp
     OgrUtils.cpp
     OverlayDecorator.cpp

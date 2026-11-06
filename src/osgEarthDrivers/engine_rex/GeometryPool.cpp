@@ -7,6 +7,7 @@
 #include <osgEarth/NodeUtils>
 #include <osgEarth/TerrainMeshLayer>
 #include <osgEarth/TerrainConstraintLayer>
+#include <osgEarth/Registry>
 #include <cstdlib> // for getenv
 
 using namespace osgEarth;
@@ -16,6 +17,8 @@ using namespace osgEarth::REX;
 
 
 GeometryPool::GeometryPool() :
+    _releaser(Registry::instance()->getObjectReleaser()->createClient("REX geometry pool")),
+    _kdTreeReleaser(Registry::instance()->getObjectReleaser()->createClient("REX replaced KdTrees")),
     _enabled(true),
     _debug(false)
 {
@@ -32,6 +35,12 @@ GeometryPool::GeometryPool() :
         _enabled = false;
         OE_INFO << LC << "Geometry pool disabled (environment)" << std::endl;
     }
+}
+
+GeometryPool::~GeometryPool()
+{
+    _releaser.drain();
+    _kdTreeReleaser.drain();
 }
 
 void
@@ -206,24 +215,27 @@ GeometryPool::convertTileMeshToSharedGeometry(const TileMesh& mesh) const
 void
 GeometryPool::traverse(osg::NodeVisitor& nv)
 {
-    if (nv.getVisitorType() == nv.UPDATE_VISITOR && _enabled)
+    if (nv.getVisitorType() == nv.UPDATE_VISITOR && _enabled && _releaser.available())
     {
-        std::lock_guard<std::mutex> lock(_geometryMapMutex);
-
-        std::vector<GeometryKey> keys;
-
-        for(auto& iter : _geometryMap)
+        ObjectReleaser::Objects retired;
         {
-            if (iter.second.get()->referenceCount() == 1)
+            std::lock_guard<std::mutex> lock(_geometryMapMutex);
+            for (auto i = _geometryMap.begin(); i != _geometryMap.end();)
             {
-                keys.push_back(iter.first);
+                if (i->second->referenceCount() == 1)
+                {
+                    // Retain before erasing: SharedGeometry's CPU arrays must not die in the frame traversal.
+                    retired.emplace_back(i->second.get());
+                    i = _geometryMap.erase(i);
+                }
+                else
+                {
+                    ++i;
+                }
             }
         }
-
-        for(auto& key : keys)
-        {
-            _geometryMap.erase(key);
-        }
+        // Submission can release synchronously during shutdown; never hold the pool lock here.
+        _releaser.release(retired);
     }
 
     osg::Group::traverse(nv);
@@ -233,8 +245,15 @@ void
 GeometryPool::clear()
 {
     releaseGLObjects(nullptr);
-    std::lock_guard<std::mutex> lock(_geometryMapMutex);
-    _geometryMap.clear();
+    ObjectReleaser::Objects retired;
+    {
+        std::lock_guard<std::mutex> lock(_geometryMapMutex);
+        retired.reserve(_geometryMap.size());
+        for (auto& entry : _geometryMap)
+            retired.emplace_back(entry.second.get());
+        _geometryMap.clear();
+    }
+    _releaser.release(retired);
 }
 
 void

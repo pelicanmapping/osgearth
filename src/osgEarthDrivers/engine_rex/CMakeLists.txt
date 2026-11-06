@@ -71,7 +71,6 @@ SET(TARGET_H
     TileNodeRegistry
     Loader
     Unloader
-    TileReleaser
 	SelectionInfo
 )
 

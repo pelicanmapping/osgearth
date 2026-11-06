@@ -15,6 +15,7 @@ set(TARGET_SRC
     FeatureTests.cpp
     ImageUtilsTests.cpp
     PathTests.cpp
+    PagedNodeTests.cpp
     PBRMaterialTests.cpp
     MaterialTexturePreparationTests.cpp
     ImageLayerTests.cpp

@@ -7,7 +7,7 @@
 
 #include "Common"
 #include "TileNode"
-#include "TileReleaser"
+#include <osgEarth/ObjectReleaser>
 #include <osgEarth/FrameClock>
 #include <osg/Group>
 
@@ -35,10 +35,13 @@ namespace osgEarth { namespace REX
         void traverse(osg::NodeVisitor& nv) override;
 
     protected:
+        //! Drains this owner's releases; normal frame traversal never waits.
+        ~UnloaderGroup() override { _releaser.drain(); }
+
         TerrainOptionsAPI _options;
         TileNodeRegistry* _tiles;
         std::vector<osg::ref_ptr<TileNode>> _deadpool;
-        TileReleaser _releaser;
+        ObjectReleaser::Client _releaser;
         unsigned _frameLastUpdated;
         const FrameClock* _clock;
     };

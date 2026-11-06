@@ -10,6 +10,7 @@
 #include <osgEarth/SceneGraphCallback>
 #include <osgEarth/Utils>
 #include <osgEarth/LoadableNode>
+#include <osgEarth/ObjectReleaser>
 #include <osgEarth/CullingUtils>
 #include <queue>
 
@@ -258,6 +259,9 @@ namespace osgEarth { namespace Util
     private:
         friend class PagingManager;
 
+        //! Update thread: invalidate the load and detach payload, retaining every outgoing reference in retired.
+        void unload(ObjectReleaser::Objects& retired);
+
         Loader _load_function;
         RefinementFunction _refinementFunction;
         ReplacementFunction _replacementFunction;
@@ -363,6 +367,7 @@ namespace osgEarth { namespace Util
         void traverse(osg::NodeVisitor& nv);
 
     private:
+        ObjectReleaser::Client _releaser;
         bool _threadsafe = true;
         Mutex _trackerMutex;
         SentryTracker<osg::ref_ptr<PagedNode2>> _tracker;

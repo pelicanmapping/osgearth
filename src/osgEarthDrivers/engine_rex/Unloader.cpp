@@ -8,6 +8,10 @@
 
 #include <osgEarth/Metrics>
 #include <osgEarth/NodeUtils>
+#include <osgEarth/Registry>
+#ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
+#include <Superluminal/PerformanceAPI.h>
+#endif
 
 #undef  LC
 #define LC "[UnloaderGroup] "
@@ -18,6 +22,7 @@ using namespace osgEarth::REX;
 UnloaderGroup::UnloaderGroup(TileNodeRegistry* tiles, const TerrainOptionsAPI& api) :
     _options(api),
     _tiles(tiles),
+    _releaser(Registry::instance()->getObjectReleaser()->createClient("REX terrain")),
     //_minResidentTiles(0u),
     //_maxAge(0.1),
     //_minRange(0.0f),

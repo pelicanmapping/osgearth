@@ -9,6 +9,7 @@
 #include <osgEarth/Utils>
 #include <osgEarth/Capabilities>
 #include <osgEarth/Registry>
+#include <osgEarth/ObjectReleaser>
 #include <osgEarth/Notify>
 #include "ResourceLifetimeTrace.h"
 
@@ -762,8 +763,7 @@ GLObjectPool::releaseOrphans(const osg::GraphicsContext* gc)
 
     // then check for objects to add to the orphan list:
     GLsizeiptr bytes = 0;
-    Collection keepers;
-    keepers.reserve(_objects.size());
+    std::size_t kept = 0;
     for (unsigned i = 0; i < _objects.size(); ++i)
     {
         auto& object = _objects[i];
@@ -799,11 +799,15 @@ GLObjectPool::releaseOrphans(const osg::GraphicsContext* gc)
 
         // keep the object around.
         bytes += object->size();
-        keepers.emplace_back(std::move(object));
+        // Keep survivor order without allocating. Swapping preserves removed references
+        // in the scanned tail until every orphan ownership decision is complete.
+        if (kept != i)
+            _objects[kept].swap(object);
+        ++kept;
     }
 
-    _objects.swap(keepers);
     _totalBytes = bytes;
+    _objects.resize(kept); // Drop removed owners after the scan; retain capacity for the next frame.
 
     if (glObjectPoolDebugEnabled())
     {
@@ -2186,21 +2190,55 @@ namespace
         }
     };
 
+    /** Retires final compiler ownership independently of the ICO implementation.
+     * OSG keeps this set alive while any context or temporary compile list uses it.
+     * Only its final destructor transfers the remaining CPU references; no GL calls run on the worker.
+     */
+    struct RetiringCompileSet : public ICO::CompileSet
+    {
+        ObjectReleaser::Client _releaser;
+        ObjectReleaser::Objects _retired;
+
+        //! Allocate an empty ownership carrier before compilation, so teardown only swaps members and queues it.
+        RetiringCompileSet() :
+            _releaser(Registry::instance()->getObjectReleaser()->createClient("ICO compile set")),
+            _retired{ new ICO::CompileSet() }
+        {
+        }
+
+        /** Final release on any thread: empty every strong-owning base member before handing off the carrier.
+         * The worker may run immediately. The original set is never resurrected or submitted from its destructor.
+         * After OR shutdown its terminal synchronous-release behavior applies; no Registry lookup is needed here.
+         */
+        ~RetiringCompileSet() override
+        {
+            auto* retired = static_cast<ICO::CompileSet*>(_retired.front().get());
+            _subgraphToCompile.swap(retired->_subgraphToCompile);
+            _compileCompletedCallback.swap(retired->_compileCompletedCallback);
+            _compileMap.swap(retired->_compileMap);
+            _markerObject.swap(retired->_markerObject);
+            _releaser.release(_retired);
+        }
+    };
+
     struct ICOCallback : public ICO::CompileCompletedCallback
     {
         jobs::promise<osg::ref_ptr<osg::Node>> _promise;
         osg::ref_ptr<osg::Node> _node;
         std::atomic_int& _jobsActive;
 
+        //! Keep the node and completion promise alive until the compile set retires its callback.
         ICOCallback(const osg::ref_ptr<osg::Node>& node, std::atomic_int& jobsActive) :
             _node(node),
             _jobsActive(jobsActive) { }
 
+        //! Account for the final callback release, including deferred or canceled compile sets.
         virtual ~ICOCallback()
         {
             _jobsActive--;
         }
 
+        //! Publish on OSG's completion thread; retirement must not change continuation/merge ordering.
         bool compileCompleted(ICO::CompileSet* compileSet) override
         {
             _promise.resolve(_node);
@@ -2266,7 +2304,7 @@ GLObjectsCompiler::compileAsync(
 
             if (state->empty() == false)
             {
-                auto compileSet = new osgUtil::IncrementalCompileOperation::CompileSet();
+                osg::ref_ptr<ICO::CompileSet> compileSet = new RetiringCompileSet();
                 compileSet->buildCompileMap(ico->getContextSet(), *state.get());
                 ICOCallback* callback = new ICOCallback(node, _jobsActive);
                 result = callback->_promise;
@@ -2306,7 +2344,7 @@ GLObjectsCompiler::compileAsync(
         osg::ref_ptr<ICO> ico;
         if (ObjectStorage::get(host, ico) && ico->isActive())
         {
-            auto compileSet = new osgUtil::IncrementalCompileOperation::CompileSet();
+            osg::ref_ptr<ICO::CompileSet> compileSet = new RetiringCompileSet();
             compileSet->buildCompileMap(ico->getContextSet(), *state);
             ICOCallback* callback = new ICOCallback(node, _jobsActive);
             result = callback->_promise;
@@ -2362,7 +2400,7 @@ GLObjectsCompiler::requestIncrementalCompileWithICO(
         osg::ref_ptr<ICO> ico;
         if (ico_weak.lock(ico) && ico->isActive())
         {
-            auto compileSet = new osgUtil::IncrementalCompileOperation::CompileSet();
+            osg::ref_ptr<ICO::CompileSet> compileSet = new RetiringCompileSet();
             compileSet->buildCompileMap(ico->getContextSet(), *state);
             ICOCallback* callback = new ICOCallback(node, _jobsActive);
             callback->_promise = promise;

@@ -117,7 +117,7 @@ TileNode::createGeometry(Cancelable* progress)
     if (geom.valid())
     {
         // Create the drawable for the terrain surface:
-        auto* drawable = new TileDrawable(_key, geom.get(), tileSize);
+        auto* drawable = new TileDrawable(_key, geom.get(), tileSize, _context->getGeometryPool()->getKdTreeReleaser());
 
         // Give the tile Drawable access to the render model so it can properly
         // calculate its bounding box and sphere.

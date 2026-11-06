@@ -16,6 +16,7 @@
 #include <osgDB/Options>
 #include <osgUtil/CullVisitor>
 #include <osgEarth/LoadableNode>
+#include <osgEarth/ObjectReleaser>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -297,6 +298,10 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         void createDebugBounds();
 #endif
 
+        //! Update thread: detach content while retaining both graph and future references for worker release.
+        bool unloadContent(ObjectReleaser::Objects& retired);
+        friend class ThreeDTilesetNode;
+
         void computeBoundingVolume();
 
         //! True when this tile's transform leaves the cull's modelview unchanged, so it needn't be pushed.
@@ -439,8 +444,12 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         const std::string& getOwnerName() const;
         void setOwnerName(const std::string& name);
 
+        //! Drains submitted content destruction before tileset-owned services are released.
+        ~ThreeDTilesetNode() override;
+
     private:
         friend class ThreeDTileNode;
+        ObjectReleaser::Client _releaser;
 
         void expireTiles(const osg::NodeVisitor& nv);
 

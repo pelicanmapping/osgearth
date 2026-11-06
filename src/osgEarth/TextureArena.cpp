@@ -3,6 +3,7 @@
 * MIT License
 */
 #include "TextureArena"
+#include "Registry"
 #include "MaterialArena"
 #include "ImageUtils"
 #include "Math"
@@ -683,7 +684,9 @@ Texture::releaseGLObjects(osg::State* state, bool force) const
 #define LC "[TextureArena] "
 
 
-TextureArena::TextureArena() : _materials(new MaterialArena())
+TextureArena::TextureArena() :
+    _materials(new MaterialArena()),
+    _releaser(Registry::instance()->getObjectReleaser()->createClient("TextureArena"))
 {
     // Keep this synchronous w.r.t. the render thread since we are
     // going to be changing things on the fly
@@ -722,6 +725,7 @@ TextureArena::getUploadStats(const osg::State& state) const
 TextureArena::~TextureArena()
 {
     releaseGLObjects(nullptr);
+    _releaser.drain();
 }
 
 // Return the shared material registry whose GPU handles this texture arena
@@ -955,7 +959,7 @@ TextureArena::add(Texture::Ptr tex, const osgDB::Options* readOptions)
 }
 
 void
-TextureArena::purgeTextureIfOrphaned_no_lock(unsigned index)
+TextureArena::purgeTextureIfOrphaned_no_lock(unsigned index, ObjectReleaser::Objects& retired)
 {
     OE_SOFT_ASSERT_AND_RETURN(index < _textures.size(), void());
 
@@ -964,6 +968,9 @@ TextureArena::purgeTextureIfOrphaned_no_lock(unsigned index)
     // Check for use_count() == 1, meaning that the only reference to this
     if (tex && tex.use_count() == 1)
     {
+        // Retain before changing arena state; allocation failure leaves the live owner intact.
+        retired.push_back(ObjectReleaser::hold(tex));
+
         // Zero out the bindless handle and flag for sync.
         // Theoretically we should not need to do this because the texture being orphaned
         // should "guarantee" that it will not be accessed by the GPU. But in practice
@@ -988,7 +995,7 @@ TextureArena::purgeTextureIfOrphaned_no_lock(unsigned index)
         // Remove this texture from the collection of dynamic textures
         _dynamicTextures.erase(index);
 
-        // release the GL objects and zero out the pointer (ref).
+        // Preserve GL-release routing; the retained owner defers CPU image destruction.
         tex->_host = nullptr;
         tex->releaseGLObjects(nullptr);
         tex = nullptr;
@@ -1028,18 +1035,26 @@ TextureArena::update(osg::NodeVisitor& nv)
 
     OE_PROFILING_ZONE_NAMED("update/autorelease");
 
-    std::lock_guard<std::mutex> lock(_m);
-
-    if (_textures.empty())
+    if (!_releaser.available())
         return;
 
-    for (unsigned i = 0; i < 8; ++i, ++_releasePtr)
+    ObjectReleaser::Objects retired;
     {
-        if (_releasePtr >= _textures.size())
-            _releasePtr = 0;
+        std::lock_guard<std::mutex> lock(_m);
 
-        purgeTextureIfOrphaned_no_lock(_releasePtr);
+        if (_textures.empty())
+            return;
+
+        for (unsigned i = 0; i < 8; ++i, ++_releasePtr)
+        {
+            if (_releasePtr >= _textures.size())
+                _releasePtr = 0;
+
+            purgeTextureIfOrphaned_no_lock(_releasePtr, retired);
+        }
     }
+    // Submit outside the arena lock, including the synchronous shutdown fallback.
+    _releaser.release(retired);
 }
 
 void
@@ -1050,12 +1065,14 @@ TextureArena::flush()
 
     OE_PROFILING_ZONE_NAMED("flush");
 
-    std::lock_guard<std::mutex> lock(_m);
-
-    for (unsigned i = 0; i < _textures.size(); ++i)
+    ObjectReleaser::Objects retired;
     {
-        purgeTextureIfOrphaned_no_lock(i);
+        std::lock_guard<std::mutex> lock(_m);
+        for (unsigned i = 0; i < _textures.size(); ++i)
+            purgeTextureIfOrphaned_no_lock(i, retired);
     }
+    // Explicit flush detaches immediately, even when automatic expiry is throttled.
+    _releaser.release(retired);
 }
 
 void

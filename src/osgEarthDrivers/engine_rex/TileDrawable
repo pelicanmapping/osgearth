@@ -61,22 +61,24 @@ namespace osgEarth { namespace REX
 
         Texture::Ptr _elevationRaster;
         osg::Matrixf _elevationScaleBias;
+        ObjectReleaser::Client _kdTreeReleaser;
 
     public:
         
         //! construct a new TileDrawable that maintains the in-memory mesh
-        //! for intersection testing
+        //! for intersection testing. Copies the pool's client for retiring replaced CPU trees.
         TileDrawable(
             const TileKey& key,
             SharedGeometry* geometry,
-            int tileSize);
+            int tileSize,
+            const ObjectReleaser::Client& kdTreeReleaser);
 
         //! destructor
         virtual ~TileDrawable();
 
     public:
 
-        // Sets the elevation raster for this tile
+        //! Updates mesh and intersection data synchronously; retires the outgoing tree on the shared worker.
         void setElevationRaster(Texture::Ptr image, const osg::Matrixf& scaleBias);
 
         Texture::Ptr getElevationRaster() const {

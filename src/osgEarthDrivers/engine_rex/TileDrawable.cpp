@@ -54,13 +54,15 @@ ModifyBoundingBoxCallback::operator()(const TileKey& key, osg::BoundingBox& bbox
 TileDrawable::TileDrawable(
     const TileKey& key,
     SharedGeometry* geometry,
-    int tileSize) :
+    int tileSize,
+    const ObjectReleaser::Client& kdTreeReleaser) :
     osg::Drawable(),
     _key(key),
     _geom(geometry),
     _tileSize(tileSize),
     _bboxRadius(1.0),
-    _bboxCB(NULL)
+    _bboxCB(NULL),
+    _kdTreeReleaser(kdTreeReleaser)
 {
     // builds the initial mesh.
     setElevationRaster(nullptr, osg::Matrixf::identity());
@@ -163,7 +165,13 @@ TileDrawable::setElevationRaster(Texture::Ptr image, const osg::Matrixf& scaleBi
             tempGeom->accept(*kdTreeBuilder);
             if (tempGeom->getShape())
             {
+                ObjectReleaser::Objects retired;
+                if (getShape())
+                    retired.emplace_back(getShape());
                 setShape(tempGeom->getShape());
+                // Publish current intersections immediately, even when the expiry queue gate is full.
+                // Holding the old shape across setShape keeps its last unref off this thread.
+                _kdTreeReleaser.release(retired);
             }
         }
     }

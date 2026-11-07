@@ -685,9 +685,12 @@ OGRFeatureSource::openImplementation()
 void
 OGRFeatureSource::dirty()
 {
+    FeatureSource::dirty();
+
+    FeatureProfile* featureProfile = nullptr;
     if (_profile.valid())
     {
-        setFeatureProfile(new FeatureProfile(_profile->getExtent()));
+        featureProfile = new FeatureProfile(_profile->getExtent());
     }
     else if (_geometry.valid())
     {
@@ -707,7 +710,14 @@ OGRFeatureSource::dirty()
             ex = GeoExtent(SpatialReference::get("wgs84"), _geometry->getBounds());
         }
 
-        setFeatureProfile(new FeatureProfile(ex));
+        featureProfile = new FeatureProfile(ex);
+    }
+
+    if (featureProfile)
+    {
+        if (options().geoInterp().isSet())
+            featureProfile->geoInterp() = options().geoInterp().get();
+        setFeatureProfile(featureProfile);
     }
 }
 

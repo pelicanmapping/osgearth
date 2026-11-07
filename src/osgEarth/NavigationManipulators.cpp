@@ -324,7 +324,13 @@ bool NavigationManipulator::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIA
     return false;
 }
 
-FlyManipulator::FlyManipulator() : NavigationManipulator(250.0, 2.0) { }
+FlyManipulator::FlyManipulator() : NavigationManipulator(2500.0, 2.0) { }
+
+void FlyManipulator::resetMotion()
+{
+    _altitudeScale = 0.0;
+    _effectiveSpeed = getSpeed();
+}
 
 void FlyManipulator::step(const GamepadState& input, double dt)
 {
@@ -336,7 +342,33 @@ void FlyManipulator::step(const GamepadState& input, double dt)
     const double strafe = lateral * lateral * lateral;
     const osg::Vec3d motion = unitLimited(looking * input.move.y() + right * strafe +
         up * (input.rightTrigger - input.leftTrigger));
-    osg::Vec3d candidate = displaced(motion * (getSpeed() * speedScale(input) * dt));
+    double speed = getSpeed() * speedScale(input);
+    if (getAutoSpeedEnabled())
+    {
+        GeoPoint point;
+        double altitude = 0.0, terrainHeight = 0.0;
+        if (_srs && point.fromWorld(_srs, _eye) && std::isfinite(point.z()))
+        {
+            // Both heights use the map's vertical datum. If terrain is unavailable, use datum altitude.
+            altitude = point.z();
+            if (groundHeight(point, terrainHeight) && std::isfinite(terrainHeight))
+                altitude -= terrainHeight;
+        }
+        const double targetScale = std::clamp(altitude / 1000.0, 0.04, 400.0);
+        if (_altitudeScale == 0.0)
+            _altitudeScale = targetScale;
+        else
+        {
+            // Ease in as height increases, but slow more promptly when approaching loaded ground.
+            const double response = targetScale < _altitudeScale ? 0.2 : 0.75;
+            _altitudeScale += (targetScale - _altitudeScale) * (1.0 - std::exp(-dt / response));
+        }
+        speed = std::min(speed * _altitudeScale, 100000.0);
+    }
+    else
+        _altitudeScale = 0.0;
+    _effectiveSpeed = speed;
+    osg::Vec3d candidate = displaced(motion * (speed * dt));
     constrain(candidate, false);
     _eye = candidate;
 }

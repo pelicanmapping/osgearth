@@ -50,7 +50,7 @@ namespace osgEarth
         void setGamepadState(const GamepadState& state) { _gamepad = state; }
         /** Release all inputs and stop motion immediately; Drive also recenters its horizontal look offset. */
         void stop();
-        /** Set maximum movement speed in m/s; finite positive values only. Thread-safe. */
+        /** Set movement speed in m/s (Fly's base speed at 1 km AGL); finite positive values only. Thread-safe. */
         void setSpeed(double value);
         /** Read the configured movement speed in m/s. Thread-safe. */
         double getSpeed() const { return _speed.load(); }
@@ -113,13 +113,25 @@ namespace osgEarth
     class OSGEARTH_EXPORT FlyManipulator : public NavigationManipulator
     {
     public:
-        /** Start with 250 m/s flight speed and 2 m terrain clearance. */
+        /** Start with 2500 m/s at 1 km above terrain, automatic speed scaling, and 2 m terrain clearance. */
         FlyManipulator();
         /** Identify this dedicated camera controller. */
         const char* className() const override { return "FlyManipulator"; }
+        /** Enable height-dependent speed scaling; disabled uses the configured constant speed. Thread-safe. */
+        void setAutoSpeedEnabled(bool value) { _autoSpeed = value; }
+        /** Whether flight speed automatically scales with height above terrain. Thread-safe. */
+        bool getAutoSpeedEnabled() const { return _autoSpeed.load(); }
+        /** Read full-stick speed in m/s after altitude scaling and fast/slow modifiers. Thread-safe. */
+        double getEffectiveSpeed() const { return _effectiveSpeed.load(); }
     protected:
         /** Move in the viewing direction while keeping local up and avoiding loaded terrain. */
         void step(const GamepadState&, double dt) override;
+        /** Reinitialize altitude response on the next step after activation, teleport, or input loss. */
+        void resetMotion() override;
+    private:
+        std::atomic<bool> _autoSpeed{ true };
+        std::atomic<double> _effectiveSpeed{ 2500.0 };
+        double _altitudeScale = 0.0;
     };
 
     /** Terrain-constrained first-person walking; follows loaded ground, without building collision physics. */

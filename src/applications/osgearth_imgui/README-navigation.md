@@ -41,6 +41,16 @@ controllers and applies GUI requests during event traversal, transferring the
 camera pose and clearing previous input/velocity. The application uses continuous
 frames for polling and terrain following.
 
+Fly automatically scales speed with height above loaded terrain. The Camera panel's
+**Speed at 1 km** is the reference speed: with the default 2,500 m/s, flight speed is
+100 m/s near ground, 250 m/s at 100 m, 2,500 m/s at 1 km, and 25,000 m/s at 10 km.
+The scale ranges from 0.04x to 400x, with a final 100,000 m/s cap including boost.
+Acceleration eases over 0.75 seconds; deceleration responds over 0.2 seconds.
+If terrain is not loaded, map-datum altitude is used until terrain becomes available.
+**Full-stick speed** shows the scaled speed including fast/slow modifiers; partial stick
+deflection still reduces motion. Disable **Altitude speed** for constant-speed flight.
+Look sensitivity, Walk, and Drive are unaffected.
+
 Fly applies an additional cubic response to lateral input to reduce sideways drift
 when pushing forward, retaining full strafe speed at full sideways input.
 Fly is eye-centered free flight with a local-up horizon and clearance from loaded

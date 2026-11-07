@@ -206,7 +206,7 @@ namespace osgEarth
             auto* navigation = dynamic_cast<NavigationManipulator*>(
                 modes->getManipulator(modes->getMode()));
             auto* drive = dynamic_cast<DriveManipulator*>(navigation);
-            const bool fly = dynamic_cast<FlyManipulator*>(navigation) != nullptr;
+            auto* fly = dynamic_cast<FlyManipulator*>(navigation);
             osg::ref_ptr<GamepadHandler> pad;
 #ifdef _WIN32
             _gamepad.lock(pad);
@@ -236,11 +236,16 @@ namespace osgEarth
                 }
                 if (navigation)
                 {
+                    bool altitudeSpeed = fly && fly->getAutoSpeedEnabled();
+                    if (fly && ImGuiLTable::Checkbox("Altitude speed", &altitudeSpeed))
+                        fly->setAutoSpeedEnabled(altitudeSpeed);
                     float speed = static_cast<float>(navigation->getSpeed() * (drive ? 3.6 : 1.0));
-                    if (ImGuiLTable::SliderFloat(drive ? "Top speed (km/h)" : "Speed (m/s)", &speed,
+                    if (ImGuiLTable::SliderFloat(drive ? "Top speed (km/h)" :
+                        altitudeSpeed ? "Speed at 1 km (m/s)" : "Speed (m/s)", &speed,
                         fly ? 1.0f : 0.1f, fly ? 10000.0f : drive ? 360.0f : 20.0f,
                         "%.1f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp))
                         navigation->setSpeed(speed / (drive ? 3.6 : 1.0));
+                    if (fly) ImGuiLTable::Text("Full-stick speed", "%.1f m/s", fly->getEffectiveSpeed());
                     float lookSpeed = static_cast<float>(osg::RadiansToDegrees(navigation->getLookSpeed()));
                     if (ImGuiLTable::SliderFloat("Look speed (deg/s)",
                         &lookSpeed, 10.0f, 240.0f, "%.0f", 0))
@@ -277,7 +282,11 @@ namespace osgEarth
             else
             {
                 ImGui::TextWrapped("Left stick or WASD: move and strafe. Right stick, arrows or right mouse drag: look.");
-                if (fly) ImGui::TextWrapped("RT/E: ascend. LT/Q: descend.");
+                if (fly)
+                {
+                    ImGui::TextWrapped("RT/E: ascend. LT/Q: descend.");
+                    ImGui::TextWrapped("Altitude speed scales flight speed with height above terrain.");
+                }
             }
             ImGui::TextWrapped("LB/Ctrl: slow. RB/Shift: fast. A/Home: return to this mode's entry position.");
             if (!fly)

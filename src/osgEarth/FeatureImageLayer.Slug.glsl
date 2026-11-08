@@ -6,6 +6,14 @@
 #pragma import_defines(OE_TERRAIN_BLEND_IMAGERY, OE_TERRAIN_CAST_SHADOWS)
 #pragma import_defines(OE_IS_PICK_CAMERA, OE_IS_SHADOW_CAMERA, OE_IS_DEPTH_CAMERA)
 
+#pragma import_defines(OE_FEATUREIMAGE_MATERIALS)
+#ifdef OE_FEATUREIMAGE_MATERIALS
+void oe_fil_material_begin();
+void oe_fil_material_paint(inout vec4 fill, vec2 paint, float coverage, float remaining);
+void oe_fil_material_coverage(float alpha);
+void oe_fil_material_finish(float alpha, bool composited);
+#endif
+
 #define SLUG_INDIRECTION_SIZE 32
 
 // Source-UV footprint at fade start/end. Layer configuration can request an earlier cutoff.
@@ -305,7 +313,8 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
             oe_slug_read(atlas, int(list.x) + i);
         int address = int(entry.x);
         vec4 band = oe_slug_read(atlas, address + 1);
-        vec2 origin = oe_slug_read(atlas, address + 3).xy;
+        vec4 paint = oe_slug_read(atlas, address + 3);
+        vec2 origin = paint.xy;
         vec2 coord = uv - origin;
         vec2 bandCoord = coord * band.xy + band.zw;
         vec2 margin = 0.5 * abs(footprint * band.xy);
@@ -317,6 +326,9 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
             slug_Render(coord, pixelsPerEm, bandCoord, int(shape.x), atlas);
         if (coverage == 0.0) continue;
         vec4 fill = oe_slug_read(atlas, address);
+#ifdef OE_FEATUREIMAGE_MATERIALS
+        oe_fil_material_paint(fill, paint.zw, coverage, remaining);
+#endif
         float alpha = fill.a * coverage;
         result += vec4(fill.rgb * alpha, alpha) * remaining;
         remaining *= 1.0 - alpha;
@@ -324,6 +336,9 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
     }
     vec4 background = oe_slug_read(atlas, 1);
     result += vec4(background.rgb * background.a, background.a) * remaining;
+#ifdef OE_FEATUREIMAGE_MATERIALS
+    oe_fil_material_coverage(result.a);
+#endif
     if (result.a > 0.0) result.rgb /= result.a;
     result.a *= visibility;
     return result;
@@ -367,6 +382,9 @@ void oe_rex_imageLayer_FS(inout vec4 color)
 #ifndef OE_TERRAIN_RENDER_IMAGERY
     return;
 #endif
+#ifdef OE_FEATUREIMAGE_MATERIALS
+    oe_fil_material_begin();
+#endif
     // Vector layers inherit the source atlas/UV matrix, without imagery crossfades.
 #ifdef OE_USE_GL4
     if (oe_color_handle == 0UL) return;
@@ -378,6 +396,13 @@ void oe_rex_imageLayer_FS(inout vec4 color)
     vec4 texel = oe_slug_sample(oe_layer_tex, oe_layer_texc);
 #endif
     texel.a *= oe_layer_opacity;
+#ifdef OE_FEATUREIMAGE_MATERIALS
+#ifdef OE_TERRAIN_BLEND_IMAGERY
+    oe_fil_material_finish(texel.a, first);
+#else
+    oe_fil_material_finish(texel.a, false);
+#endif
+#endif
 #ifdef OE_TERRAIN_BLEND_IMAGERY
     if (first)
     {

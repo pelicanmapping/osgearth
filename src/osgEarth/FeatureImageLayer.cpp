@@ -12,7 +12,9 @@
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/Shaders>
 #include <osgEarth/Capabilities>
+#include <osgEarth/Map>
 #include <cmath>
+#include "FeatureImageLayerMaterials"
 
 using namespace osgEarth;
 
@@ -112,6 +114,8 @@ FeatureImageLayer::openImplementation()
         // Equal endpoints request a hard cutoff; otherwise fade before exceeding the coarse grid's AA margin.
         getOrCreateStateSet()->getOrCreateUniform("oe_featureimage_vector_fade", osg::Uniform::FLOAT_VEC2)->set(
             osg::Vec2f(1.0f / start, 1.0f / cutoff));
+        Status materials = FeatureImageLayerMaterials::open(this);
+        if (materials.isError()) return materials;
         Util::Shaders shaders;
         shaders.load(VirtualProgram::getOrCreate(getOrCreateStateSet()), "FeatureImageLayer.Slug.glsl");
 #endif
@@ -126,6 +130,32 @@ FeatureImageLayer::openImplementation()
     if (ssStatus.isError())
         return ssStatus;
 
+#ifdef OSGEARTH_HAVE_SLUGHORN
+    if (options().mode() == "vector" && getStyleSheet())
+    {
+        auto* materials = FeatureImageLayerMaterials::get(this);
+        // Reject authored typos before paging; dynamic styles are checked again by the tile builder.
+        try
+        {
+            for (const auto& entry : getStyleSheet()->getStyles())
+                if (const auto* line = entry.second.get<LineSymbol>())
+                {
+                    if (!materials)
+                    {
+                        if (!line->material()->empty() || !line->outlineMaterial()->empty())
+                            return Status(Status::ConfigurationError,
+                                "Stroke materials require a vector FIL materials palette");
+                        continue;
+                    }
+                    materials->slot(line->material().get());
+                    materials->slot(line->outlineMaterial().get());
+                    if (!std::isfinite(line->materialPeriod().get()) || line->materialPeriod().get() <= 0.0f)
+                        return Status(Status::ConfigurationError, "stroke-material-period must be positive and finite");
+                }
+        }
+        catch (const std::exception& error) { return Status(Status::ConfigurationError, error.what()); }
+    }
+#endif
     establishProfile();
 
     _global._filterChain = FeatureFilterChain::create(
@@ -161,6 +191,12 @@ void
 FeatureImageLayer::addedToMap(const Map* map)
 {
     ImageLayer::addedToMap(map);
+
+    if (FeatureImageLayerMaterials::get(this) && !map->getSRS()->isGeographic())
+    {
+        setStatus(Status(Status::ConfigurationError, "Vector FIL materials currently require a geocentric map"));
+        return;
+    }
 
     options().featureSource().addedToMap(map);
     options().styleSheet().addedToMap(map);

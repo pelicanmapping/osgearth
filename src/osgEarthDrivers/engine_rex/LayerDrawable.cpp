@@ -7,6 +7,7 @@
 #include "SelectionInfo"
 #include "EngineContext"
 #include <osgEarth/Metrics>
+#include <osgEarth/FeatureImageLayerMaterials>
 #include <sstream>
 #include <cstddef>
 
@@ -179,6 +180,16 @@ LayerDrawableNVGL::refreshRenderState()
 
         TextureArena* textures = _context->textures();
 
+        auto* materials = FeatureImageLayerMaterials::get(_layer);
+        osg::Matrixd materialFrame;
+        _rs.materialCoordinates.clear();
+        if (materials && !_tiles.empty())
+        {
+            const auto& first = _tiles.front();
+            osg::Matrixd viewToWorld = osg::Matrixd::inverse(first._modelViewMatrix) * first._localToWorld;
+            materialFrame = materials->worldToMaterial(viewToWorld.getTrans());
+            _rs.materialCoordinates.reserve(_tiles.size());
+        }
         unsigned tile_num = 0;
 
         _rs.tiles.clear();
@@ -186,6 +197,9 @@ LayerDrawableNVGL::refreshRenderState()
         for (auto& tile : _tiles)
         {
             GL4Tile& buf = _rs.tilebuf[tile_num++];
+            if (materials)
+                _rs.materialCoordinates.push_back(
+                    FeatureImageLayerMaterials::coordinates(tile._localToWorld * materialFrame));
 
             // main MVM (double to float is OK)
             for (int i = 0; i < 16; ++i)
@@ -449,6 +463,7 @@ LayerDrawableNVGL::drawImplementation(osg::RenderInfo& ri) const
         }
     }
 
+    bool uploadMaterialCoordinates = _rs.dirty;
     if (_rs.dirty)
     {
         // The CULL traversal determined that the tile set changed,
@@ -483,6 +498,23 @@ LayerDrawableNVGL::drawImplementation(osg::RenderInfo& ri) const
 
         _context->textures()->setRevision(_rs.revision);
     }
+
+    if (!_rs.materialCoordinates.empty())
+    {
+        if (!gl.materialCoordinates || !gl.materialCoordinates->valid())
+        {
+            gl.materialCoordinates = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+            gl.materialCoordinates->bind();
+            gl.materialCoordinates->unbind();
+            uploadMaterialCoordinates = true;
+        }
+        if (uploadMaterialCoordinates) gl.materialCoordinates->uploadData(_rs.materialCoordinates);
+        gl.materialCoordinates->bindBufferBase(13);
+    }
+
+    // Register the layer palette before the terrain arena resolves and binds its material handles.
+    if (auto* materials = FeatureImageLayerMaterials::get(_layer))
+        materials->apply(_context->textures(), state);
 
     // Apply the the texture arena:
     //if (state.getLastAppliedAttribute(OE_TEXTURE_ARENA_SA_TYPE_ID) != _context->textures())
@@ -560,6 +592,7 @@ LayerDrawableNVGL::releaseGLObjects(osg::State* state) const
         GLObjects& gl = GLObjects::get(_rs.globjects, *state);
         gl.shared = nullptr;
         gl.tiles = nullptr;
+        gl.materialCoordinates = nullptr;
         gl.commands = nullptr;
         gl.vao = nullptr;
     }

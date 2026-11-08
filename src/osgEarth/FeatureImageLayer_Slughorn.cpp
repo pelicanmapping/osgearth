@@ -11,6 +11,7 @@
 #include <osgEarth/PointSymbol>
 #include <osgEarth/StyleSelector>
 #include <slughorn/canvas.hpp>
+#include "FeatureImageLayerMaterials"
 #include <cstring>
 #include <stdexcept>
 
@@ -137,6 +138,8 @@ namespace
             unsigned first = 0u, count = 0u;
             float radius = 0.0f;
             osg::Vec4f bounds;
+            unsigned material = 0u;
+            float period = 1.0f;
 
             // Creates an unpopulated centerline record; zero segments means there is nothing to draw.
             Draw() = default;
@@ -148,6 +151,7 @@ namespace
         std::vector<osg::Vec4f> segments;
         GeoExtent extent;
         unsigned tileSize;
+        FeatureImageLayerMaterials* materials = nullptr;
 
         // Keeps full precision in the GPU curves and chooses spatial bands for each individual shape.
         VectorTile(const GeoExtent& e, unsigned size) : extent(e), tileSize(size)
@@ -275,6 +279,15 @@ namespace
             if (line)
             {
                 const Stroke& stroke = line->stroke().get();
+                const float period = line->materialPeriod().get();
+                if (!std::isfinite(period) || period <= 0.0f)
+                    throw std::runtime_error("stroke-material-period must be finite and positive");
+                if (!materials && (!line->material()->empty() || !line->outlineMaterial()->empty()))
+                    throw std::runtime_error("stroke material requires a FIL materials palette");
+                const unsigned coreSlot = materials ? materials->slot(line->material().get()) : 0u;
+                const unsigned outlineSlot = materials ? materials->slot(line->outlineMaterial().get()) : 0u;
+                // Attach application-owned paint metadata without modifying SDK geometry or band data.
+                auto paint = [&](Draw draw, unsigned slot) { draw.material = slot; draw.period = period; return draw; };
                 // Defer core layers so every outline in this style stays below every road interior.
                 std::vector<Draw> strokes;
                 if (stroke.outlineWidth().isSet()) strokes.reserve(local.size());
@@ -311,10 +324,11 @@ namespace
                             Draw path = centerline(*g);
                             if (path.count == 0u) continue;
                             if (outline > 0.0)
-                                append(roundStroke(path, width + 2.0 * outline, stroke.outlineColor().get()));
+                                append(paint(roundStroke(path, width + 2.0 * outline, stroke.outlineColor().get()),
+                                    outlineSlot));
                             if (width > 0.0)
                             {
-                                Draw core = roundStroke(path, width, stroke.color());
+                                Draw core = paint(roundStroke(path, width, stroke.color()), coreSlot);
                                 if (stroke.outlineWidth().isSet()) strokes.push_back(core);
                                 else append(core);
                             }
@@ -324,12 +338,12 @@ namespace
                         contour(path, *g, extent, g->isRing());
                         // Expand the underlying stroke by the border thickness on both sides.
                         if (outline > 0.0)
-                            append(canvas.stroke(path, float((width + 2.0 * outline) / tileSize),
-                                slugColor(stroke.outlineColor().get()), 1.0f, {}, join, cap));
+                            append(paint(canvas.stroke(path, float((width + 2.0 * outline) / tileSize),
+                                slugColor(stroke.outlineColor().get()), 1.0f, {}, join, cap), outlineSlot));
                         if (width > 0.0)
                         {
-                            auto core = canvas.stroke(path, float(width / tileSize), slugColor(stroke.color()),
-                                1.0f, {}, join, cap);
+                            Draw core = paint(canvas.stroke(path, float(width / tileSize), slugColor(stroke.color()),
+                                1.0f, {}, join, cap), coreSlot);
                             if (stroke.outlineWidth().isSet()) strokes.push_back(core);
                             else append(core);
                         }
@@ -457,13 +471,13 @@ namespace
                     bounds[i] = layer.bounds;
                     data[address + 1u] = osg::Vec4f(32.0f / std::max(layer.bounds.z() - layer.bounds.x(), 1e-9f),
                         32.0f / std::max(layer.bounds.w() - layer.bounds.y(), 1e-9f), 0, 0);
-                    data[address + 3u] = osg::Vec4f(layer.bounds.x(), layer.bounds.y(), 0, 0);
+                    data[address + 3u] = osg::Vec4f(layer.bounds.x(), layer.bounds.y(), float(layer.material), layer.period);
                     continue;
                 }
                 const auto shape = atlas.getShape(layer.key);
                 data[address + 1u] = osg::Vec4f(shape->bandScaleX, shape->bandScaleY,
                     shape->bandOffsetX, shape->bandOffsetY);
-                data[address + 3u] = osg::Vec4f(layer.transform.x, layer.transform.y, 0, 0);
+                data[address + 3u] = osg::Vec4f(layer.transform.x, layer.transform.y, float(layer.material), layer.period);
                 float xmin = shape->bearingX + layer.transform.x;
                 float ymin = shape->bearingY - shape->height + layer.transform.y;
                 float xmax = xmin + shape->width, ymax = ymin + shape->height;
@@ -528,6 +542,7 @@ FeatureImageLayer::createTexture(const TileKey& key, ProgressCallback* progress)
     try
     {
         VectorTile tile(key.getExtent(), getTileSize());
+        tile.materials = FeatureImageLayerMaterials::get(this);
         FilterContext context(local._session.get(), key.getExtent());
         FeatureStyleSorter sorter;
         sorter.sort(key, options().bufferWidth().get(), local._session.get(), local._filterChain, nullptr,

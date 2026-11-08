@@ -11,6 +11,7 @@
 
 #include <osgEarth/ImageLayer>
 #include <osgEarth/GLUtils>
+#include <osgEarth/FeatureImageLayerMaterials>
 #include <osgEarth/TextureArena>
 
 #include <vector>
@@ -151,6 +152,7 @@ namespace osgEarth { namespace REX
 
             // ssbo containing per-tile render info
             GLBuffer::Ptr tiles;
+            GLBuffer::Ptr materialCoordinates;
 
             // VAO for rendering with bindless buffers
             GLVAO::Ptr vao;
@@ -176,6 +178,7 @@ namespace osgEarth { namespace REX
 
             DrawTileCommands tiles;
             std::vector<GL4Tile> tilebuf;
+            std::vector<FeatureImageLayerMaterials::Coordinates> materialCoordinates;
 
             std::vector<DrawElementsIndirectBindlessCommandNV> commands;
             osg::buffered_object<GLObjects> globjects;

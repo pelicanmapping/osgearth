@@ -26,6 +26,12 @@ namespace osgEarth
         /** Line stroking parameters */
         OE_OPTION(Stroke, stroke);
 
+        //! Named vector-FIL PBR materials; empty names retain solid colors.
+        OE_OPTION(std::string, material, {});
+        OE_OPTION(std::string, outlineMaterial, {});
+        //! Repeating world-aligned material period in meters; must be finite and positive.
+        OE_OPTION(float, materialPeriod, 1.0f);
+
         /** Tessellate the line geometry such that no segment is longer than this value */
         OE_OPTION(Distance, tessellationSize);
 

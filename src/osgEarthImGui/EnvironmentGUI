@@ -96,13 +96,68 @@ namespace osgEarth
         {
             std::atomic<bool> playing{ false };
             std::atomic<float> hoursPerSecond{ 0.25f };
+            std::atomic<bool> following{ false };
+            std::atomic<double> localHour{ 12.0 };
+            std::atomic<bool> restoring{ false };
+            osg::observer_ptr<osg::Camera> camera;
+            osg::ref_ptr<const SpatialReference> mapSRS;
 
+            //! Wraps a finite hour into the selected day's [0,24) range.
+            static double wrapHour(double hour)
+            {
+                return hour - 24.0 * std::floor(hour / 24.0);
+            }
+
+            //! Reads camera longitude during update traversal; leaves time unchanged if conversion fails.
+            bool getLocalOffset(double& hours) const
+            {
+                osg::ref_ptr<osg::Camera> retained;
+                if (!camera.lock(retained) || !mapSRS.valid()) return false;
+                GeoPoint point, geographic;
+                if (!point.fromWorld(mapSRS.get(), retained->getInverseViewMatrix().getTrans()) ||
+                    !point.transform(mapSRS->getGeographicSRS(), geographic) ||
+                    !std::isfinite(geographic.x())) return false;
+                hours = geographic.x() / 15.0;
+                return true;
+            }
+
+            //! Enables following on the update thread without changing the current lighting; owns no camera.
+            void followCamera(SkyNode& sky, bool enabled)
+            {
+                following = false;
+                double offset;
+                if (enabled && getLocalOffset(offset))
+                {
+                    localHour = wrapHour(sky.getDateTime().hours() + offset);
+                    playing = false;
+                    following = true;
+                }
+            }
+
+            //! Updates playback or camera-relative time before traversing, even when the panel is hidden.
             void operator()(osg::Node* node, osg::NodeVisitor* nv) override
             {
                 auto now = osg::Timer::instance()->tick();
                 double elapsed = osg::Timer::instance()->delta_s(_lastTick, now);
                 _lastTick = now;
-                bool running = playing.load();
+                bool follow = following.load();
+                bool running = playing.load() && !follow;
+
+                if (follow)
+                {
+                    double offset;
+                    if (getLocalOffset(offset))
+                    {
+                        auto sky = static_cast<SkyNode*>(node);
+                        auto stamp = sky->getDateTime().asTimeStamp();
+                        TimeStamp secondsOfDay = (stamp % 86400 + 86400) % 86400;
+                        TimeStamp next = static_cast<TimeStamp>(
+                            std::llround(wrapHour(localHour.load() - offset) * 3600.0)) % 86400;
+                        // Preserve the selected UTC calendar day, matching time-cycle playback.
+                        if (next != secondsOfDay)
+                            sky->setDateTime(DateTime(stamp - secondsOfDay + next));
+                    }
+                }
 
                 if (running && _wasPlaying && elapsed > 0.0)
                 {
@@ -140,6 +195,12 @@ namespace osgEarth
         osg::observer_ptr<WindLayer> _windLayer;
         osg::ref_ptr<TimeCycle> _timeCycle;
         float _timeCycleSpeed = 0.25f;
+        DateTime _savedDateTime;
+        double _savedLocalHour = 12.0;
+        bool _savedFollowCamera = false;
+        bool _hasSavedDateTime = false;
+        bool _restoreTime = false;
+
         bool _showDetails = false;
         float _exposure = 3.3f;
         float _contrast = 1.0f;
@@ -154,6 +215,16 @@ namespace osgEarth
         bool _shadows = false;
         float _haze_cutoff = 0.0f, _haze_strength = 16.0f;
         float _wind_power = 1.0f;
+
+        //! Captures live time settings on the GUI thread, retaining loaded settings until restoration completes.
+        void captureTimeSettings()
+        {
+            if (_restoreTime || !_timeCycle.valid() || _timeCycle->restoring.load() || !_skyNode.valid()) return;
+            _savedDateTime = _skyNode->getDateTime();
+            _savedLocalHour = _timeCycle->localHour.load();
+            _savedFollowCamera = _timeCycle->following.load();
+            _hasSavedDateTime = true;
+        }
 
         //! Applies a UI edit during update traversal, retaining the selected sky until the operation runs.
         void changeSky(osg::RenderInfo& ri, const std::function<void(SkyNode&)>& change)
@@ -205,19 +276,57 @@ namespace osgEarth
             // A sky is always installed as a parent of the map node, so look up from the map. Searching the whole
             // scene instead visits every node of the map (all of a 3D Tiles hierarchy) each frame when there's no sky.
             auto* sky = map ? findFirstParentOfType<SkyNode>(map) : nullptr;
-            if (_mapNode.get() == map && _skyNode.get() == sky) return;
-            if (_timeCycle)
+            if (_mapNode.get() != map || _skyNode.get() != sky)
             {
-                _timeCycle->playing = false;
-                osg::ref_ptr<SkyNode> previous;
-                if (_skyNode.lock(previous)) previous->removeUpdateCallback(_timeCycle.get());
-                _timeCycle = nullptr;
+                captureTimeSettings();
+                if (_timeCycle)
+                {
+                    _timeCycle->playing = false;
+                    _timeCycle->following = false;
+                    osg::ref_ptr<SkyNode> previous;
+                    if (_skyNode.lock(previous)) previous->removeUpdateCallback(_timeCycle.get());
+                    _timeCycle = nullptr;
+                }
+                _mapNode = map;
+                _skyNode = sky;
+                _shadowCaster = nullptr;
+                _windLayer = nullptr;
+                _first = true;
+                _restoreTime = _restoreTime || _hasSavedDateTime;
             }
-            _mapNode = map;
-            _skyNode = sky;
-            _shadowCaster = nullptr;
-            _windLayer = nullptr;
-            _first = true;
+
+            // Restore independently of window visibility, and only from the panel that owns this sky.
+            if (!sky || !isAvailable(ri) || !view(ri) || !view(ri)->getViewerBase()) return;
+            if (!_timeCycle.valid())
+            {
+                _timeCycle = new TimeCycle;
+                _timeCycle->camera = view(ri)->getCamera();
+                _timeCycle->mapSRS = map->getMapSRS();
+                _timeCycle->hoursPerSecond = _timeCycleSpeed;
+                sky->addUpdateCallback(_timeCycle.get());
+            }
+            if (_restoreTime)
+            {
+                auto cycle = _timeCycle;
+                auto date = _savedDateTime;
+                bool restoreDate = _hasSavedDateTime;
+                double hour = _savedLocalHour;
+                bool follow = false;
+#ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+                follow = _savedFollowCamera && dynamic_cast<osgEarthPrestige::SkyNode*>(sky) != nullptr;
+#endif
+                cycle->restoring = true;
+                changeSky(ri,[cycle, date, restoreDate, hour, follow](SkyNode& target)
+                {
+                    cycle->playing = false;
+                    cycle->localHour = hour;
+                    cycle->following = follow;
+                    target.setSimulationTimeTracksDateTime(true);
+                    if (restoreDate) target.setDateTime(date);
+                    cycle->restoring = false;
+                });
+                _restoreTime = false;
+            }
         }
 
         ~EnvironmentGUI() override
@@ -225,6 +334,7 @@ namespace osgEarth
             if (_timeCycle.valid())
             {
                 _timeCycle->playing = false;
+                _timeCycle->following = false;
                 osg::ref_ptr<SkyNode> sky;
                 if (_skyNode.lock(sky))
                     sky->removeUpdateCallback(_timeCycle.get());
@@ -233,6 +343,25 @@ namespace osgEarth
 
         void load(const Config& conf) override
         {
+            // The settings handler calls load once per ini entry; accumulate fields without resetting others.
+            std::string date;
+            if (conf.get("DateTime", date))
+            {
+                DateTime parsed(date);
+                if (parsed.asISO8601() == date)
+                {
+                    _savedDateTime = parsed;
+                    _hasSavedDateTime = true;
+                    _restoreTime = true;
+                }
+            }
+            double hour;
+            if (conf.get("LocalHour", hour) && std::isfinite(hour))
+            {
+                _savedLocalHour = TimeCycle::wrapHour(hour);
+                _restoreTime = true;
+            }
+            if (conf.get("FollowCamera", _savedFollowCamera)) _restoreTime = true;
             conf.get("ShowDetails", _showDetails);
             conf.get("TimeCycleSpeed", _timeCycleSpeed);
             _timeCycleSpeed = std::isfinite(_timeCycleSpeed) ?
@@ -251,6 +380,10 @@ namespace osgEarth
         }
         void save(Config& conf) override
         {
+            captureTimeSettings();
+            if (_hasSavedDateTime) conf.set("DateTime", _savedDateTime.asISO8601());
+            conf.set("LocalHour", _savedLocalHour);
+            conf.set("FollowCamera", _savedFollowCamera);
             conf.set("ShowDetails", _showDetails);
             conf.set("TimeCycleSpeed", _timeCycleSpeed);
             conf.set("Exposure", _exposure);
@@ -304,9 +437,8 @@ namespace osgEarth
 
                 if (!_timeCycle.valid())
                 {
-                    _timeCycle = new TimeCycle;
-                    _timeCycle->hoursPerSecond = _timeCycleSpeed;
-                    _skyNode->addUpdateCallback(_timeCycle.get());
+                    ImGui::End();
+                    return;
                 }
 
 #ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
@@ -402,6 +534,7 @@ namespace osgEarth
                 ImGui::SameLine();
                 if (ImGui::Button("Now")) {
                     _timeCycle->playing = false;
+                    _timeCycle->following = false;
                     changeSky(ri,[](SkyNode& sky) { sky.setDateTime(DateTime()); });
                     dirtySettings();
                 }
@@ -415,13 +548,30 @@ namespace osgEarth
                     auto day = mark.day();
                     auto month = mark.month();
                     auto year = mark.year();
-                    auto hour = mark.hours();
+                    bool followCamera = _timeCycle->following.load();
+                    if (isPrestigeSky && ImGuiLTable::Checkbox("Follow camera", &followCamera))
+                    {
+                        auto cycle = _timeCycle;
+                        changeSky(ri,[cycle, followCamera](SkyNode& sky) { cycle->followCamera(sky, followCamera); });
+                        dirtySettings();
+                    }
+                    if (isPrestigeSky && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Keep local solar time fixed as the camera moves. Uses longitude, not time zones. "
+                            "Continues with the panel or GUI hidden.");
 
-                    bool dateChanged = ImGuiLTable::SliderDouble("Hour (UTC)", &hour, 0.0f, 24.0f);
+                    // Use the applied mode until the queued toggle has run on the update thread.
+                    followCamera = _timeCycle->following.load();
+                    auto hour = followCamera ? _timeCycle->localHour.load() : mark.hours();
+                    bool dateChanged = ImGuiLTable::SliderDouble(
+                        followCamera ? "Hour (local)" : "Hour (UTC)", &hour, 0.0f, 24.0f);
 
                     bool cycleTime = _timeCycle->playing.load();
                     if (ImGuiLTable::Checkbox("Cycle time", &cycleTime))
+                    {
+                        if (cycleTime) _timeCycle->following = false;
                         _timeCycle->playing = cycleTime;
+                        dirtySettings();
+                    }
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("Repeat this day automatically. Continues with the Sky panel or GUI hidden.");
                     if (ImGuiLTable::SliderFloat("Speed (hours/sec)", &_timeCycleSpeed, 0.01f, 24.0f,
@@ -443,8 +593,13 @@ namespace osgEarth
                     if (dateChanged)
                     {
                         _timeCycle->playing = false;
-                        changeSky(ri,[year, month, day, hour](SkyNode& sky)
-                            { sky.setDateTime(DateTime(year, month, day, hour)); });
+                        auto cycle = _timeCycle;
+                        auto utcHour = followCamera ? mark.hours() : hour;
+                        changeSky(ri,[cycle, year, month, day, hour, utcHour, followCamera](SkyNode& sky)
+                        {
+                            if (followCamera) cycle->localHour = TimeCycle::wrapHour(hour);
+                            sky.setDateTime(DateTime(year, month, day, utcHour));
+                        });
                         dirtySettings();
                     }
 

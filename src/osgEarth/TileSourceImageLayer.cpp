@@ -2,6 +2,7 @@
 * Copyright 2025 Pelican Mapping
 * MIT License
 */
+#include "TileSourceMetadata.h"
 #include <osgEarth/TileSourceImageLayer>
 #include <osgEarth/Progress>
 
@@ -43,6 +44,19 @@ TileSourceImageLayer::openImplementation()
     Status parent = ImageLayer::openImplementation();
     if (parent.isError())
         return parent;
+
+    if (getCacheSettings()->cachePolicy()->isCacheOnly())
+    {
+        osg::ref_ptr<const Profile> profile;
+        DataExtentList extents;
+        unsigned tileSize = getTileSize();
+        if (!detail::readSourceMetadata(getCacheSettings(), getReadOptions(), nullptr, profile, extents, &tileSize))
+            return Status(Status::ResourceUnavailable, "Missing cached tile source metadata");
+        setProfile(profile.get());
+        options().tileSize().init(tileSize);
+        setDataExtents(extents);
+        return Status::OK();
+    }
 
     if (!_tileSource.valid())
     {

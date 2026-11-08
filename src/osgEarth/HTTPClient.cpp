@@ -4,6 +4,7 @@
  */
 #include <osgEarth/HTTPClient>
 #include <osgEarth/Progress>
+#include <osgEarth/Registry>
 #include <osgEarth/Metrics>
 #include <osgEarth/Version>
 #include <osgEarth/ImageUtils>
@@ -67,13 +68,35 @@ namespace osgEarth
             if (_stream) _stream->write(ptr, realsize);
         }
 
+        // Collects one header line from curl (not NUL-terminated). A status line starts a new response
+        // (e.g. after a redirect or proxy CONNECT), so only the final response's headers are kept.
+        // Repeated fields are combined into one comma-separated value per RFC 9110 5.3, matching names
+        // case-insensitively, so e.g. a second Cache-Control field can't hide a no-store in the first.
         void writeHeader(const char* ptr, size_t realsize)
         {
-            std::string header(ptr);
+            std::string header(ptr, realsize);
+            if (header.compare(0, 5, "HTTP/") == 0)
+            {
+                _headers.clear();
+                return;
+            }
+
             std::size_t colon = header.find_first_of(':');
             if (colon != std::string::npos && colon > 0 && colon < header.length() - 1)
             {
-                _headers[header.substr(0, colon)] = header.substr(colon + 1);
+                std::string name = Strings::trim(header.substr(0, colon));
+                std::string value = Strings::trim(header.substr(colon + 1));
+
+                for (auto& existing : _headers)
+                {
+                    if (ciEquals(existing.first, name))
+                    {
+                        if (!value.empty())
+                            existing.second = existing.second.empty() ? value : existing.second + ", " + value;
+                        return;
+                    }
+                }
+                _headers[name] = value;
             }
         }
 
@@ -214,6 +237,19 @@ namespace osgEarth
         return true;
     }
 
+    // Map a transport or HTTP failure to the same public result for all payload types.
+    ReadResult::Code readErrorCode(const HTTPResponse& response)
+    {
+        if (response.isCanceled()) return ReadResult::RESULT_CANCELED;
+        const unsigned code = response.getCode();
+        if (response.isTimedOut() || code == 408 || code == 504) return ReadResult::RESULT_TIMEOUT;
+        if (code == 401 || code == 403) return ReadResult::RESULT_UNAUTHORIZED;
+        if (code == HTTPResponse::NOT_FOUND) return ReadResult::RESULT_NOT_FOUND;
+        if (code == HTTPResponse::NOT_MODIFIED) return ReadResult::RESULT_NOT_MODIFIED;
+        if (response.getCodeCategory() == HTTPResponse::CATEGORY_SERVER_ERROR) return ReadResult::RESULT_SERVER_ERROR;
+        return ReadResult::RESULT_UNKNOWN_ERROR;
+    }
+
     void setMetadata(ReadResult& result, const HTTPRequest& request, const HTTPResponse& response)
     {
         // be sure to install the response headers at the top level:
@@ -236,7 +272,243 @@ namespace osgEarth
             r.add("HTTP Response Code", std::to_string(response.getCode()));
             r.add("HTTP Request Headers", request.getHeadersAsConfig());
         }
+        result.setDuration(response.getDuration());
+        if (result.failed() && result.errorDetail().empty())
+        {
+            if (!response.getMessage().empty())
+                result.setErrorDetail(response.getMessage());
+            else if (response.getCode() >= 400)
+                result.setErrorDetail("HTTP " + std::to_string(response.getCode()));
+        }
         result.setMetadata(meta);
+    }
+
+    // HTTP caching rules (RFC 9111) derived from the headers of a stored response.
+    // osgEarth's URL cache is a private, single-user cache, so "private" responses may be stored
+    // and "s-maxage" (shared caches only) is ignored.
+    struct HTTPCacheDirectives
+    {
+        bool noStore = false;     // the response must not be written to the cache
+        bool noCache = false;     // the stored response must be revalidated before every use
+        bool hasMaxAge = false;   // Cache-Control max-age was given (takes precedence over Expires)
+        TimeSpan maxAge = 0;      // max-age in seconds
+        bool hasExpires = false;  // an Expires header was given
+        TimeStamp expires = 0;    // parsed Expires; 0 when unparseable, which means already expired
+        TimeStamp date = 0;       // parsed Date header; 0 when absent or unparseable
+        TimeSpan age = 0;         // seconds the response had already spent in upstream caches (Age header)
+    };
+
+    // Metadata key under which the URL cache records when a response was received (or last revalidated), in
+    // seconds since the epoch. Cache backends' own timestamps can't serve as this: MemCache reports 0, and
+    // size-limited RocksDB/LevelDB bins refresh theirs on every read.
+    const char* HTTP_CACHE_RECEIVED_AT = "osgEarth-Received-At";
+
+    // Parses a delta-seconds header value. Per RFC 9111 an invalid value means "already stale", so it yields 0.
+    TimeSpan parseDeltaSeconds(const std::string& value)
+    {
+        std::string v = Strings::trim(value);
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"')
+            v = v.substr(1, v.size() - 2);
+        if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos)
+            return 0;
+        // drop leading zeros so the length check below only clamps genuinely huge values
+        auto firstDigit = v.find_first_not_of('0');
+        if (firstDigit == std::string::npos)
+            return 0;
+        v = v.substr(firstDigit);
+        // clamp absurdly large values instead of overflowing
+        return v.size() > 9 ? (TimeSpan)999999999 : (TimeSpan)std::stol(v);
+    }
+
+    // Returns the time a cached response was received, from the HTTP_CACHE_RECEIVED_AT metadata the URL cache
+    // writes. Entries stored before that existed fall back to the cache backend's timestamp.
+    TimeStamp getReceivedTime(const Config& meta, TimeStamp fallback)
+    {
+        const std::string value = meta.value(HTTP_CACHE_RECEIVED_AT);
+        if (!value.empty() && value.find_first_not_of("0123456789") == std::string::npos)
+            return (TimeStamp)std::stoll(value);
+        return fallback;
+    }
+
+    // Returns headers with the URL cache's receive-time record set to receivedAt.
+    Config withReceivedTime(Config headers, TimeStamp receivedAt)
+    {
+        headers.remove(HTTP_CACHE_RECEIVED_AT);
+        headers.add(HTTP_CACHE_RECEIVED_AT, std::to_string((long long)receivedAt));
+        return headers;
+    }
+
+    // Reads the Cache-Control, Pragma, Expires, Date and Age headers of a response into caching rules.
+    // Header names are matched case-insensitively (Config keys are). A response with neither max-age nor
+    // Expires has no explicit freshness lifetime, leaving it up to the CachePolicy.
+    // Returns all values of the named header joined with ", ". Header collection already combines repeated
+    // fields, but stored metadata may still hold duplicates, and none of their directives may be missed.
+    std::string joinHeaderFields(const Config& headers, const std::string& name)
+    {
+        std::string joined;
+        for (auto& field : headers.children(name))
+        {
+            if (!field.value().empty())
+                joined += (joined.empty() ? "" : ", ") + field.value();
+        }
+        return joined;
+    }
+
+    // Splits a directive list (Cache-Control, Pragma) at commas outside quoted strings, honoring backslash
+    // escapes inside them (RFC 9110 5.6.4), so a quoted value like "a\",b" can't swallow the next directive.
+    // Separate representations selected by request headers, including credentials and byte ranges.
+    // Conditional validators describe a cached copy and do not identify a different representation.
+    std::string requestVariant(const Headers& headers)
+    {
+        std::vector<std::pair<std::string, std::string>> fields;
+        for (const auto& header : headers)
+        {
+            auto name = toLower(header.first);
+            if (name != "if-modified-since" && name != "if-none-match")
+                fields.emplace_back(std::move(name), header.second);
+        }
+        std::sort(fields.begin(), fields.end());
+        std::string variant;
+        for (const auto& field : fields)
+        {
+            variant += std::to_string(field.first.size()) + ":" + field.first;
+            variant += std::to_string(field.second.size()) + ":" + field.second;
+        }
+        return variant;
+    }
+
+    // Returns trimmed, non-empty directives with quotes left in place.
+    std::vector<std::string> splitDirectives(const std::string& value)
+    {
+        std::vector<std::string> result;
+        std::string current;
+        bool inQuotes = false;
+        for (std::size_t i = 0; i < value.size(); ++i)
+        {
+            char c = value[i];
+            if (inQuotes && c == '\\' && i + 1 < value.size())
+            {
+                current += c;
+                current += value[++i];
+                continue;
+            }
+            if (c == '"')
+                inQuotes = !inQuotes;
+
+            if (c == ',' && !inQuotes)
+            {
+                current = Strings::trim(current);
+                if (!current.empty())
+                    result.push_back(current);
+                current.clear();
+            }
+            else
+            {
+                current += c;
+            }
+        }
+        current = Strings::trim(current);
+        if (!current.empty())
+            result.push_back(current);
+        return result;
+    }
+
+    HTTPCacheDirectives getCacheDirectives(const Config& headers)
+    {
+        HTTPCacheDirectives d;
+
+        const std::string cacheControl = joinHeaderFields(headers, "cache-control");
+
+        for (auto& token : splitDirectives(cacheControl))
+        {
+            std::string name = token, value;
+            auto eq = token.find('=');
+            if (eq != std::string::npos)
+            {
+                name = Strings::trim(token.substr(0, eq));
+                value = token.substr(eq + 1);
+            }
+            name = toLower(name);
+
+            if (name == "no-store")
+            {
+                d.noStore = true;
+            }
+            else if (name == "no-cache")
+            {
+                // no-cache="field" only restricts reuse of the named fields, but we store whole responses,
+                // so treat both forms the same.
+                d.noCache = true;
+            }
+            else if (name == "max-age" && !d.hasMaxAge)
+            {
+                d.hasMaxAge = true;
+                d.maxAge = parseDeltaSeconds(value);
+            }
+        }
+
+        // HTTP/1.0 servers express no-cache with Pragma; it's ignored when a Cache-Control field is present.
+        if (!headers.hasChild("cache-control"))
+        {
+            for (auto& token : splitDirectives(joinHeaderFields(headers, "pragma")))
+            {
+                if (ciEquals(token, "no-cache"))
+                    d.noCache = true;
+            }
+        }
+
+        // An unparseable Expires (e.g. "0", or empty) parses to 0, which means already expired. hasChild rather
+        // than hasValue so that an empty Expires still counts as present.
+        if (headers.hasChild("expires"))
+        {
+            d.hasExpires = true;
+            d.expires = DateTime(Strings::trim(headers.value("expires"))).asTimeStamp();
+        }
+
+        if (headers.hasValue("date"))
+        {
+            d.date = DateTime(Strings::trim(headers.value("date"))).asTimeStamp();
+        }
+
+        if (headers.hasValue("age"))
+        {
+            d.age = parseDeltaSeconds(headers.value("age"));
+        }
+
+        return d;
+    }
+
+    // Whether a cached response received at receivedAt must be fetched again (or revalidated) at time now,
+    // according to the caching headers the server sent with it (RFC 9111 sections 4.2.1 and 4.2.3).
+    bool isCachedResponseStale(const HTTPCacheDirectives& d, TimeStamp receivedAt, TimeStamp now)
+    {
+        if (d.noCache || d.noStore)
+            return true;
+
+        TimeSpan lifetime = 0;
+        if (d.hasMaxAge)
+        {
+            lifetime = d.maxAge;
+        }
+        else if (d.hasExpires)
+        {
+            // Measure Expires against the server's Date so client/server clock skew doesn't matter;
+            // without a Date, the time we received the response stands in for it.
+            TimeStamp base = d.date > 0 ? d.date : receivedAt;
+            lifetime = d.expires > base ? (TimeSpan)(d.expires - base) : 0;
+        }
+        else
+        {
+            // no explicit freshness: leave it to the CachePolicy
+            return false;
+        }
+
+        // The age when received is the larger of the Age header and how long ago the server generated it
+        // (Date); add the time it has spent in our cache since.
+        TimeSpan apparentAge = (d.date > 0 && receivedAt > d.date) ? (TimeSpan)(receivedAt - d.date) : 0;
+        TimeSpan initialAge = d.age > apparentAge ? d.age : apparentAge;
+        TimeSpan currentAge = initialAge + (now > receivedAt ? (TimeSpan)(now - receivedAt) : 0);
+        return currentAge >= lifetime;
     }
 }
 
@@ -249,10 +521,20 @@ HTTPRequest::HTTPRequest( const std::string& url )
     osgEarth::replaceIn(_url, " ", "%20");
 }
 
+HTTPRequest::HTTPRequest(const std::string& url, const std::string& cacheKey,
+    std::shared_ptr<const std::vector<std::string>> mirrors) :
+    HTTPRequest(url)
+{
+    _cacheKey = cacheKey;
+    _cacheMirrors = std::move(mirrors);
+}
+
 HTTPRequest::HTTPRequest( const HTTPRequest& rhs ) :
 _parameters( rhs._parameters ),
 _headers(rhs._headers),
-_url( rhs._url )
+_url( rhs._url ),
+_cacheKey(rhs._cacheKey),
+_cacheMirrors(rhs._cacheMirrors)
 {
     //nop
 }
@@ -362,8 +644,9 @@ _response_code( rhs._response_code ),
 _parts( rhs._parts ),
 _mimeType( rhs._mimeType ),
 _canceled( rhs._canceled ),
-_duration_s(0.0),
-_lastModified(0u),
+_duration_s(rhs._duration_s),
+_lastModified(rhs._lastModified),
+_message(rhs._message),
 _fromCache(rhs._fromCache)
 {
     //nop
@@ -371,7 +654,7 @@ _fromCache(rhs._fromCache)
 
 unsigned
 HTTPResponse::getCode() const {
-    return _response_code;
+    return isTimedOut() ? 0u : static_cast<unsigned>(_response_code);
 }
 
 unsigned
@@ -441,6 +724,9 @@ HTTPResponse::setHeadersFromConfig(const Config& conf)
 {
     if (_parts.size() > 0)
     {
+        // Replace rather than add: Headers compares names case-sensitively, so adding could leave a stale
+        // "Cache-Control" next to a new "cache-control".
+        _parts[0]->_headers.clear();
         for (auto& i : conf.children())
         {
             _parts[0]->_headers[i.key()] = i.value();
@@ -729,8 +1015,10 @@ namespace
             if (res == CURLE_ABORTED_BY_CALLBACK || res == CURLE_OPERATION_TIMEDOUT)
             {
                 // CURLE_ABORTED_BY_CALLBACK means ProgressCallback cancelation.
-                HTTPResponse response;
-                response.setCanceled(true);
+                curl_slist_free_all(headers);
+                HTTPResponse response = res == CURLE_OPERATION_TIMEDOUT ? HTTPResponse::timeout() : HTTPResponse();
+                response.setCanceled(res == CURLE_ABORTED_BY_CALLBACK);
+                response.setDuration(OE_STOP_TIMER(get_duration));
                 response.setMessage(std::string(curl_easy_strerror(res)));
                 return response;
             }
@@ -765,7 +1053,7 @@ namespace
                     response_code = s_simResponseCode;
             }
 
-            HTTPResponse response( response_code );
+            HTTPResponse response(res == CURLE_OK ? response_code : 0L);
 
 
 
@@ -943,25 +1231,23 @@ CURLHTTPImplementationFactory::create() const
 #ifdef OSGEARTH_USE_WININET_FOR_HTTP
 namespace
 {
-    std::string GetLastErrorAsString()
+    // Capture the failing WinInet operation before handle cleanup changes the thread's last error.
+    HTTPResponse winInetFailure(DWORD error, const char* operation)
     {
-        //Get the error message, if any.
-        DWORD errorMessageID = ::GetLastError();
-        if(errorMessageID == 0)
-            return std::string("Error Code 0"); //No error message has been recorded
-
-        LPSTR messageBuffer = 0L;
-        size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&messageBuffer, 0, NULL);
-
-        std::string message(messageBuffer, size);
-
-        //Free the buffer.
-        LocalFree(messageBuffer);
-
-        message = Stringify() << "[Code " << errorMessageID << "] " << message;
-
-        return message;
+        HTTPResponse response = error == ERROR_INTERNET_TIMEOUT ? HTTPResponse::timeout() : HTTPResponse();
+        response.setCanceled(error == ERROR_INTERNET_OPERATION_CANCELLED);
+        LPSTR buffer = nullptr;
+        DWORD size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+            FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, error, 0, reinterpret_cast<LPSTR>(&buffer), 0, nullptr);
+        std::string detail = std::string(operation) + " (WinInet " + std::to_string(error) + ")";
+        if (buffer)
+        {
+            detail += ": " + Strings::trim(std::string(buffer, size));
+            LocalFree(buffer);
+        }
+        response.setMessage(detail);
+        OE_WARN << LC << detail << std::endl;
+        return response;
     }
 
     class WinInetImplementation : public HTTPClient::Implementation
@@ -1008,8 +1294,8 @@ namespace
 
             if( !hInternet )
             {
-                OE_WARN << LC << "InternetOpen failed: " << GetLastErrorAsString() << std::endl;
-                return HTTPResponse(0);
+                auto failure = winInetFailure(GetLastError(), "InternetOpen");
+                return failure;
             }
 
             // clears any session cookies..?
@@ -1027,9 +1313,9 @@ namespace
 
             if ( !InternetCrackUrl(url.c_str(), 0, 0L, &urlcomp) )
             {
-                OE_WARN << LC << "InternetCrackUrl failed for " << url << ": " << GetLastErrorAsString() << std::endl;
+                auto failure = winInetFailure(GetLastError(), "InternetCrackUrl");
                 InternetCloseHandle( hInternet );
-                return HTTPResponse(0);
+                return failure;
             }
 
             WORD port =
@@ -1073,9 +1359,9 @@ namespace
 
             if ( !hConnection )
             {
-                OE_WARN << LC << "InternetConnect failed for " << url << ": " << GetLastErrorAsString() << std::endl;
+                auto failure = winInetFailure(GetLastError(), "InternetConnect");
                 InternetCloseHandle( hInternet );
-                return HTTPResponse(0);
+                return failure;
             }
 
             // Enable automatic HTTP decompression of known types.
@@ -1094,10 +1380,10 @@ namespace
 
             if ( !hRequest )
             {
-                OE_WARN << LC << "HttpOpenRequest failed for " << url << ": " << GetLastErrorAsString() << std::endl;
+                auto failure = winInetFailure(GetLastError(), "HttpOpenRequest");
                 InternetCloseHandle( hConnection );
                 InternetCloseHandle( hInternet );
-                return HTTPResponse(0);
+                return failure;
             }
 
             const char* headers = "Accept-Encoding: gzip, deflate";
@@ -1120,21 +1406,21 @@ namespace
 
                     if ( dialogResult != ERROR_SUCCESS )
                     {
-                        OE_WARN << LC << "InternetErrorDlg failed to produce client cert " << url << ": " << GetLastErrorAsString() << std::endl;
+                        auto failure = winInetFailure(dialogResult, "InternetErrorDlg");
                         InternetCloseHandle( hRequest );
                         InternetCloseHandle( hConnection );
                         InternetCloseHandle( hInternet );
-                        return HTTPResponse(0);
+                        return failure;
                     }
                 }
 
                 else
                 {
-                    OE_WARN << LC << "HttpSendRequest failed to open " << url << ": " << GetLastErrorAsString() << std::endl;
+                    auto failure = winInetFailure(errorNum, "HttpSendRequest");
                     InternetCloseHandle( hRequest );
                     InternetCloseHandle( hConnection );
                     InternetCloseHandle( hInternet );
-                    return HTTPResponse(0);
+                    return failure;
                 }
             }
 
@@ -1169,12 +1455,16 @@ namespace
                 osg::ref_ptr<HTTPResponse::Part> part = new HTTPResponse::Part();
 
                 DWORD numBytesRead = 0;
-                while( InternetReadFile(hRequest, buffer, 4096, &numBytesRead) && numBytesRead )
+                BOOL readOK;
+                while ((readOK = InternetReadFile(hRequest, buffer, sizeof(buffer), &numBytesRead)) && numBytesRead)
                 {
                     part->_stream << std::string(buffer, numBytesRead);
                 }
 
-                response.getParts().push_back( part.get() );
+                if (readOK)
+                    response.getParts().push_back(part.get());
+                else
+                    response = winInetFailure(GetLastError(), "InternetReadFile");
             }
 
             InternetCloseHandle( hRequest );
@@ -1548,6 +1838,8 @@ HTTPClient::doGet(const HTTPRequest&    request,
     initialize();
 
     URI uri(request.getURL());
+    const auto& resourceKey = request.getCacheKey().empty() || !request.getParameters().empty() ?
+        uri.cacheKey() : request.getCacheKey();
 
     // URL caching
     CacheBin* bin = nullptr;
@@ -1563,36 +1855,105 @@ HTTPClient::doGet(const HTTPRequest&    request,
             //bin = cacheSettings->getCacheBin();
         }
     }
+    // Standalone URI reads have no map options. Honor the configured registry cache and offline policy.
+    else
+    {
+        auto* registry = Registry::instance();
+        registry->resolveCachePolicy(cachePolicy);
+        if (cachePolicy->isCacheEnabled())
+        {
+            auto* cache = registry->getDefaultCache();
+            if (cache)
+                bin = cache->getOrCreateDefaultBin();
+        }
+    }
 
+    const std::string variant = bin ? requestVariant(request.getHeaders()) : std::string();
+    // Old URL-only entries cannot establish which credentials or representation produced them.
+    const auto cacheKey = [&](const std::string& resource)
+    {
+        return variant.empty() ? resource : Cache::makeCacheKey(resource + "\n" + variant, "uri");
+    };
+    const std::string key = cacheKey(resourceKey);
     bool expired = false;
 
     HTTPResponse response;
 
     bool gotFromCache = false;
 
-    //Try to read result from the cache.
+    // Validator for a conditional GET when the cached copy is stale
+    std::string cachedLastModified;
+
+    // The cached body and headers, kept to re-store the entry when the server answers 304 Not Modified
+    std::string cachedBody;
+    Config cachedHeaders;
+
+    // Legacy entries can exist under more than one mirror. Prefer any fresh copy to a network refresh.
+    auto getLegacyKeys = [&]()
+    {
+        std::vector<std::string> keys;
+        if (resourceKey != uri.cacheKey())
+        {
+            keys.push_back(cacheKey(uri.cacheKey()));
+            if (request.getCacheMirrors())
+            {
+                for (const auto& mirror : *request.getCacheMirrors())
+                {
+                    URI alternate(HTTPRequest(mirror).getURL());
+                    if (alternate.cacheKey() != uri.cacheKey())
+                        keys.push_back(cacheKey(alternate.cacheKey()));
+                }
+            }
+        }
+        return keys;
+    };
+
     if (bin)
     {
-        ReadResult result = bin->readString(uri.cacheKey(), options);
-        if (result.succeeded())
-        {            
-            gotFromCache = true;
+        ReadResult result = bin->readString(key, options);
+        const auto now = ::time(nullptr);
+        // Both the server and the layer policy can require a refresh.
+        auto isExpired = [&](const ReadResult& record)
+        {
+            const auto received = getReceivedTime(record.metadata(), record.lastModifiedTime());
+            const auto written = record.lastModifiedTime() > 0 ? record.lastModifiedTime() : received;
+            return cachePolicy->isExpired(written) ||
+                isCachedResponseStale(getCacheDirectives(record.metadata()), received, now);
+        };
 
-            // If the cache-control header contains no-cache that means that it's ok to store the result in the cache, but it must be requested
-            // from the server each time it is it requested.
-            bool noCache = false;
-            std::string cacheControl = result.metadata().value("cache-control");
-            if (cacheControl.find("no-cache") != std::string::npos)
+        if (!result.succeeded())
+        {
+            for (const auto& legacyKey : getLegacyKeys())
             {
-                noCache = true;
+                auto alternate = bin->readString(legacyKey, options);
+                if (alternate.succeeded())
+                {
+                    result = alternate;
+                    if (!isExpired(result))
+                        break;
+                }
+            }
+        }
+        if (result.succeeded())
+        {
+            gotFromCache = true;
+            cachedBody = result.getString();
+            cachedHeaders = result.metadata();
+            expired = isExpired(result);
+
+            // Revalidate with If-Modified-Since only. We deliberately do not send If-None-Match: some servers
+            // (e.g. Google's 3D Tiles root) return the same ETag for bodies that embed per-request session tokens,
+            // so a 304 there would keep serving an expired session.
+            if (expired)
+            {
+                cachedLastModified = Strings::trim(result.metadata().value("last-modified"));
             }
 
-            expired = noCache || cachePolicy->isExpired(result.lastModifiedTime());
-            result.setIsFromCache(true);            
+            result.setIsFromCache(true);
 
             HTTPResponse cacheResponse(HTTPResponse::CATEGORY_SUCCESS);
             osg::ref_ptr<HTTPResponse::Part> part = new HTTPResponse::Part();
-            part->_stream << result.getString();
+            part->_stream << cachedBody;
             std::string contentType = result.metadata().value("content-type");
             cacheResponse.setMimeType(contentType);
             cacheResponse.getParts().push_back(part);
@@ -1604,13 +1965,65 @@ HTTPClient::doGet(const HTTPRequest&    request,
 
     if ((expired || !gotFromCache) && cachePolicy->usage() != CachePolicy::USAGE_CACHE_ONLY)
     {
-        HTTPResponse remoteResponse = _impl->doGet(request, options, progress);
+        HTTPRequest remoteRequest(request);
 
-        if (remoteResponse.getCode() == ReadResult::RESULT_NOT_MODIFIED)
+        // A 304 only vouches for the cached body if the condition was ours. If the caller supplied its own
+        // condition, the 304 refers to the caller's copy, so we leave the request alone and pass it through.
+        bool revalidatingCachedCopy = false;
+        if (gotFromCache && !cachedLastModified.empty())
         {
-            // Touch the cached item to update it's last modified timestamp so it doesn't expire again immediately.
-            if (bin)
-                bin->touch(uri.cacheKey());
+            bool callerHasCondition = false;
+            for (auto& header : remoteRequest.getHeaders())
+            {
+                callerHasCondition = callerHasCondition ||
+                    ciEquals(header.first, "If-Modified-Since") ||
+                    ciEquals(header.first, "If-None-Match");
+            }
+            if (!callerHasCondition)
+            {
+                remoteRequest.addHeader("If-Modified-Since", cachedLastModified);
+                revalidatingCachedCopy = true;
+            }
+        }
+
+        HTTPResponse remoteResponse = _impl->doGet(remoteRequest, options, progress);
+
+        const TimeStamp receivedAt = DateTime().asTimeStamp();
+
+        if (remoteResponse.getCode() == HTTPResponse::NOT_MODIFIED && revalidatingCachedCopy)
+        {
+            // Still valid: keep the cached body. Per RFC 9111 4.3.4 the 304's headers (new Date, Cache-Control,
+            // Expires...) replace the stored ones, and the receive time restarts the freshness lifetime.
+            Config merged = cachedHeaders;
+            // The stored Age described the original response; only the 304's own Age (if any) applies now,
+            // otherwise an old Age >= max-age would make the entry stale again right after revalidation.
+            merged.remove("age");
+            const Config notModifiedHeaders = remoteResponse.getHeadersAsConfig();
+            for (auto& header : notModifiedHeaders.children())
+            {
+                if (ciEquals(header.key(), "content-length"))
+                    continue;
+                merged.remove(header.key());
+                merged.add(header.key(), header.value());
+            }
+            merged = withReceivedTime(merged, receivedAt);
+            response.setHeadersFromConfig(merged);
+            response.setDuration(remoteResponse.getDuration());
+
+            if (bin && cachePolicy->isCacheWriteable())
+            {
+                if (getCacheDirectives(merged).noStore)
+                {
+                    bin->remove(key);
+                    for (const auto& legacyKey : getLegacyKeys())
+                        bin->remove(legacyKey);
+                }
+                else
+                {
+                    osg::ref_ptr<StringObject> stringObject = new StringObject(cachedBody);
+                    bin->write(key, stringObject, merged, options);
+                }
+            }
         }
         else
         {
@@ -1618,10 +2031,24 @@ HTTPClient::doGet(const HTTPRequest&    request,
 
             if (response.isOK())
             {
-                if (bin != nullptr)
+                if (bin && cachePolicy->isCacheWriteable())
                 {
-                    osg::ref_ptr< StringObject> stringObject = new StringObject(response.getPartAsString(0));
-                    bin->write(uri.cacheKey(), stringObject, response.getHeadersAsConfig(), options);
+                    Config headers = response.getHeadersAsConfig();
+                    if (getCacheDirectives(headers).noStore)
+                    {
+                        // The server forbids storing this response; drop any copy stored before it said so.
+                        if (gotFromCache)
+                        {
+                            bin->remove(key);
+                            for (const auto& legacyKey : getLegacyKeys())
+                                bin->remove(legacyKey);
+                        }
+                    }
+                    else
+                    {
+                        osg::ref_ptr< StringObject> stringObject = new StringObject(response.getPartAsString(0));
+                        bin->write(key, stringObject, withReceivedTime(headers, receivedAt), options);
+                    }
                 }
             }
         }
@@ -1631,6 +2058,10 @@ HTTPClient::doGet(const HTTPRequest&    request,
         {
             OE_PROFILING_ZONE_TEXT("cancelled");
         }        
+    }
+    else if (!gotFromCache && cachePolicy->isCacheOnly())
+    {
+        response.setMessage("Resource is missing from the cache and cache-only mode is enabled");
     }
     return response;
 }
@@ -1781,13 +2212,7 @@ HTTPClient::doReadImage(const HTTPRequest&    request,
     }
     else
     {
-        result = ReadResult(
-            response.isCanceled() ? ReadResult::RESULT_CANCELED :
-            response.getCode() == HTTPResponse::NOT_FOUND ? ReadResult::RESULT_NOT_FOUND :
-            response.getCode() == HTTPResponse::NOT_MODIFIED ? ReadResult::RESULT_NOT_MODIFIED :
-            response.getCode() == HTTPResponse::FORBIDDEN ? ReadResult::RESULT_UNAUTHORIZED :
-            response.getCodeCategory() == HTTPResponse::CATEGORY_SERVER_ERROR ? ReadResult::RESULT_SERVER_ERROR :
-            ReadResult::RESULT_UNKNOWN_ERROR);
+        result = ReadResult(readErrorCode(response));
 
         // for request errors, return an error result with the part data intact
         // so the user can parse it as needed. We only do this for readString.
@@ -1890,12 +2315,7 @@ HTTPClient::doReadNode(const HTTPRequest&    request,
     }
     else
     {
-        result = ReadResult(
-            response.isCanceled() ? ReadResult::RESULT_CANCELED :
-            response.getCode() == HTTPResponse::NOT_FOUND ? ReadResult::RESULT_NOT_FOUND :
-            response.getCode() == HTTPResponse::NOT_MODIFIED ? ReadResult::RESULT_NOT_MODIFIED :
-            response.getCodeCategory() == HTTPResponse::CATEGORY_SERVER_ERROR ? ReadResult::RESULT_SERVER_ERROR :
-            ReadResult::RESULT_UNKNOWN_ERROR);
+        result = ReadResult(readErrorCode(response));
 
         // for request errors, return an error result with the part data intact
         // so the user can parse it as needed. We only do this for readString.
@@ -1996,12 +2416,7 @@ HTTPClient::doReadObject(const HTTPRequest&    request,
     }
     else
     {
-        result = ReadResult(
-            response.isCanceled() ? ReadResult::RESULT_CANCELED :
-            response.getCode() == HTTPResponse::NOT_FOUND ? ReadResult::RESULT_NOT_FOUND :
-            response.getCode() == HTTPResponse::NOT_MODIFIED ? ReadResult::RESULT_NOT_MODIFIED :
-            response.getCodeCategory() == HTTPResponse::CATEGORY_SERVER_ERROR ? ReadResult::RESULT_SERVER_ERROR :
-            ReadResult::RESULT_UNKNOWN_ERROR);
+        result = ReadResult(readErrorCode(response));
 
         // for request errors, return an error result with the part data intact
         // so the user can parse it as needed. We only do this for readString.
@@ -2066,12 +2481,7 @@ HTTPClient::doReadString(const HTTPRequest&    request,
     }
     else
     {
-        result = ReadResult(
-            response.isCanceled() ? ReadResult::RESULT_CANCELED :
-            response.getCode() == HTTPResponse::NOT_FOUND ? ReadResult::RESULT_NOT_FOUND :
-            response.getCode() == HTTPResponse::NOT_MODIFIED ? ReadResult::RESULT_NOT_MODIFIED :
-            response.getCodeCategory() == HTTPResponse::CATEGORY_SERVER_ERROR ? ReadResult::RESULT_SERVER_ERROR :
-            ReadResult::RESULT_UNKNOWN_ERROR);
+        result = ReadResult(readErrorCode(response));
         
         // for request errors, return an error result with the part data intact
         // so the user can parse it as needed. We only do this for readString.

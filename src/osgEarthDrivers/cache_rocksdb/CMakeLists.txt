@@ -4,8 +4,6 @@ if(RocksDB_FOUND)
 
     message(STATUS "Found rocksdb")
 
-    set(CMAKE_CXX_STANDARD 17)
-    
     add_osgearth_plugin(
         TARGET 
             osgdb_osgearth_cache_rocksdb

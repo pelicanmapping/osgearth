@@ -74,7 +74,7 @@ KMLReader::read( xml_document<>& doc, const osgDB::Options* dbOptions )
     URIResultCache defaultUriCache;
     if ( !URIResultCache::from(dbOptions) )
     {
-        osgDB::Options* newOptions = Registry::instance()->cloneOrCreateOptions();
+        osgDB::Options* newOptions = Registry::instance()->cloneOrCreateOptions(dbOptions);
         defaultUriCache.apply( newOptions );
         cx._dbOptions = newOptions;
     }

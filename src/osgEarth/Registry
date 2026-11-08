@@ -11,6 +11,7 @@
 #include <osgEarth/SpatialReference>
 #include <osgEarth/DateTime>
 #include <osgEarth/Callbacks>
+#include <osgEarth/ObjectReleaser>
 #include <set>
 #include <unordered_set>
 #include <unordered_map>
@@ -42,6 +43,9 @@ namespace osgEarth
     public:
         //! Access the global Registry singleton.
         static Registry* instance();
+
+        //! Thread-safe lazy access to the shared CPU retirement service; jobs must be running.
+        osg::ref_ptr<ObjectReleaser> getObjectReleaser();
 
         /** Gets a default cache object - based on environment settings - unless setDefaultCache
             was called to override it. */
@@ -304,6 +308,7 @@ namespace osgEarth
         Registry();
 
         mutable std::mutex _regMutex;
+        osg::ref_ptr<ObjectReleaser> _objectReleaser;
 
         ProgramRepo _programRepo;
 

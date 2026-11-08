@@ -103,8 +103,7 @@ FeatureSource::openImplementation()
 
     if (l2CacheSize > 0)
     {
-        // note: cannot use std::make_unique in C++11
-        _featuresCache = std::unique_ptr<FeaturesLRU>(new FeaturesLRU(l2CacheSize));
+        _featuresCache = std::make_unique<FeaturesLRU>(l2CacheSize);
     }
 
     Status parent = super::openImplementation();
@@ -321,7 +320,12 @@ FeatureSource::createFeatureCursor(const Query& in_query, const FeatureFilterCha
     }
 
     const bool isTileQuery = query.tileKey().isSet() && query.tileKey()->valid();
-    const bool canUseL2TileCache = isTileQuery && (_featuresCache != nullptr);
+    // Filtered features can come from several cached responses with different original timestamps.
+    // When freshness is constrained, let the underlying source validate those responses.
+    const auto* settings = getCacheSettings();
+    const bool checkAge = settings &&
+        (settings->cachePolicy()->maxAge().isSet() || settings->cachePolicy()->minTime().isSet());
+    const bool canUseL2TileCache = isTileQuery && _featuresCache && !checkAge;
 
     // TileKey path:
     if (isTileQuery)

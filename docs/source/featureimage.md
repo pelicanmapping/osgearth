@@ -5,18 +5,17 @@ mode uses the existing feature rasterizer. Optional `vector` mode evaluates
 Slughorn curves and centerline strokes on the GPU, preserving smooth edges when
 zooming past the source LOD.
 
-Enable `OSGEARTH_ENABLE_SLUGHORN` in CMake (default: OFF) to build Slughorn
-statically and enable `FeatureImage` layers with `mode="vector"`. Use the normal
-`configure.bat` and `build.bat` workflow on Windows. The implementation requires
-a C++20-capable compiler; osgEarth's public headers and consumer compilation
-remain C++17 (or the existing C++14 polyfill mode). Only the private Slughorn
-translation unit and SDK core compile as C++20.
+vcpkg installs Slughorn as a regular dependency from the repository's overlay port.
+Enable `OSGEARTH_ENABLE_SLUGHORN` in CMake (default OFF) to use
+`FeatureImage` layers with `mode="vector"`. The core library and osgEarth's
+Slughorn implementation file require C++20. osgEarth's public headers require C++17.
 
-CMake downloads a pinned, SHA512-verified Slughorn source archive. It builds
-only the core, with no Python, examples, or optional SDK backends. For offline
-builds, set `FETCHCONTENT_SOURCE_DIR_OSGEARTH_SLUGHORN` to a checkout of the
-pinned revision before configuring. The revision and checksum are in
-`cmake/Slughorn.cmake`; the shader depends on that revision's atlas format.
+For other builds, CMake looks for an installed Slughorn package first. Set
+`Slughorn_DIR` to the directory containing `SlughornConfig.cmake` if needed.
+If the package is absent, CMake fetches and verifies the same pinned archive
+and builds only the core. For an offline fallback, point
+`FETCHCONTENT_SOURCE_DIR_OSGEARTH_SLUGHORN` at a checkout of the revision in
+`cmake/ports/slughorn/source.cmake`. The shader depends on that revision's atlas format.
 
 ## Earth file
 
@@ -51,6 +50,54 @@ therefore select the correct subregion at higher LODs. Pixel widths refer to
 pixels at the source tile's nominal `tile_size`, as with raster imagery; they
 are not constant screen-pixel widths while zooming. Meter widths are converted
 at the source tile latitude using the rasterizer's distance policy.
+
+## TileJSON sources
+
+`XYZFeatures` accepts a TileJSON metadata URL in place of a tile URL template:
+
+```xml
+<XYZFeatures name="openfreemap">
+    <url>https://tiles.openfreemap.org/planet/latest</url>
+</XYZFeatures>
+<FeatureImage name="Water" mode="vector">
+    <features>openfreemap</features>
+    <styles>
+        <style type="text/css"><![CDATA[
+            water {
+                select: feature.properties.mvt_layer === 'water';
+                fill: #a9cee2;
+            }
+        ]]></style>
+    </styles>
+</FeatureImage>
+```
+
+A URL containing tile placeholders keeps the existing XYZ behavior. Otherwise,
+the source reads TileJSON when it opens, including extensionless endpoints such
+as `latest`. It selects the first endpoint in `tiles` (equivalent mirrors),
+resolves relative endpoints against the metadata URL, and honors `scheme: "tms"`
+by inverting Y. The default tiling profile is spherical Mercator; geographic
+`bounds` describe feature coverage without changing the tile grid.
+
+The metadata supplies `minzoom`, `maxzoom`, and `attribution`. Missing or invalid
+optional zoom values default to 0 and 30. Explicit `min_level`, `max_level`,
+`profile`, `format`, and `attribution` settings take precedence. Feature data
+defaults to PBF; the optional `format` field can select `pbf` (or `mvt`), `json`,
+`gml`, or `fgb`. Raster tile formats are not supported by `XYZFeatures`.
+
+Derived settings and the resolved tile endpoint are not written back into the
+earth file. The original metadata URL is retained and resolved again on reopen,
+subject to the configured URI cache policy. Local TileJSON sources are read-only.
+Malformed metadata or unusable tile endpoints report an error when opening.
+
+TileJSON does not supply rendering styles. Use `mvt_layer` and the source's
+attributes in your stylesheet as above. The source zoom limit automatically caps
+feature requests, so `max_data_level` is unnecessary unless you want an override.
+The metadata's `center`, `fillzoom`, and descriptive `vector_layers` fields do not
+change the viewpoint, overzoom policy, or style selection.
+
+See `tests/openfreemap_vector.earth` for a complete vector basemap and
+`tests/maplibre_vector.earth` for a simpler country map.
 
 ## Rendering
 

@@ -3,6 +3,7 @@
  * MIT License
  */
 #include <osgEarth/PMTiles>
+#include "TileSourceMetadata.h"
 #include <osgEarth/Registry>
 #include <osgEarth/StringUtils>
 #include <osgEarth/ImageToHeightFieldConverter>
@@ -53,8 +54,8 @@ public:
         if (outcome.IsSuccess()) {
             auto& stream = outcome.GetResult().GetBody();
             result.resize(end - start + 1);
-            stream.read(&result[0], end - start + 1);
-            return true;
+            stream.read(result.data(), length);
+            return stream.gcount() == length;
         }
         return false;
     }
@@ -79,9 +80,10 @@ public:
     {
         std::lock_guard<std::mutex> lk(_mutex);
         result.resize(length);
+        _inputFile.clear();
         _inputFile.seekg(offset);
-        _inputFile.read(&result[0], length);
-        return true;
+        _inputFile.read(result.data(), length);
+        return _inputFile.gcount() == length;
     }
 
     mutable std::mutex _mutex;
@@ -110,6 +112,61 @@ PMTiles::Options::readFrom(const Config& conf)
 
 //...................................................................
 
+// Holds the live raster archive for one open layer. Cached tiles can be served without constructing its S3 client.
+class osgEarth::PMTiles::RasterArchive
+{
+public:
+    // Restore cached coverage, or discover it from the archive if the policy permits.
+    Status open(const std::string& name, const Options& options, const osgDB::Options* readOptions,
+        unsigned tileSize, osg::ref_ptr<const Profile>& profile, DataExtentList& extents)
+    {
+        _name = name;
+        _options = options;
+        auto* settings = CacheSettings::get(readOptions);
+        const char* key = "pmtiles_source_metadata";
+        if (detail::readSourceMetadata(settings, readOptions, key, profile, extents))
+            return Status::OK();
+        if (settings && settings->cachePolicy()->isCacheOnly())
+            return Status(Status::ResourceUnavailable, "Missing cached PMTiles source metadata");
+
+        auto status = openDriver(readOptions);
+        if (status.isError())
+            return status;
+
+        profile = Profile::create(Profile::SPHERICAL_MERCATOR);
+        extents.emplace_back(profile->getExtent(), _driver->getMinLevel(), _driver->getMaxLevel());
+        detail::writeSourceMetadata(settings, readOptions, key, profile.get(), tileSize, extents);
+        return Status::OK();
+    }
+
+    // On a tile miss, serialize only the first archive open. A failed open can be retried on the next miss.
+    ReadResult readImage(const TileKey& key, ProgressCallback* progress, const osgDB::Options* readOptions)
+    {
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            if (!_driver && openDriver(readOptions).isError())
+                return ReadResult::RESULT_READER_ERROR;
+        }
+        return _driver->readImage(key, progress, readOptions);
+    }
+
+private:
+    // Publish a fully initialized driver under the caller's open or initialization lock.
+    Status openDriver(const osgDB::Options* readOptions)
+    {
+        auto driver = std::make_unique<Driver>();
+        Status status = driver->open(_name, _options, readOptions);
+        if (status.isOK())
+            _driver = std::move(driver);
+        return status;
+    }
+
+    std::string _name;
+    Options _options;
+    std::unique_ptr<Driver> _driver;
+    std::mutex _mutex;
+};
+
 Config
 PMTilesImageLayer::Options::getConfig() const
 {
@@ -134,38 +191,28 @@ void
 PMTilesImageLayer::init()
 {
     ImageLayer::init();
-
-    // by default don't cache from local files
-    layerHints().cachePolicy() = CachePolicy::NO_CACHE;
 }
 
 Status
 PMTilesImageLayer::openImplementation()
 {
+    // Local archives are already on disk. Remote archives benefit from the map cache by default.
+    layerHints().cachePolicy().unset();
+    if (!startsWith(options().url()->base(), "s3://"))
+        layerHints().cachePolicy() = CachePolicy::NO_CACHE;
+
     Status parent = ImageLayer::openImplementation();
     if (parent.isError())
         return parent;
 
-    Status status = _driver.open(
-        getName(),
-        options(),
-        getReadOptions());
-
+    _archive = std::make_shared<PMTiles::RasterArchive>();
+    osg::ref_ptr<const Profile> profile;
+    DataExtentList extents;
+    Status status = _archive->open(getName(), options(), getReadOptions(), getTileSize(), profile, extents);
     if (status.isError())
-    {
         return status;
-    }
-
-    setProfile(Profile::create(Profile::SPHERICAL_MERCATOR));
-
-    // Set the data extents to the entire profile with the specified min/max level
-    DataExtentList dataExtents;
-    DataExtent e(getProfile()->getExtent());
-    e.minLevel() = _driver.getMinLevel();
-    e.maxLevel() = _driver.getMaxLevel();
-    dataExtents.emplace_back(e);
-    setDataExtents(dataExtents);
-
+    setProfile(profile.get());
+    setDataExtents(extents);
     return Status::NoError;
 }
 
@@ -175,7 +222,7 @@ PMTilesImageLayer::createImageImplementation(const TileKey& key, ProgressCallbac
     if (getStatus().isError())
         return GeoImage(getStatus());
 
-    ReadResult r = _driver.readImage(key, progress, getReadOptions());
+    ReadResult r = _archive->readImage(key, progress, getReadOptions());
 
     if (r.succeeded())
         return GeoImage(r.releaseImage(), key.getExtent());
@@ -211,39 +258,28 @@ void
 PMTilesElevationLayer::init()
 {
     ElevationLayer::init();
-
-    // by default don't cache from local files
-    layerHints().cachePolicy() = CachePolicy::NO_CACHE;
 }
 
 Status
 PMTilesElevationLayer::openImplementation()
 {
+    // Local archives are already on disk. Remote archives benefit from the map cache by default.
+    layerHints().cachePolicy().unset();
+    if (!startsWith(options().url()->base(), "s3://"))
+        layerHints().cachePolicy() = CachePolicy::NO_CACHE;
+
     Status parent = ElevationLayer::openImplementation();
     if (parent.isError())
         return parent;
 
-
-    Status status = _driver.open(
-        getName(),
-        options(),
-        getReadOptions());
-
+    _archive = std::make_shared<PMTiles::RasterArchive>();
+    osg::ref_ptr<const Profile> profile;
+    DataExtentList extents;
+    Status status = _archive->open(getName(), options(), getReadOptions(), getTileSize(), profile, extents);
     if (status.isError())
-    {
         return status;
-    }
-
-    setProfile(Profile::create(Profile::SPHERICAL_MERCATOR));
-
-    // Set the data extents to the entire profile with the specified min/max level
-    DataExtentList dataExtents;
-    DataExtent e(getProfile()->getExtent());
-    e.minLevel() = _driver.getMinLevel();
-    e.maxLevel() = _driver.getMaxLevel();
-    dataExtents.emplace_back(e);
-    setDataExtents(dataExtents);
-
+    setProfile(profile.get());
+    setDataExtents(extents);
     return Status::NoError;
 }
 
@@ -253,7 +289,7 @@ PMTilesElevationLayer::createHeightFieldImplementation(const TileKey& key, Progr
     if (getStatus().isError())
         return GeoHeightField(getStatus());
 
-    ReadResult r = _driver.readImage(key, progress, getReadOptions());
+    ReadResult r = _archive->readImage(key, progress, getReadOptions());
 
     if (r.succeeded() && r.getImage())
     {
@@ -291,6 +327,7 @@ PMTiles::Driver::open(
     const osgDB::Options* readOptions)
 {
     _name = name;
+    _dbOptions = readOptions;
 
     std::string base = options.url().get().base();
     if (osgEarth::startsWith(base, "s3://"))
@@ -313,21 +350,23 @@ PMTiles::Driver::open(
         _chunkedReader = std::unique_ptr<ChunkedReader>(new SeekFileChunkReader(full));
     }
 
-    read(0, 127, _headerStr);
+    if (!read(0, 127, _headerStr) || _headerStr.size() != 127)
+        return Status(Status::ResourceUnavailable, "Cannot read PMTiles archive header");
 
-    auto header = pmtiles::deserialize_header(_headerStr);
+    pmtiles::headerv3 header;
+    try
+    {
+        header = pmtiles::deserialize_header(_headerStr);
+    }
+    catch (const std::exception& e)
+    {
+        return Status(Status::ResourceUnavailable, e.what());
+    }
 
     _minLevel = header.min_zoom;
     _maxLevel = header.max_zoom;
     _internalCompression = header.internal_compression;
     _tileCompression = header.tile_compression;
-
-    
-    std::string metadata_s;
-    metadata_s.resize(header.json_metadata_bytes);
-    read(header.json_metadata_offset, header.json_metadata_bytes, metadata_s);
-    metadata_s = decompress(metadata_s, header.internal_compression);
-
 
     if (header.tile_type == pmtiles::TILETYPE_JPEG)
     {
@@ -528,6 +567,12 @@ PMTilesFeatureSource::Options::fromConfig(const Config& conf)
 Status
 PMTilesFeatureSource::openImplementation()
 {
+    Status parent = super::openImplementation();
+    if (parent.isError())
+        return parent;
+    if (startsWith(options().url()->base(), "s3://") && getCacheSettings()->cachePolicy()->isCacheOnly())
+        return Status(Status::ResourceUnavailable, "S3 PMTiles feature queries require the source archive");
+
     Status status = _driver.open(
         getName(),
         options(),
@@ -543,7 +588,7 @@ PMTilesFeatureSource::openImplementation()
     featureProfile->setMaxLevel(_driver.getMaxLevel());
     setFeatureProfile(featureProfile);
 
-    return super::openImplementation();
+    return Status::OK();
 }
 
 

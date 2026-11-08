@@ -348,6 +348,9 @@ Layer::open()
 
     NetworkMonitor::ScopedRequestLayer layerRequest(getName());
 
+    if (!_readOptions.valid())
+        setReadOptions(Registry::instance()->getDefaultOptions());
+
     // be optimistic :)
     _status.set(Status::NoError);
 
@@ -399,8 +402,12 @@ Layer::updateCacheSettings()
     CacheSettings* oldSettings = CacheSettings::get(_readOptions.get());
     _cacheSettings = oldSettings ? new CacheSettings(*oldSettings) : new CacheSettings();
 
-    // If the layer hints are set, integrate that cache policy next.
-    _cacheSettings->integrateCachePolicy(layerHints().cachePolicy());
+    if (!oldSettings)
+        _cacheSettings->setCache(Registry::instance()->getDefaultCache());
+
+    // A driver hint must not enable source access when its parent requested cache-only.
+    if (!_cacheSettings->cachePolicy()->isCacheOnly())
+        _cacheSettings->integrateCachePolicy(layerHints().cachePolicy());
 
     // bring in the new policy for this layer if there is one:
     _cacheSettings->integrateCachePolicy(options().cachePolicy());
@@ -419,9 +426,10 @@ Layer::updateCacheSettings()
         }
         else
         {
-            // failed to create the bin, so fall back on no cache mode.
-            OE_WARN << LC << "Failed to open a cache bin [" << _runtimeCacheId << "], disabling caching" << std::endl;
-            _cacheSettings->cachePolicy() = CachePolicy::NO_CACHE;
+            OE_WARN << LC << "Failed to open cache bin [" << _runtimeCacheId << "]" << std::endl;
+            _cacheSettings->setCacheBin(nullptr);
+            if (!_cacheSettings->cachePolicy()->isCacheOnly())
+                _cacheSettings->cachePolicy() = CachePolicy::NO_CACHE;
         }
     }
 

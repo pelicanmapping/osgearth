@@ -656,6 +656,7 @@ namespace osgEarth
             return result;
         }
 
+        //! Services orphan deletion on the GL thread under the pool mutex; compacts tracking storage without allocation.
         void releaseOrphans(const osg::GraphicsContext* gc);
 
     public: //osg::GraphicsObjectManager

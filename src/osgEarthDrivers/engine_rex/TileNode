@@ -40,11 +40,13 @@ namespace osgEarth { namespace REX
                      public osgEarth::TerrainTile
     {
     public:
+        //! Constructs an unpublished tile; optional captured elevation avoids a preliminary flat tree build.
         TileNode(
             const TileKey& key,
             TileNode* parentTile,
             EngineContext* context,
-            Cancelable* progress);
+            Cancelable* progress,
+            const Sampler* initialElevation = nullptr);
 
         virtual ~TileNode();
         virtual const char* className() const { return "Rex::TileNode"; }
@@ -62,8 +64,8 @@ namespace osgEarth { namespace REX
         /** Tells this tile to request data for the data in the manifest */
         void refreshLayers(const CreateTileManifest& manifest);
 
-        /** Install new geometry in this tile */
-        void createGeometry(Cancelable*);
+        /** Installs geometry and builds its CPU surface once. Initial input is for unpublished children only. */
+        void createGeometry(Cancelable*, const Sampler* initialElevation = nullptr);
 
         /** Initial inheritance of tile data from the parent node. */
         void initializeData();
@@ -77,8 +79,9 @@ namespace osgEarth { namespace REX
         /** Whether all 3 quadtree siblings of this tile are dormant */
         bool areSiblingsDormant() const;
 
-        /** Removed any sub tiles from the scene graph. Please call from a safe thread only (update) */
-        void removeSubTiles();
+        /** Update thread only: detach subtiles and request GL release, retaining them in retired.
+         * The caller must hand off retired after dropping its other temporary tile references. */
+        void removeSubTiles(osg::NodeList& retired);
 
         /** Notifies this tile that another tile has come into existence. */
         void notifyOfArrival(TileNode* that);
@@ -190,6 +193,10 @@ namespace osgEarth { namespace REX
         using CreateChildrenResult = std::array<osg::ref_ptr<TileNode>, 4>;
         Future<CreateChildrenResult> _createChildrenFutureResult;
 
+        struct ChildCreationInputs;
+        std::shared_ptr<const ChildCreationInputs> _childCreationInputs;
+        std::atomic<unsigned> _geometryRevision{0};
+
         using LoadQueue = std::queue<LoadTileDataOperationPtr>;
         Mutexed<LoadQueue> _loadQueue;
         unsigned _loadsInQueue = 0;
@@ -208,11 +215,23 @@ namespace osgEarth { namespace REX
 
         void updateNormalMap();
 
+        //! Dispatches preparation and publishes only complete, current sibling groups; never waits on jobs.
         bool createChildren();
 
+        //! Captures inherited elevation and geometry source revisions on the scene traversal thread.
+        std::shared_ptr<const ChildCreationInputs> captureChildCreationInputs() const;
+
+        //! Checks captured inputs before attachment; callers serialize scene updates and cull publication.
+        bool childCreationInputsCurrent() const;
+
+        //! Retains futures across reset and releases rejected/unpublished results through ObjectReleaser.
+        void discardPreparedChildren();
+
+        //! Builds one unpublished child, using captured inputs without reading the live parent render model.
         TileNode* createChild(
             const TileKey& key,
-            Cancelable* cancelable);
+            Cancelable* cancelable,
+            const Sampler* initialElevation = nullptr);
 
         // Returns false if the Surface node fails visiblity test
         bool cull(TerrainCuller*);

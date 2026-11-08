@@ -14,7 +14,9 @@
 #include <osgEarth/Metrics>
 #include <osgEarth/Math>
 #include <osgEarth/TileMesher>
+#include <osgEarth/ObjectReleaser>
 #include <osg/Geometry>
+#include "KdTreePool"
 
 namespace osgEarth
 {
@@ -281,6 +283,18 @@ namespace osgEarth
         //! Construct the geometry pool
         GeometryPool();
 
+        //! With producers stopped, drains submitted CPU retirements before pool teardown.
+        ~GeometryPool() override;
+
+        //! Shared per-pool client; tiles copy this handle to retire replaced CPU intersection trees.
+        const ObjectReleaser::Client& getKdTreeReleaser() const { return _kdTreeReleaser; }
+
+        //! Shared engine-local cache; detached snapshots and scratch storage have bounded retention.
+        const std::shared_ptr<KdTreePool>& getKdTreePool() const { return _kdTreePool; }
+
+        //! Retires canceled/stale child preparation without destroying its CPU geometry during cull.
+        const ObjectReleaser::Client& getChildReleaser() const { return _childReleaser; }
+
         //! Gets the Geometry associated with a tile key, creating a new one if
         //! necessary and storing it in the pool.
         void getPooledGeometry(
@@ -294,7 +308,7 @@ namespace osgEarth
         //! Are we doing pooling?
         bool isEnabled() const { return _enabled; }
 
-        //! Clear and reset the pool.
+        //! Detaches all cached geometry and submits CPU ownership after unlocking, bypassing the expiry gate.
         void clear();
 
     public: // osg::Node
@@ -312,6 +326,10 @@ namespace osgEarth
         mutable std::mutex _geometryMapMutex;
         GeometryMap _geometryMap;
         osg::ref_ptr<SharedDrawElements> _defaultPrimSet;
+        ObjectReleaser::Client _releaser;
+        ObjectReleaser::Client _kdTreeReleaser;
+        std::shared_ptr<KdTreePool> _kdTreePool;
+        ObjectReleaser::Client _childReleaser;
 
         void createKeyForTileKey(
             const TileKey& tileKey,

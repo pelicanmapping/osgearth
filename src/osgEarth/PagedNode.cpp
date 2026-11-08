@@ -24,6 +24,27 @@ namespace
 {
     struct VisibilityCallback : public osg::NodeCallback {
     };
+
+    // Only the update thread can mutate a page. A scoped batch preserves virtual unload dispatch
+    // without submitting one cleanup job per page; nested manager updates restore the outer scope.
+    struct RetirementBatch;
+    thread_local RetirementBatch* s_retirementBatch = nullptr;
+    struct RetirementBatch
+    {
+        PagingManager* manager;
+        ObjectReleaser::Objects& objects;
+        RetirementBatch* previous;
+
+        //! Collects this manager's base-class unload releases on the current update thread.
+        RetirementBatch(PagingManager* owner, ObjectReleaser::Objects& retired) :
+            manager(owner), objects(retired), previous(s_retirementBatch)
+        {
+            s_retirementBatch = this;
+        }
+
+        //! Restores the previous scope, including when a subclass unload throws.
+        ~RetirementBatch() { s_retirementBatch = previous; }
+    };
 }
 
 PagedNode2::PagedNode2()
@@ -353,11 +374,32 @@ PagedNode2::load()
 
 void PagedNode2::unload()
 {
+    osg::ref_ptr<PagingManager> manager;
+    {
+        std::lock_guard<Mutex> lock(_mutex);
+        _pagingManager_weak.lock(manager);
+    }
+    if (s_retirementBatch && s_retirementBatch->manager == manager.get())
+    {
+        unload(s_retirementBatch->objects);
+        return;
+    }
+    auto releaser = manager.valid() ? manager->_releaser :
+        Registry::instance()->getObjectReleaser()->createClient("PagedNode2 explicit unload");
+    ObjectReleaser::Objects retired;
+    unload(retired);
+    releaser.release(retired);
+}
+
+void PagedNode2::unload(ObjectReleaser::Objects& retired)
+{
     // Scene graph mutations, including explicit unloads, must be serialized on the update thread.
     bool merged;
     {
         std::lock_guard<Mutex> lock(_mutex);
         merged = _merged.has_value(true);
+        // Retain the handle, not just an available value: completion may race with reset.
+        retired.emplace_back(ObjectReleaser::hold(_loaded));
         ++_revision;
         _loaded.reset();
         _merged.reset();
@@ -365,6 +407,8 @@ void PagedNode2::unload()
     }
     if (merged)
     {
+        for (unsigned i = 0; i < _payload->getNumChildren(); ++i)
+            retired.emplace_back(_payload->getChild(i));
         _payload->removeChildren(0, _payload->getNumChildren());
         removeChild(_payload.get());
     }
@@ -387,6 +431,7 @@ PagedNode2::isHighestResolution() const
 }
 
 PagingManager::PagingManager(const std::string& jobpoolname) :
+    _releaser(Registry::instance()->getObjectReleaser()->createClient("PagingManager")),
     _jobpoolName(jobpoolname)
 {
     setCullingActive(false);
@@ -403,6 +448,7 @@ PagingManager::PagingManager(const std::string& jobpoolname) :
 
 PagingManager::~PagingManager()
 {
+    _releaser.drain();
     if (_mergeQueue.size() > 0)
     {
         _metrics->postprocessing.exchange(_metrics->postprocessing - _mergeQueue.size());
@@ -482,18 +528,25 @@ PagingManager::merge(PagedNode2* host, int revision, jobs::promise<bool> promise
 void
 PagingManager::update(osg::NodeVisitor* nv)
 {
+    ObjectReleaser::Objects retired;
+    const bool canRetire = _releaser.available();
     {
         scoped_lock_if lock(_trackerMutex, _threadsafe);
 
         double now = nv && nv->getFrameStamp() ? nv->getFrameStamp()->getReferenceTime() : 0.0;
 
-        auto checkForDispoal = [this, now](osg::ref_ptr<PagedNode2>& node)
+        RetirementBatch batch(this, retired);
+        auto checkForDispoal = [this, now, canRetire, &retired](osg::ref_ptr<PagedNode2>& node)
         {
+            if (!canRetire) return false;
+
             // if the node is no longer in the scene graph, expunge it
             if (node->referenceCount() == 1)
             {
-                std::lock_guard<Mutex> nodeLock(node->_mutex);
-                node->_token = nullptr;
+                retired.emplace_back(node.get());
+                // Invalidate pending merges and retire the payload separately. A queued completion
+                // can still lock the node's observer while the disposal worker retains the node.
+                node->unload(retired);
                 return true;
             }
 
@@ -571,6 +624,8 @@ PagingManager::update(osg::NodeVisitor* nv)
         else
             entry._promise.resolve(false);
     }
+    // All update-local node references must be gone before the worker can release these batches.
+    _releaser.release(retired);
 }
 
 namespace

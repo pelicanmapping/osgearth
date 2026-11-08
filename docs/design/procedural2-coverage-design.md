@@ -77,7 +77,12 @@ sources can still replace the whole dispatcher through FeatureScatterSource.
 Vegetation2 accepts a sources collection of named feature-layer references or application providers and a coverage collection of attribute
 rules. Match source and group by name or '*'; match a non-null attribute key against a value or '*'. The optional
 except value supports tags such as building=no. Actions are include (polygon), exclude (polygon or buffered line),
-and points. Matching inclusions use priority and region ownership; ties for the same region/scatter combine density by
+and points. The optional geometry attribute (polygon, line or point) restricts a rule to parts of that kind; a
+multipolygon counts as polygons, since features are iterated part by part, and a feature with no admitted part is not
+fetched. Without it a rule takes every part its action can use, so a water tag on a river centerline and on a lake both
+match an unbuffered exclusion, but only the lake excludes anything. The filter must fit the action: polygon for
+include, polygon or buffered line for exclude, point for points.
+Matching inclusions use priority and region ownership; ties for the same region/scatter combine density by
 maximum. Any matched hard exclusion wins. The initial demos use
 binary coverage. Constant fractional densities are supported and tested; spatially feathered masks are later work.
 Buffer is a line's half-width in meters, with round segment caps. The demo's four-meter road half-width is a policy

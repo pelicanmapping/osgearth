@@ -26,6 +26,7 @@
     "opengl",
     "osg",
     "protobuf",
+    "slughorn",
     "sqlite3",
     "spdlog",
     "meshoptimizer",

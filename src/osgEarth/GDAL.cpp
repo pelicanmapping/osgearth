@@ -3,6 +3,7 @@
  * MIT License
  */
 #include "GDAL"
+#include "TileSourceMetadata.h"
 
 #include <osgEarth/Registry>
 #include <osgEarth/ImageUtils>
@@ -1740,6 +1741,26 @@ namespace
 
         return Status::NoError;
     }
+
+    // Restore the source profile and coverage before opening GDAL. Tile misses open the dataset on demand.
+    // A cold or expired entry in online mode is refreshed by the normal dataset-open path.
+    template<typename T>
+    Status openGDALLayer(
+        const T* layer, CacheSettings* settings, GDAL_detail::Driver::Ptr& driver,
+        osg::ref_ptr<const Profile>& profile, DataExtentList& extents)
+    {
+        const char* key = "gdal_source_metadata";
+        if (detail::readSourceMetadata(settings, layer->getReadOptions(), key, profile, extents))
+            return Status::OK();
+        if (settings->cachePolicy()->isCacheOnly())
+            return Status(Status::ResourceUnavailable, "Missing cached GDAL source metadata");
+
+        Status status = openOnThisThread(layer, driver, &profile, &extents, true);
+        if (status.isOK())
+            detail::writeSourceMetadata(settings, layer->getReadOptions(), key, profile.get(), layer->getTileSize(), extents);
+        return status;
+    }
+
 }
 
 //......................................................................
@@ -1811,12 +1832,7 @@ GDALImageLayer::openImplementation()
 
     DataExtentList dataExtents;
 
-    Status s = openOnThisThread(
-        this,
-        driver,
-        &profile,
-        &dataExtents,
-        true);              //verbose
+    Status s = openGDALLayer(this, getCacheSettings(), driver, profile, dataExtents);
 
     if (s.isError())
         return s;
@@ -1857,20 +1873,18 @@ GDALImageLayer::createImageImplementation(const TileKey& key, ProgressCallback* 
 
     GDAL_detail::Driver::Ptr& driver = getSingleThreaded() ? _driverSingleThreaded : _driverPerThread.get();
 
+    Util::scoped_lock_if lock(_singleThreadingMutex, getSingleThreaded());
     if (driver == nullptr)
     {
-        // calling openImpl with NULL params limits the setup
-        // since we already called this during openImplementation
+        // A cache miss is the first time this thread needs a live dataset.
         osg::ref_ptr<const Profile> profile = getProfile();
-        openOnThisThread(this, driver, &profile, nullptr, false);
+        if (openOnThisThread(this, driver, &profile, nullptr, false).isError())
+            driver.reset();
     }
 
     if (driver != nullptr)
     {
         OE_PROFILING_ZONE;
-
-        // serialize acccess if we're in single-threaded mode
-        Util::scoped_lock_if lock(_singleThreadingMutex, getSingleThreaded());
 
         osg::ref_ptr<osg::Image> image = driver->createImage(
             key,
@@ -1944,12 +1958,7 @@ GDALElevationLayer::openImplementation()
 
     DataExtentList dataExtents;
 
-    Status s = openOnThisThread(
-        this,
-        driver,
-        &profile,
-        &dataExtents,
-        true);              //verbose
+    Status s = openGDALLayer(this, getCacheSettings(), driver, profile, dataExtents);
 
     if (s.isError())
         return s;
@@ -1991,19 +2000,18 @@ GDALElevationLayer::createHeightFieldImplementation(const TileKey& key, Progress
 
     GDAL_detail::Driver::Ptr& driver = getSingleThreaded() ? _driverSingleThreaded : _driverPerThread.get();
 
+    Util::scoped_lock_if lock(_singleThreadingMutex, getSingleThreaded());
     if (driver == nullptr)
     {
-        // calling openImpl with NULL params limits the setup
-        // since we already called this during openImplementation
+        // A cache miss is the first time this thread needs a live dataset.
         osg::ref_ptr<const Profile> profile = getProfile();
-        openOnThisThread(this, driver, &profile, nullptr, false);
+        if (openOnThisThread(this, driver, &profile, nullptr, false).isError())
+            driver.reset();
     }
 
     if (driver != nullptr)
     {
         OE_PROFILING_ZONE;
-
-        Util::scoped_lock_if lock(_singleThreadingMutex, getSingleThreaded());
 
         osg::ref_ptr<osg::HeightField> heightfield;
 

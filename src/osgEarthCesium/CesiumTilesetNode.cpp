@@ -13,12 +13,20 @@
 
 using namespace osgEarth::Cesium;
 
-CesiumTilesetNode::CesiumTilesetNode(unsigned int assetID, const std::string& server, const std::string& token, float maximumScreenSpaceError, std::vector<int> overlays)
+CesiumTilesetNode::CesiumTilesetNode(unsigned int assetID, const std::string& server, const std::string& token,
+    float maximumScreenSpaceError, std::vector<int> overlays) :
+    CesiumTilesetNode(assetID, server, token, maximumScreenSpaceError, std::move(overlays), nullptr)
+{
+}
+
+CesiumTilesetNode::CesiumTilesetNode(unsigned int assetID, const std::string& server, const std::string& token,
+    float maximumScreenSpaceError, std::vector<int> overlays, const osgDB::Options* readOptions)
 { 
     Context* context = CesiumIon::instance().getContext(server);
 
     Cesium3DTilesSelection::TilesetExternals externals{
-        context->assetAccessor, context->prepareRenderResources, context->asyncSystem, context->creditSystem, context->logger, nullptr
+        readOptions ? std::make_shared<AssetAccessor>(readOptions) : context->assetAccessor,
+        context->prepareRenderResources, context->asyncSystem, context->creditSystem, context->logger, nullptr
     };
 
     Cesium3DTilesSelection::TilesetOptions options;    
@@ -37,12 +45,20 @@ CesiumTilesetNode::CesiumTilesetNode(unsigned int assetID, const std::string& se
     setCullingActive(false);    
 }
 
-CesiumTilesetNode::CesiumTilesetNode(const std::string& url, const std::string& server, const std::string& token, float maximumScreenSpaceError, std::vector<int> overlays)
+CesiumTilesetNode::CesiumTilesetNode(const std::string& url, const std::string& server, const std::string& token,
+    float maximumScreenSpaceError, std::vector<int> overlays) :
+    CesiumTilesetNode(url, server, token, maximumScreenSpaceError, std::move(overlays), nullptr)
+{
+}
+
+CesiumTilesetNode::CesiumTilesetNode(const std::string& url, const std::string& server, const std::string& token,
+    float maximumScreenSpaceError, std::vector<int> overlays, const osgDB::Options* readOptions)
 {
     Context* context = CesiumIon::instance().getContext(server);
 
     Cesium3DTilesSelection::TilesetExternals externals{
-        context->assetAccessor, context->prepareRenderResources, context->asyncSystem, context->creditSystem, context->logger, nullptr
+        readOptions ? std::make_shared<AssetAccessor>(readOptions) : context->assetAccessor,
+        context->prepareRenderResources, context->asyncSystem, context->creditSystem, context->logger, nullptr
     };
 
     Cesium3DTilesSelection::TilesetOptions options;

@@ -3,15 +3,18 @@
  * MIT License
  */
 #include <osgEarth/XYZFeatureSource>
+#include <osgEarth/XYZ>
 #include <osgEarth/OgrUtils>
 #include <osgEarth/FeatureCursor>
 #include <osgEarth/Filter>
 #include <osgEarth/MVT>
 #include <osgEarth/Metrics>
+#include <osgEarth/JsonUtils>
 #include <osgDB/FileUtils>
 #include <cpl_vsi.h>
 #include <gdal.h>
 #include <atomic>
+#include <cmath>
 
 #define LC "[XYZFeatureSource] " << getName() << " : "
 
@@ -47,33 +50,145 @@ OE_LAYER_PROPERTY_IMPL(XYZFeatureSource, URI, URL, url);
 OE_LAYER_PROPERTY_IMPL(XYZFeatureSource, std::string, Format, format);
 OE_LAYER_PROPERTY_IMPL(XYZFeatureSource, bool, EsriGeodetic, esriGeodetic);
 
+namespace
+{
+    //! Identifies tile templates without relying on an extension (TileJSON URLs may have none).
+    bool hasTileCoordinates(const std::string& url)
+    {
+        return url.find("{z}") != std::string::npos || url.find("{x}") != std::string::npos ||
+            url.find("{y}") != std::string::npos || url.find("{-y}") != std::string::npos;
+    }
+
+    //! Reads a TileJSON zoom, using the specification's default for absent or invalid optional values.
+    int tileJSONZoom(const Util::Json::Value& value, int fallback)
+    {
+        return value.isIntegral() && value.asDouble() >= 0.0 && value.asDouble() <= 30.0 ?
+            value.asInt() : fallback;
+    }
+
+    //! Resolves vector TileJSON during open; retains explicit options and returns errors for unusable metadata.
+    //! Derived defaults are not serialized, so reopening can resolve a moving metadata URL again.
+    Status readTileJSON(const URI& uri, const osgDB::Options* readOptions, XYZFeatureSource::Options& options,
+        std::string& tileTemplate, GeoExtent& bounds)
+    {
+        const ReadResult result = uri.readString(readOptions);
+        if (result.failed())
+            return Status(Status::ResourceUnavailable, "Cannot read TileJSON: " + result.getResultCodeString());
+
+        Util::Json::Reader reader;
+        Util::Json::Value root;
+        if (!reader.parse(result.getString(), root, false) || !root.isObject() ||
+            !root["tilejson"].isString() || root["tilejson"].asString().empty())
+            return Status(Status::ConfigurationError, "Expected a TileJSON object with a tilejson version");
+
+        const auto& tiles = root["tiles"];
+        if (!tiles.isArray() || tiles.empty())
+            return Status(Status::ConfigurationError, "TileJSON requires a nonempty tiles array");
+        for (unsigned i = 0; i < tiles.size(); ++i)
+        {
+            if (!tiles[i].isString() || tiles[i].asString().empty())
+                return Status(Status::ConfigurationError, "TileJSON tile endpoints must be nonempty strings");
+        }
+
+        // Endpoints are equivalent mirrors; use the first, resolving relative URLs against the metadata file.
+        tileTemplate = URI(tiles[0u].asString(), URIContext(uri.full())).full();
+        if (tileTemplate.find("{z}") == std::string::npos || tileTemplate.find("{x}") == std::string::npos ||
+            (tileTemplate.find("{y}") == std::string::npos && tileTemplate.find("{-y}") == std::string::npos))
+            return Status(Status::ConfigurationError, "TileJSON endpoint requires {z}, {x}, and {y} or {-y}");
+        if (root["scheme"].isString() && root["scheme"].asString() == "tms")
+            replaceIn(tileTemplate, "{y}", "{-y}");
+
+        std::string format = "pbf";
+        if (root["format"].isString())
+            format = root["format"].asString();
+        if (format == "mvt")
+            format = "pbf";
+        format = options.format().getOrUse(format);
+        if (format != "pbf" && format != "json" && format != "gml" && format != "fgb")
+            return Status(Status::ConfigurationError, "TileJSON feature format must be pbf, json, gml, or fgb");
+
+        const int minLevel = tileJSONZoom(root["minzoom"], 0);
+        const int maxLevel = tileJSONZoom(root["maxzoom"], 30);
+        if (options.minLevel().getOrUse(minLevel) < 0 ||
+            options.maxLevel().getOrUse(maxLevel) > 30 ||
+            options.minLevel().getOrUse(minLevel) > options.maxLevel().getOrUse(maxLevel))
+            return Status(Status::ConfigurationError, "TileJSON levels must satisfy 0 <= min_level <= max_level <= 30");
+
+        const auto& box = root["bounds"];
+        if (box.isArray() && box.size() == 4u)
+        {
+            bool valid = true;
+            for (unsigned i = 0; i < 4u; ++i)
+                valid = valid && box[i].isNumeric() && std::isfinite(box[i].asDouble());
+            if (valid && box[0u].asDouble() >= -180.0 && box[2u].asDouble() <= 180.0 &&
+                box[1u].asDouble() >= -90.0 && box[3u].asDouble() <= 90.0 &&
+                box[0u].asDouble() <= box[2u].asDouble() && box[1u].asDouble() <= box[3u].asDouble())
+                bounds = GeoExtent(SpatialReference::get("wgs84"), box[0u].asDouble(), box[1u].asDouble(),
+                    box[2u].asDouble(), box[3u].asDouble());
+        }
+
+        options.format().setDefault(format);
+        options.profile().setDefault(ProfileOptions("spherical-mercator"));
+        options.minLevel().setDefault(minLevel);
+        options.maxLevel().setDefault(maxLevel);
+        options.attribution().setDefault(root["attribution"].isString() ? root["attribution"].asString() : "");
+        return Status::NoError;
+    }
+}
+
 Status
 XYZFeatureSource::openImplementation()
 {
-    if (!options().format().isSet())
+    Status parent = super::openImplementation();
+    if (parent.isError())
+        return parent;
+
+    if (options().url().get().empty())
+        return Status(Status::ConfigurationError, "XYZ driver requires a URL");
+
+    _template = options().url().get().full();
+    const bool tileJSON = !hasTileCoordinates(_template);
+    GeoExtent bounds;
+    if (tileJSON)
+    {
+        Status status = readTileJSON(options().url().get(), getReadOptions(), options(), _template, bounds);
+        if (status.isError())
+            return status;
+    }
+
+    if (!tileJSON && !options().format().isSet())
     {
         return Status(Status::ConfigurationError, "XYZ driver requires a format (pbf, json, gml, fgb)");
     }
 
     // if the user didn't expressly set a feature profile, create one from the options
-    if (getFeatureProfile() == nullptr)
+    if (tileJSON || getFeatureProfile() == nullptr)
     {
         FeatureProfile* fp = nullptr;
 
         // Try to get the results from the settings instead
-        if (!options().profile().isSet())
+        if (!tileJSON && !options().profile().isSet())
         {
             return Status(Status::ConfigurationError, "XYZ driver requires an explicit profile");
         }
 
-        if (!options().minLevel().isSet() || !options().maxLevel().isSet())
+        if (!tileJSON && (!options().minLevel().isSet() || !options().maxLevel().isSet()))
         {
             return Status(Status::ConfigurationError, "XYZ driver requires a min and max level");
         }
 
         osg::ref_ptr<const Profile> profile = Profile::create(options().profile().get());
+        if (!profile.valid())
+            return Status(Status::ConfigurationError, "XYZ driver profile is invalid");
 
         fp = new FeatureProfile(profile->getExtent());
+        if (bounds.isValid())
+        {
+            // Coverage bounds must not change the global tile grid or its XYZ addressing.
+            GeoExtent coverage = bounds.transform(profile->getSRS()).intersectionSameSRS(profile->getExtent());
+            if (coverage.isValid())
+                fp->setExtent(coverage);
+        }
         fp->setFirstLevel(options().minLevel().get());
         fp->setMaxLevel(options().maxLevel().get());
         fp->setTilingProfile(profile.get());
@@ -87,7 +202,8 @@ XYZFeatureSource::openImplementation()
     }
 
     // set up the URL template
-    _template = options().url()->full();
+    _rotateChoices.clear();
+    _rotateString.clear();
     _rotateStart = _template.find('[');
     _rotateEnd = _template.find(']');
     if (_rotateStart != std::string::npos && _rotateEnd != std::string::npos && _rotateEnd - _rotateStart > 1)
@@ -96,7 +212,7 @@ XYZFeatureSource::openImplementation()
         _rotateChoices = _template.substr(_rotateStart + 1, _rotateEnd - _rotateStart - 1);
     }
 
-    return super::openImplementation();
+    return Status::NoError;
 }
 
 void
@@ -172,7 +288,8 @@ XYZFeatureSource::getFeatures(const std::string& data, const TileKey& key, const
     if (mimeType == "application/flatgeobuf")
         return getFlatGeobufFeatures(data, features);
 
-    if (mimeType == "application/x-protobuf" || mimeType == "binary/octet-stream" || mimeType == "application/octet-stream")
+    if (mimeType == "application/x-protobuf" || mimeType == "application/vnd.mapbox-vector-tile" ||
+        mimeType == "binary/octet-stream" || mimeType == "application/octet-stream")
     {
 #ifdef OSGEARTH_HAVE_MVT
         return MVT::readTile(data, key, features, options().layers());
@@ -409,23 +526,7 @@ XYZFeatureSource::createURL(const Query& query) const
         replaceIn(location, "{-y}", Stringify() << inverted_tileY);
         replaceIn(location, "{z}", Stringify() << level);
 
-        std::string cacheKey;
-
-        if (!_rotateChoices.empty())
-        {
-            cacheKey = location;
-            unsigned index = (++_rotate_iter) % _rotateChoices.size();
-            replaceIn(location, _rotateString, Stringify() << _rotateChoices[index]);
-        }
-
-
-        URI uri(location, options().url()->context());
-        if (!cacheKey.empty())
-        {
-            uri.setCacheKey(Cache::makeCacheKey(location, "uri"));
-        }
-
-        return uri;
+        return XYZ::makeTileURI(location, options().url()->context(), _rotateString, _rotateChoices, _rotate_iter);
     }
     return URI();
 }
@@ -434,12 +535,15 @@ bool
 XYZFeatureSource::isWritable() const
 {
     return options().url().isSet() &&
-        (options().url()->isRemote() == false);
+        (options().url()->isRemote() == false) && hasTileCoordinates(options().url()->full());
 }
 
 Status
 XYZFeatureSource::insert(const TileKey& key, const FeatureList& features, bool overwrite)
 {
+    if (!isWritable())
+        return Status(Status::ConfigurationError, "XYZ insert requires a local tile URL template");
+
     OE_SOFT_ASSERT_AND_RETURN(key.valid(), Status::AssertionFailure);
     OE_SOFT_ASSERT_AND_RETURN((int)key.getLOD() >= getMinLevel(), Status::ConfigurationError);
     OE_SOFT_ASSERT_AND_RETURN((int)key.getLOD() <= getMaxLevel(), Status::ConfigurationError);

@@ -356,11 +356,24 @@ Registry::releaseGLObjects(osg::State* state) const
     _programRepo.unlock();
 }
 
+osg::ref_ptr<ObjectReleaser>
+Registry::getObjectReleaser()
+{
+    std::lock_guard<std::mutex> lock(_regMutex);
+    if (!_objectReleaser.valid())
+        _objectReleaser = new ObjectReleaser();
+    return _objectReleaser;
+}
+
 void
 Registry::release()
 {
     // ensure that _defaultCache cleans up before weejobs shutdown
     _defaultCache = nullptr;
+
+    // Stop traversal/producers before release. Drain CPU retirement while jobs and engine services still exist.
+    if (_objectReleaser.valid())
+        _objectReleaser->shutdown();
 
     // shut down running jobs:
     WEEJOBS_NAMESPACE::instance().shutdown();
@@ -383,6 +396,7 @@ Registry::release()
     // Dereference all registered singletons
     _singletons.clear();
     _namedSingletons.clear();
+    _objectReleaser = nullptr;
 }
 
 osg::ref_ptr<SpatialReference>

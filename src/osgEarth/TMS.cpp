@@ -750,7 +750,7 @@ TileMapServiceReader::TileMapServiceReader(const TileMapServiceReader& rhs)
 bool
 TileMapServiceReader::read( const std::string &location, const osgDB::ReaderWriter::Options* options, TileMapEntryList& tileMaps )
 {
-    ReadResult r = URI(location).readString();
+    ReadResult r = URI(location).readString(options);
     if ( r.failed() )
     {
         OE_WARN << LC << "Failed to read TileMapServices from " << location << std::endl;
@@ -950,8 +950,8 @@ TMS::Driver::read(const URI& uri,
 
         if (!image_url.empty())
         {
-            URI uri(image_url, uri.context());
-            osgEarth::ReadResult rr = uri.readImage(readOptions, progress);
+            URI imageURI(image_url, uri.context());
+            osgEarth::ReadResult rr = imageURI.readImage(readOptions, progress);
             if (rr.failed())
                 return rr;
 
@@ -1259,7 +1259,8 @@ TMSImageLayer::createImageImplementation(const TileKey& key, ProgressCallback* p
     if (r.succeeded())
         return GeoImage(r.releaseImage(), key.getExtent());
     else
-        return GeoImage(Status(r.errorDetail()));
+        return GeoImage(Status(r.errorDetail().empty() ? r.getResultCodeString() :
+            r.getResultCodeString() + ": " + r.errorDetail()));
 }
 
 Status
@@ -1486,7 +1487,7 @@ TMSElevationLayer::createHeightFieldImplementation(const TileKey& key, ProgressC
             return GeoHeightField(hf, key.getExtent());
         }
 
-        return GeoHeightField::INVALID;
+        return GeoHeightField(geoImage.getStatus());
     }
 }
 

@@ -16,6 +16,11 @@
 #include <osgEarth/ImageUtils>
 #include <osgEarth/Metrics>
 #include <osgEarth/Notify>
+#include <osgEarth/TerrainConstraintLayer>
+#include <osgEarth/TerrainMeshLayer>
+#ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
+#include <Superluminal/PerformanceAPI.h>
+#endif
 
 using namespace osgEarth::REX;
 using namespace osgEarth;
@@ -35,7 +40,8 @@ namespace
     };
 }
 
-TileNode::TileNode(const TileKey& key, TileNode* parent, EngineContext* context, Cancelable* progress) :
+TileNode::TileNode(const TileKey& key, TileNode* parent, EngineContext* context, Cancelable* progress,
+    const Sampler* initialElevation) :
     _key(key),
     _parentTile(parent),
     _context(context),
@@ -46,7 +52,7 @@ TileNode::TileNode(const TileKey& key, TileNode* parent, EngineContext* context,
         return;
 
     // build the actual geometry for this node
-    createGeometry(progress);
+    createGeometry(progress, initialElevation);
 
     // Encode the tile key in a uniform. Note! The X and Y components are presented
     // modulo 2^16 form so they don't overrun single-precision space.
@@ -90,8 +96,9 @@ TileNode::setDoNotExpire(bool value)
 }
 
 void
-TileNode::createGeometry(Cancelable* progress)
+TileNode::createGeometry(Cancelable* progress, const Sampler* initialElevation)
 {
+    ++_geometryRevision;
     osg::ref_ptr<const Map> map(_context->getMap());
     if (!map.valid())
         return;
@@ -116,23 +123,19 @@ TileNode::createGeometry(Cancelable* progress)
 
     if (geom.valid())
     {
-        // Create the drawable for the terrain surface:
-        auto* drawable = new TileDrawable(_key, geom.get(), tileSize);
+        // Build directly from inherited/current elevation, including unique constrained geometry.
+        auto elevationRaster = initialElevation ? initialElevation->_texture : getElevationRaster();
+        auto elevationMatrix = initialElevation ? initialElevation->_matrix : getElevationMatrix();
+        auto* drawable = new TileDrawable(_key, geom.get(), tileSize,
+            _context->getGeometryPool()->getKdTreeReleaser(), _context->getGeometryPool()->getKdTreePool(),
+            elevationRaster, elevationMatrix);
 
         // Give the tile Drawable access to the render model so it can properly
         // calculate its bounding box and sphere.
         drawable->setModifyBBoxCallback(_context->getModifyBBoxCallback());
 
-        auto elevationRaster = getElevationRaster();
-        auto elevationMatrix = getElevationMatrix();
-
-        // Create the node to house the tile drawable and perform horizon culling:
+        // Constructor prepares bounds, child corners and horizon culling for the elevated mesh.
         _surface = new SurfaceNode(_key, drawable);
-
-        if (elevationRaster)
-        {
-            _surface->setElevationRaster(elevationRaster, elevationMatrix);
-        }
     }
     else
     {
@@ -282,6 +285,9 @@ TileNode::refreshAllLayers()
 void
 TileNode::refreshLayers(const CreateTileManifest& manifest)
 {
+    // Invalidate in-flight children even before a pending constraint refresh reaches merge().
+    if (manifest.includesConstraints())
+        ++_geometryRevision;
     LoadTileDataOperationPtr r =
         std::make_shared<LoadTileDataOperation>(manifest, this, _context.get());
 
@@ -647,12 +653,109 @@ TileNode::update(osg::NodeVisitor& nv)
     }
 }
 
+// Captured only during scene traversal. Terrain elevation images are retained, read-only source data;
+// replacing the sampler/image or dirtying its contents invalidates the result before publication.
+struct TileNode::ChildCreationInputs
+{
+    Sampler elevation;
+    bool elevationActive = false;
+    bool grouped = true;
+    osg::ref_ptr<osg::Image> image;
+    unsigned imageRevision = 0;
+    unsigned geometryRevision = 0;
+    unsigned registryRevision = 0;
+    osg::ref_ptr<const Map> map;
+    Revision mapRevision;
+    std::vector<std::pair<osg::ref_ptr<Layer>, int>> geometryLayers;
+};
+
+std::shared_ptr<const TileNode::ChildCreationInputs>
+TileNode::captureChildCreationInputs() const
+{
+    auto inputs = std::make_shared<ChildCreationInputs>();
+    inputs->grouped = _context->options().getCreateTilesGrouped();
+    inputs->elevationActive = _context->getRenderBindings()[SamplerBinding::ELEVATION].isActive();
+    if (inputs->elevationActive)
+        inputs->elevation = _renderModel._sharedSamplers[SamplerBinding::ELEVATION];
+    if (inputs->elevation._texture)
+    {
+        inputs->image = inputs->elevation._texture->osgTexture()->getImage(0);
+        if (inputs->image)
+            inputs->imageRevision = inputs->image->getModifiedCount();
+    }
+    inputs->geometryRevision = _geometryRevision.load();
+    inputs->registryRevision = _context->tiles()->getChildPreparationRevision();
+    inputs->map = _context->getMap();
+    if (inputs->map)
+    {
+        LayerVector layers;
+        inputs->mapRevision = inputs->map->getLayers(layers);
+        for (auto& layer : layers)
+        {
+            if (dynamic_cast<TerrainConstraintLayer*>(layer.get()) || dynamic_cast<TerrainMeshLayer*>(layer.get()))
+                inputs->geometryLayers.emplace_back(layer, layer->getRevision());
+        }
+    }
+    return inputs;
+}
+
+bool
+TileNode::childCreationInputsCurrent() const
+{
+    if (!_childCreationInputs)
+        return false;
+    const auto& inputs = *_childCreationInputs;
+    if (!inputs.map || inputs.map != _context->getMap() ||
+        inputs.mapRevision != inputs.map->getDataModelRevision() ||
+        inputs.geometryRevision != _geometryRevision.load() ||
+        inputs.registryRevision != _context->tiles()->getChildPreparationRevision() ||
+        inputs.elevationActive != _context->getRenderBindings()[SamplerBinding::ELEVATION].isActive())
+        return false;
+    if (inputs.elevationActive)
+    {
+        const auto& current = _renderModel._sharedSamplers[SamplerBinding::ELEVATION];
+        if (inputs.elevation._texture != current._texture || inputs.elevation._matrix != current._matrix ||
+            inputs.elevation._revision != current._revision)
+            return false;
+        auto* image = current._texture ? current._texture->osgTexture()->getImage(0) : nullptr;
+        if (image != inputs.image.get() || (image && image->getModifiedCount() != inputs.imageRevision))
+            return false;
+    }
+    for (const auto& source : inputs.geometryLayers)
+        if (source.first->getRevision() != source.second)
+            return false;
+    return true;
+}
+
+void
+TileNode::discardPreparedChildren()
+{
+    ObjectReleaser::Objects retired;
+    if (!_createChildrenFutureResult.empty())
+    {
+        retired.emplace_back(ObjectReleaser::hold(_createChildrenFutureResult));
+        _createChildrenFutureResult.reset();
+    }
+    for (auto& result : _createChildResults)
+    {
+        if (!result.empty())
+        {
+            retired.emplace_back(ObjectReleaser::hold(result));
+            result.reset();
+        }
+    }
+    if (_childCreationInputs)
+        retired.emplace_back(ObjectReleaser::hold(_childCreationInputs));
+    _childCreationInputs.reset();
+    _context->getGeometryPool()->getChildReleaser().release(retired);
+}
+
 bool
 TileNode::createChildren()
 {
     if (_context->options().getCreateTilesAsync() == false)
     {
-        // synchronous mode: do it now.
+        // Explicit synchronous mode retains its original publication behavior.
         for (unsigned quadrant = 0; quadrant < 4; ++quadrant)
         {
             TileKey childkey = getKey().createChildKey(quadrant);
@@ -661,150 +764,133 @@ TileNode::createChildren()
             child->initializeData();
             child->refreshAllLayers();
         }
-
         return true;
     }
 
-    if (_context->options().getCreateTilesGrouped() == true)
+    if (!_childCreationInputs)
     {
-        // create all 4 children in a single job.
-        if (_createChildrenFutureResult.empty())
+        _childCreationInputs = captureChildCreationInputs();
+        auto inputs = _childCreationInputs;
+        osg::observer_ptr<TerrainEngineNode> engineWeak(_context->_terrainEngine);
+        osg::observer_ptr<TileNode> tileWeak(this);
+
+        // Workers use captured elevation only; they never inspect the live parent's rendering model.
+        auto prepare = [engineWeak, tileWeak, inputs](unsigned quadrant, Cancelable& state) -> CreateChildResult
         {
-            osg::observer_ptr<TerrainEngineNode> engine_weakptr(_context->_terrainEngine);
-            osg::observer_ptr<TileNode>          tile_weakptr(this);
+            osg::ref_ptr<TerrainEngineNode> engine;
+            osg::ref_ptr<TileNode> tile;
+            if (!engineWeak.lock(engine) || !tileWeak.lock(tile) || state.canceled())
+                return nullptr;
+            OE_PROFILING_ZONE_NAMED("Prepare elevated terrain child");
+#ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
+            PERFORMANCEAPI_INSTRUMENT("Prepare elevated terrain child");
+#endif
+            Sampler elevation = inputs->elevation;
+            // Match updateElevationRaster's canonical no-elevation state.
+            if (elevation._texture)
+                elevation._matrix.preMult(scaleBias[quadrant]);
+            else
+                elevation._matrix.makeIdentity();
+            return tile->createChild(tile->getKey().createChildKey(quadrant), &state, &elevation);
+        };
 
-            auto createChildrenOperation = [engine_weakptr, tile_weakptr](auto& state)
-                {
-                    CreateChildrenResult result;
-
-                    osg::ref_ptr<TerrainEngineNode> engine;
-                    osg::ref_ptr<TileNode> tile;
-                    if (engine_weakptr.lock(engine) && tile_weakptr.lock(tile) && !state.canceled())
-                    {
-                        for (unsigned q = 0; q < 4; ++q)
-                        {
-                            auto childkey = tile->getKey().createChildKey(q);
-                            result[q] = tile->createChild(childkey, &state);
-                        }
-                    }
-
-                    if (state.canceled())
-                    {
-                        for (int i = 0; i < 4; ++i)
-                            result[i] = {};
-                    }
-
-                    return result;
-                };
-
-            jobs::context c{ _key.str() };
-            c.pool = jobs::get_pool(ARENA_CREATE_CHILD);
-            c.pool->set_can_steal_work(false);
-            _createChildrenFutureResult = jobs::dispatch(createChildrenOperation, c);
-        }
-
-        else if (_createChildrenFutureResult.available())
+        jobs::context context{_key.str()};
+        context.pool = jobs::get_pool(ARENA_CREATE_CHILD);
+        context.pool->set_can_steal_work(false);
+        if (inputs->grouped)
         {
-            // all 4 children MUST be present AND valid to continue
-            if (_createChildrenFutureResult.value().size() == 4 &&
-                _createChildrenFutureResult.value()[0].valid() &&
-                _createChildrenFutureResult.value()[1].valid() &&
-                _createChildrenFutureResult.value()[2].valid() &&
-                _createChildrenFutureResult.value()[3].valid())
+            auto operation = [prepare](Cancelable& state)
             {
-                for (int i = 0; i < 4; ++i)
-                {
-                    auto& child = _createChildrenFutureResult.value()[i];
-                    addChild(child);
-                    child->initializeData();
-                    child->refreshAllLayers();
-                }
-            }
-
-            _createChildrenFutureResult.reset();
+                CreateChildrenResult result;
+                for (unsigned q = 0; q < 4 && !state.canceled(); ++q)
+                    result[q] = prepare(q, state);
+                if (state.canceled())
+                    result = {};
+                return result;
+            };
+            _createChildrenFutureResult = jobs::dispatch(operation, context);
         }
-
-        // true if the result is empty (i.e., the job is complete)
-        return _createChildrenFutureResult.empty();
-    }
-
-    else // if create each tile separately
-    {
-        // create each child is a separate job.
-        if (_createChildResults[0].empty())
-        {
-            TileKey parentkey(_key);
-            osg::observer_ptr<TerrainEngineNode> engine_weakptr(_context->_terrainEngine);
-
-            for (unsigned quadrant = 0; quadrant < 4; ++quadrant)
-            {
-                TileKey childkey = getKey().createChildKey(quadrant);
-                osg::observer_ptr<TileNode> tile_weakptr(this);
-
-                auto createChildOperation = [engine_weakptr, tile_weakptr, childkey](Cancelable& state)
-                    {
-                        CreateChildResult result;
-
-                        osg::ref_ptr<TerrainEngineNode> engine;
-                        osg::ref_ptr<TileNode>          tile;
-                        if (engine_weakptr.lock(engine) && tile_weakptr.lock(tile) && !state.canceled())
-                            result = tile->createChild(childkey, &state);
-
-                        return result;
-                    };
-
-                jobs::context c;
-                c.name = childkey.str();
-                c.pool = jobs::get_pool(ARENA_CREATE_CHILD);
-                c.pool->set_can_steal_work(false);
-
-                _createChildResults[quadrant] = jobs::dispatch(createChildOperation, c);
-            }
-        }
-
         else
         {
-            int numChildrenReady = 0;
-
-            for (int i = 0; i < 4; ++i)
+            for (unsigned q = 0; q < 4; ++q)
             {
-                if (_createChildResults[i].available())
-                {
-                    ++numChildrenReady;
-                }
-            }
-
-            if (numChildrenReady == 4)
-            {
-                for (int i = 0; i < 4; ++i)
-                {
-                    osg::ref_ptr<TileNode> child = _createChildResults[i].value();
-                    addChild(child);
-                    child->initializeData();
-                    child->refreshAllLayers();
-                    _createChildResults[i].reset();
-                }
+                auto operation = [prepare, q](Cancelable& state) { return prepare(q, state); };
+                _createChildResults[q] = jobs::dispatch(operation, context);
             }
         }
-
-        return _createChildResults[0].empty();
+        return false;
     }
+
+    const bool grouped = _childCreationInputs->grouped;
+    if (grouped)
+    {
+        if (_createChildrenFutureResult.empty())
+            discardPreparedChildren();
+        if (!_createChildrenFutureResult.available())
+            return false;
+    }
+    else
+    {
+        for (const auto& result : _createChildResults)
+        {
+            if (result.empty())
+            {
+                discardPreparedChildren();
+                return false;
+            }
+            if (!result.available())
+                return false;
+        }
+    }
+
+    // Validate the entire group before making any child visible. Keep drawing the parent on retry.
+    if (!childCreationInputsCurrent())
+    {
+        OE_PROFILING_ZONE_NAMED("Reject stale terrain children");
+#ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
+        PERFORMANCEAPI_INSTRUMENT("Reject stale terrain children");
+#endif
+        discardPreparedChildren();
+        return false;
+    }
+    for (unsigned q = 0; q < 4; ++q)
+    {
+        const auto& child = grouped ? _createChildrenFutureResult.value()[q] : _createChildResults[q].value();
+        if (!child.valid())
+        {
+            discardPreparedChildren();
+            return false;
+        }
+    }
+
+    OE_PROFILING_ZONE_NAMED("Publish prepared terrain children");
+#ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
+    PERFORMANCEAPI_INSTRUMENT("Publish prepared terrain children");
+#endif
+    for (unsigned q = 0; q < 4; ++q)
+    {
+        const auto& child = grouped ? _createChildrenFutureResult.value()[q] : _createChildResults[q].value();
+        addChild(child);
+        // Inherits current imagery and registers/notifies on the scene thread. Elevation already matches,
+        // so setElevationRaster's identity guard avoids rebuilding the prepared CPU surface.
+        child->initializeData();
+        child->refreshAllLayers();
+    }
+    if (grouped)
+        _createChildrenFutureResult.reset();
+    else
+        for (auto& result : _createChildResults)
+            result.reset();
+    _childCreationInputs.reset();
+    return true;
 }
 
 TileNode*
-TileNode::createChild(const TileKey& childkey, Cancelable* progress)
+TileNode::createChild(const TileKey& childkey, Cancelable* progress, const Sampler* initialElevation)
 {
     OE_PROFILING_ZONE;
-
-    osg::ref_ptr<TileNode> node = new TileNode(
-        childkey,
-        this, // parent TileNode
-        _context.get(),
-        progress);
-
-    return 
-        progress && progress->canceled() ? nullptr
-        : node.release();
+    osg::ref_ptr<TileNode> node = new TileNode(childkey, this, _context.get(), progress, initialElevation);
+    return progress && progress->canceled() ? nullptr : node.release();
 }
 
 void
@@ -1359,21 +1445,24 @@ TileNode::areSubTilesDormant() const
 }
 
 void
-TileNode::removeSubTiles()
+TileNode::removeSubTiles(osg::NodeList& retired)
 {
+    // Keep ownership across removeChildren and future resets; destruction happens after handoff.
+    retired.insert(retired.end(), _children.begin(), _children.end());
     _childrenReady = false;
     for(int i=0; i<(int)getNumChildren(); ++i)
     {
-        getChild(i)->releaseGLObjects(nullptr);
+        auto* child = getSubTile(i);
+        // Descendants may remain in the registry after an ancestor expires. Disconnect
+        // their graph and weak parent links here, before a worker can destroy the ancestor.
+        child->_parentTile = nullptr;
+        if (child->getNumChildren() != 0)
+            child->removeSubTiles(retired);
+        child->releaseGLObjects(nullptr);
     }
     this->removeChildren(0, this->getNumChildren());
 
-    _createChildrenFutureResult.reset();
-
-    _createChildResults[0].reset();
-    _createChildResults[1].reset();
-    _createChildResults[2].reset();
-    _createChildResults[3].reset();
+    discardPreparedChildren();
 }
 
 

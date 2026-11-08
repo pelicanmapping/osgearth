@@ -430,10 +430,6 @@ namespace osgEarth
         bool _valid;
         typename Coverage<T>::Ptr _coverage;
     };
-
-    // required in C++14
-    template<typename T>
-    constexpr typename Coverage<T>::Index Coverage<T>::NoData;
 }
 
 #endif // OSGEARTH_COVERAGE_H

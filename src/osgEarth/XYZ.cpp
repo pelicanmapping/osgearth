@@ -17,6 +17,27 @@ using namespace osgEarth::XYZ;
 
 //............................................................................
 
+URI
+XYZ::makeTileURI(const std::string& location, const URIContext& context,
+                 const std::string& pattern, const std::string& choices, std::atomic_int& rotation)
+{
+    if (choices.empty())
+        return URI(location, context);
+
+    std::vector<std::string> mirrors;
+    mirrors.reserve(choices.size());
+    for (char choice : choices)
+    {
+        auto mirror = location;
+        replaceIn(mirror, pattern, std::string(1, choice));
+        mirrors.push_back(std::move(mirror));
+    }
+    URI uri(mirrors[++rotation % mirrors.size()], context);
+    uri.setCacheKey(Cache::makeCacheKey(location, "uri"));
+    uri.setCacheMirrors(std::move(mirrors));
+    return uri;
+}
+
 Status
 XYZ::Driver::open(const URI& uri,
                   const std::string& format,
@@ -30,6 +51,7 @@ XYZ::Driver::open(const URI& uri,
     _template = uri.full();
 
     // Set up a rotating element in the template
+    _rotateChoices.clear();
     _rotateStart = _template.find('[');
     _rotateEnd = _template.find(']');
     if (_rotateStart != std::string::npos && _rotateEnd != std::string::npos && _rotateEnd - _rotateStart > 1)
@@ -76,23 +98,7 @@ XYZ::Driver::read(const URI& uri,
     replaceIn( location, "{-y}", Stringify() << inverted_y);
     replaceIn( location, "{z}", Stringify() << key.getLevelOfDetail() );
 
-    std::string cacheKey;
-
-    if ( !_rotateChoices.empty() )
-    {
-        cacheKey = location;
-        unsigned index = (++_rotate_iter) % _rotateChoices.size();
-        replaceIn( location, _rotateString, Stringify() << _rotateChoices[index] );
-    }
-
-
-    URI myUri( location, uri.context() );
-    if ( !cacheKey.empty() )
-    {
-        myUri.setCacheKey(Cache::makeCacheKey(location, "uri"));
-    }
-
-    return myUri.getImage(readOptions, progress);
+    return makeTileURI(location, uri.context(), _rotateString, _rotateChoices, _rotate_iter).readImage(readOptions, progress);
 }
 
 //........................................................................
@@ -220,7 +226,8 @@ XYZImageLayer::createImageImplementation(const TileKey& key, ProgressCallback* p
     if (r.succeeded())
         return GeoImage(r.releaseImage(), key.getExtent());
     else
-        return GeoImage(Status(r.errorDetail()));
+        return GeoImage(Status(r.errorDetail().empty() ? r.getResultCodeString() :
+            r.getResultCodeString() + ": " + r.errorDetail()));
 }
 
 //........................................................................
@@ -401,6 +408,6 @@ XYZElevationLayer::createHeightFieldImplementation(const TileKey& key, ProgressC
             return GeoHeightField(hf, key.getExtent());
         }
 
-        return GeoHeightField::INVALID;
+        return GeoHeightField(geoImage.getStatus());
     }
 }

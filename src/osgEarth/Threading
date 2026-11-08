@@ -4,6 +4,8 @@
  */
 #pragma once
 #include <osgEarth/Common>
+#include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 // bring in weejobs in the jobs namespace

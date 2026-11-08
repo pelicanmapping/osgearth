@@ -57,7 +57,8 @@ namespace osgEarth {
         class AssetAccessor : public CesiumAsync::IAssetAccessor
         {
         public:
-            AssetAccessor();
+            //! Retains the tileset cache settings for asynchronous requests. Defaults to the registry cache.
+            explicit AssetAccessor(const osgDB::Options* options = nullptr);
 
             virtual CesiumAsync::Future<std::shared_ptr<CesiumAsync::IAssetRequest>>
                 get(const CesiumAsync::AsyncSystem& asyncSystem,

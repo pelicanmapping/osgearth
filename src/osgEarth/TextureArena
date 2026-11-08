@@ -7,6 +7,7 @@
 #include <osgEarth/Common>
 #include <osgEarth/GLUtils>
 #include <osgEarth/MaterialArena>
+#include <osgEarth/ObjectReleaser>
 #include <osgEarth/URI>
 #include <osg/Object>
 #include <osg/StateAttribute>
@@ -231,14 +232,14 @@ namespace osgEarth
         //! Textures installed in this arena
         const TextureVector& getTextures() const { return _textures; }
 
-        //! destruct
+        //! With producers stopped, releases GL state and drains this arena's submitted CPU retirements.
         virtual ~TextureArena();
 
         //! Update traversal (called automatically if this TexturArena
-        //! is installed in a StateSet in the traversed scene graph)
+        //! is installed in a StateSet in the traversed scene graph). Defers expiry if retirement is busy.
         void update(osg::NodeVisitor& nv);
 
-        //! Flush any unused textures immediately from the arena
+        //! Detach unused textures immediately; CPU destruction is asynchronous and GL release keeps its existing routing.
         void flush();
 
     public: // StateAttribute
@@ -282,6 +283,7 @@ namespace osgEarth
         mutable osg::buffered_object<GLObjects> _globjects;
 
         osg::ref_ptr<MaterialArena> _materials;
+        ObjectReleaser::Client _releaser;
 
         mutable TextureVector _textures;
         mutable std::unordered_map<Texture*, unsigned> _textureIndices;
@@ -299,7 +301,8 @@ namespace osgEarth
         mutable Mutex _m;
 
         int find_no_lock(Texture::Ptr tex) const;
-        void purgeTextureIfOrphaned_no_lock(unsigned index);
+        //! Retains orphaned CPU owners before detaching; caller holds _m and submits retired after unlocking.
+        void purgeTextureIfOrphaned_no_lock(unsigned index, ObjectReleaser::Objects& retired);
 
         friend class Texture;
         void notifyOfTextureRelease(osg::State*) const;

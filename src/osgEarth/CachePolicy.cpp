@@ -3,6 +3,7 @@
  * MIT License
  */
 #include <osgEarth/CachePolicy>
+#include <algorithm>
 #include <climits>
 
 using namespace osgEarth;
@@ -73,10 +74,13 @@ CachePolicy::mergeAndOverride(const optional<CachePolicy>& rhs)
 TimeStamp
 CachePolicy::getMinAcceptTime() const
 {
-    return
-        _minTime.isSet() ? _minTime.value() :
-        _maxAge.isSet()  ? DateTime().asTimeStamp() - _maxAge.value() :
-        0;
+    TimeStamp minimum = _minTime.getOrUse(0);
+    if (_maxAge.isSet())
+    {
+        const TimeStamp cutoff = ::time(nullptr) - _maxAge.value();
+        minimum = std::max(minimum, cutoff);
+    }
+    return minimum;
 }
 
 bool

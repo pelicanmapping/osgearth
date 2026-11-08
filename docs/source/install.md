@@ -1,6 +1,8 @@
 # Getting started with osgEarth
 
 ## Installation
+Building osgEarth and using its SDK require C++17 or later.
+
 The easiest way to install and use osgEarth is with the `vcpkg` package manager. There are two ways to go about it. But first...
 
 ### Method 1: Manual install

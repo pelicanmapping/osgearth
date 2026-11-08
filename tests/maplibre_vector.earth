@@ -1,0 +1,51 @@
+<!-- MapLibre demo vector tiles: https://demotiles.maplibre.org/tiles/tiles.json
+     Requires MVT/Protobuf support and OSGEARTH_ENABLE_SLUGHORN=ON for GPU vector rendering.
+     The XYZ URL uses top-origin {y}; do not invert it.
+     Country polygons and centroids are available at levels 0-6, geographic lines at levels 0-4. -->
+<map name="MapLibre demo - FeatureImage vector mode">
+    <XYZFeatures name="maplibre-data">
+        <url>https://demotiles.maplibre.org/tiles/tiles.json</url>
+    </XYZFeatures>
+
+    <!-- Limit source requests while allowing vector atlases to be inherited at closer views.
+         MVT exposes each source-layer name as the mvt_layer feature attribute.
+         Use point symbols for centroids; text symbols would trigger raster fallback. -->
+    <FeatureImage name="MapLibre world vectors" mode="vector">
+        <features>maplibre-data</features>
+        <styles>
+            <style type="text/css">
+                <![CDATA[
+                countries {
+                    select: feature.properties.mvt_layer === 'countries';
+                    fill: #dce5c2;
+                    stroke: #64765a;
+                    stroke-width: 0.7px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                geolines {
+                    select: feature.properties.mvt_layer === 'geolines';
+                    stroke: #c07c46;
+                    stroke-width: 1px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                centroids {
+                    select: feature.properties.mvt_layer === 'centroids';
+                    point-fill: #994c3d;
+                    point-size: 3;
+                }
+                ]]>
+            </style>
+        </styles>
+    </FeatureImage>
+
+    <options>
+        <terrain color="#a9cee2"/>
+    </options>
+    <viewpoints home="0" time="0">
+        <viewpoint name="World" long="10" lat="20" height="0" heading="0" pitch="-90" range="22000000m"/>
+        <viewpoint name="Europe" long="12" lat="48" height="0" heading="0" pitch="-90" range="4500000m"/>
+        <viewpoint name="Vector detail" long="12" lat="48" height="0" heading="0" pitch="-90" range="150000m"/>
+    </viewpoints>
+</map>

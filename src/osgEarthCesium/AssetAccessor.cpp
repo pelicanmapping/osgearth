@@ -69,12 +69,17 @@ gsl::span<const std::byte> AssetResponse::data() const
 
 /**********************************************/
 
-AssetAccessor::AssetAccessor()
+AssetAccessor::AssetAccessor(const osgDB::Options* options)
 {
-    _options = new osgDB::Options;
-    _cacheSettings = new CacheSettings;
-    _cacheSettings->setCache(Registry::instance()->getDefaultCache());
-    _cacheSettings->store(_options.get());
+    _options = Registry::cloneOrCreateOptions(options);
+    _cacheSettings = CacheSettings::get(_options.get());
+    if (!_cacheSettings.valid())
+    {
+        _cacheSettings = new CacheSettings;
+        _cacheSettings->setCache(Registry::instance()->getDefaultCache());
+        _cacheSettings->integrateCachePolicy(optional<CachePolicy>());
+        _cacheSettings->store(_options.get());
+    }
 }
 
 CesiumAsync::Future<std::shared_ptr<CesiumAsync::IAssetRequest>>

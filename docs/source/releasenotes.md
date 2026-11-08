@@ -1,5 +1,12 @@
 # Release Notes
 
+## Unreleased
+
+* Building osgEarth and using its SDK now require C++17 or later. Rebuild applications and plugins against the new SDK.
+* Use `std::optional` and `std::variant` directly and include `<optional>` or `<variant>` where needed.
+  For code using the former `osgEarth_std` lock aliases, use `std::unique_lock` when unlocking early and
+  `std::shared_timed_mutex` when using timed locks.
+
 ## Version 3.8 (March 2026)
 
 Release Highlights:

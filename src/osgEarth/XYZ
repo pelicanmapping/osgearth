@@ -21,6 +21,10 @@
 //! XYZ namespace contains support classes used to the Layers
 namespace osgEarth { namespace XYZ
 {
+    //! Resolve the rotating part of a tile URL and retain the mirror identities for older URL caches.
+    OSGEARTH_EXPORT URI makeTileURI(const std::string& location, const URIContext& context,
+        const std::string& pattern, const std::string& choices, std::atomic_int& rotation);
+
     /**
      * Underlying XYZ driver that does the actual I/O
      */
@@ -45,7 +49,7 @@ namespace osgEarth { namespace XYZ
         std::string _rotateChoices;
         std::string _rotateString;
         std::string::size_type _rotateStart, _rotateEnd;
-        mutable std::atomic_int _rotate_iter;
+        mutable std::atomic_int _rotate_iter{ 0 };
     };
 } }
 

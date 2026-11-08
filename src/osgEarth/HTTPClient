@@ -34,6 +34,16 @@ namespace osgEarth { namespace Util
         /** Constructs a new HTTP request that will acces the specified base URL. */
         HTTPRequest( const std::string& url );
 
+        //! Construct a request with the resource identity supplied by a URI (e.g. a sharded tile URL).
+        HTTPRequest(const std::string& url, const std::string& cacheKey,
+            std::shared_ptr<const std::vector<std::string>> mirrors);
+
+        //! Concrete mirrors to consult only when the primary cache entry is absent.
+        const auto& getCacheMirrors() const { return _cacheMirrors; }
+
+        //! Cache identity when supplied by the caller. An empty key uses the final request URL.
+        const std::string& getCacheKey() const { return _cacheKey; }
+
         /** copy constructor. */
         HTTPRequest( const HTTPRequest& rhs );
 
@@ -73,6 +83,8 @@ namespace osgEarth { namespace Util
         Parameters _parameters;
         Headers _headers;
         std::string _url;
+        std::string _cacheKey;
+        std::shared_ptr<const std::vector<std::string>> _cacheMirrors;
     };
 
     /**
@@ -113,6 +125,12 @@ namespace osgEarth { namespace Util
 
         /** Gets the HTTP response code (Code) in this response */
         unsigned getCode() const;
+
+        //! Construct a transport timeout without inventing an HTTP status code.
+        static HTTPResponse timeout() { return HTTPResponse(TRANSPORT_TIMEOUT); }
+
+        //! True when the transport deadline elapsed before a complete response arrived.
+        bool isTimedOut() const { return _response_code == TRANSPORT_TIMEOUT; }
 
         /** Gets the HTTP response code category for this response */
         unsigned getCodeCategory() const;
@@ -170,6 +188,7 @@ namespace osgEarth { namespace Util
         Config getHeadersAsConfig() const;
 
     private:
+        static constexpr long TRANSPORT_TIMEOUT = -1;
         Parts       _parts;
         long        _response_code;
         std::string _mimeType;

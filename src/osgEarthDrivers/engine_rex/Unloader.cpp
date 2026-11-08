@@ -8,6 +8,10 @@
 
 #include <osgEarth/Metrics>
 #include <osgEarth/NodeUtils>
+#include <osgEarth/Registry>
+#ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
+#include <Superluminal/PerformanceAPI.h>
+#endif
 
 #undef  LC
 #define LC "[UnloaderGroup] "
@@ -18,6 +22,7 @@ using namespace osgEarth::REX;
 UnloaderGroup::UnloaderGroup(TileNodeRegistry* tiles, const TerrainOptionsAPI& api) :
     _options(api),
     _tiles(tiles),
+    _releaser(Registry::instance()->getObjectReleaser()->createClient("REX terrain")),
     //_minResidentTiles(0u),
     //_maxAge(0.1),
     //_minRange(0.0f),
@@ -35,15 +40,16 @@ UnloaderGroup::traverse(osg::NodeVisitor& nv)
         unsigned frame = _clock->getFrame();
         bool runUpdate = (_frameLastUpdated < frame);
 
-        if (runUpdate && _tiles->size() > _options.getMinResidentTiles())
+        if (runUpdate && _releaser.available() && _tiles->size() > _options.getMinResidentTiles())
         {
             _frameLastUpdated = frame;
 
             OE_PROFILING_ZONE_NAMED("Expire Tiles");
+#ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
+            PERFORMANCEAPI_INSTRUMENT("Retire expired tiles");
+#endif
 
             double now = _clock->getTime();
-
-            unsigned count = 0u;
 
             // Have to enforce both the time delay AND a frame delay since the frames can
             // stop while the time rolls on (e.g., if you are dragging the window)
@@ -59,36 +65,26 @@ UnloaderGroup::traverse(osg::NodeVisitor& nv)
                 _options.getMaxTilesToUnloadPerFrame(),
                 _deadpool);
 
-            // Remove them from the scene graph:
-            for(auto& tile_weakptr : _deadpool)
+            // Keep every collected tile (including registry-only orphans) and detached sibling
+            // alive until all update-thread temporary references have gone out of scope.
+            osg::NodeList retired;
+            retired.reserve(_deadpool.size() * 2);
+            for (auto& tile : _deadpool)
             {
-                // may be NULL since we're removing scene graph objects as we go!
-                osg::ref_ptr<TileNode> tile;
-                if (!tile_weakptr.lock(tile))
-                    continue;
-
-                if (tile.valid())
+                retired.push_back(tile.get());
+                osg::ref_ptr<TileNode> parent;
+                tile->getParentTile(parent);
+                if (parent.valid())
                 {
-                    osg::ref_ptr<TileNode> parent;
-                    tile->getParentTile(parent);
-
-                    // Check that this tile doesn't have any live quadtree siblings. If it does,
-                    // we don't want to remove them too!
-                    // GW: moved this check to the collectAbandonedTiles function where it belongs
-                    if (parent.valid())
-                    {
-                        parent->removeSubTiles();
-                        ++count;
-                    }
+                    // Keep temporary parent ownership in the same handoff as its children.
+                    retired.push_back(parent.get());
+                    if (parent->getNumChildren() != 0)
+                        parent->removeSubTiles(retired);
                 }
             }
 
-            if (_deadpool.empty() == false)
-            {
-                //OE_DEBUG << LC << "Unloaded " << count << " of " << _deadpool.size() << " dormant tiles; " << _tiles->size() << " remain active." << std::endl;
-            }
-
             _deadpool.clear();
+            _releaser.release(retired);
         }
     }
 

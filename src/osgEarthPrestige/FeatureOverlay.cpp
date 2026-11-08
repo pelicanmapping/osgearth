@@ -125,6 +125,7 @@ Status FeatureOverlay::validateCatalog(const std::vector<CoverageRule>& rules, c
         for (const auto& rule : rules)
         for (const auto& group : groups)
             if (rule.action == "exclude" && (type.geometry == "polygon" || rule.buffer > 0.0) &&
+                (rule.geometry == "*" || rule.geometry == type.geometry) &&
                 rule.matches(_source, group, *feature)) matched = true;
         if (!matched) return invalid("Overlay type has no applicable exclusion rule: " + type.name);
     }

@@ -1,0 +1,49 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarth/ObjectReleaser>
+#include <osg/KdTree>
+#include <array>
+#include <memory>
+#include <mutex>
+
+namespace osgEarth { namespace REX
+{
+    /** Bounded, per-engine storage cache. Published trees are immutable; only detached,
+     * exclusively owned trees without observers can return to the freelist on the disposal worker.
+     */
+    class KdTreePool : public std::enable_shared_from_this<KdTreePool>
+    {
+    public:
+        //! Uses the existing retirement client for rejected storage and asynchronous tree returns.
+        explicit KdTreePool(const ObjectReleaser::Client& releaser);
+        //! Releases idle storage at engine teardown; callers must stop producers first.
+        ~KdTreePool();
+        /** Builds a fresh snapshot using exclusive cached storage; concurrent builds lease separate workspaces.
+         * Requires valid primitive indices into mesh, with no concurrent source mutation. Returns null for small
+         * meshes/invalid options; allocation failures propagate. Never mutates a published snapshot.
+         */
+        osg::ref_ptr<osg::KdTree> build(const std::vector<osg::Vec3>& mesh, osg::PrimitiveSet* primitives,
+            osg::KdTree::BuildOptions options);
+        /** Takes a detached shape built by this cache; returns eligible storage on the worker or releases it there.
+         * Allocate through shared_ptr; source detachment follows the caller's scene-graph synchronization rules.
+         * External owners may delay final destruction. Allocation failures propagate; shutdown releases synchronously.
+         */
+        void retire(osg::ref_ptr<osg::Shape>& shape);
+
+    private:
+        struct Workspace;
+        struct Retirement;
+        //! Accepts only sole-owned, unobserved stock trees within the idle count/byte limits; never waits for space.
+        void recycle(osg::ref_ptr<osg::Shape>& shape);
+        //! Returns scratch storage or submits oversized/excess workspaces for worker destruction.
+        void recycle(osg::ref_ptr<Workspace>& workspace);
+        ObjectReleaser::Client _releaser;
+        std::mutex _mutex;
+        std::array<osg::ref_ptr<osg::KdTree>, 64> _trees;
+        std::array<osg::ref_ptr<Workspace>, 8> _workspaces;
+        std::size_t _treeBytes = 0, _workspaceBytes = 0;
+    };
+} }

@@ -113,8 +113,6 @@ if(NOT OSGEARTH_BUILD_PLATFORM_IPHONE)
         add_subdirectory(osgearth_benchmarks)
     endif()
 
-    # add_subdirectory(osgearth_cpp14_check)
-
 else()
 
     # ios

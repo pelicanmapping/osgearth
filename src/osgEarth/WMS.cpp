@@ -127,28 +127,52 @@ WMS::Capabilities::getLayerByName(const std::string& name) const
     return getLayerByName(name, _layers);
 }
 
+namespace
+{
+    // Return the capabilities document to the caller, preserving the failed discovery stage on error.
+    WMS::Capabilities* readCapabilities(const URI& location, const osgDB::Options* options, Status& status)
+    {
+        osg::ref_ptr<WMS::Capabilities> caps;
+        if (location.isRemote())
+        {
+            ReadResult rr = location.readString(options);
+            if (rr.failed())
+            {
+                std::string reason = rr.getResultCodeString();
+                auto code = rr.metadata().child("osgEarth Request").value("HTTP Response Code");
+                if (!code.empty())
+                    reason += " (HTTP " + code + ")";
+                else if (!rr.errorDetail().empty())
+                    reason += ": " + rr.errorDetail();
+                status = Status(Status::ResourceUnavailable, "WMS GetCapabilities failed: " + reason);
+                return nullptr;
+            }
+            std::istringstream in(rr.getString());
+            caps = WMS::CapabilitiesReader::read(in);
+        }
+        else
+        {
+            std::ifstream in;
+            if (osgDB::fileType(location.full()) == osgDB::REGULAR_FILE)
+                in.open(location.full().c_str());
+            if (!in.is_open())
+            {
+                status = Status(Status::ResourceUnavailable, "Cannot open the local WMS capabilities document");
+                return nullptr;
+            }
+            caps = WMS::CapabilitiesReader::read(in);
+        }
+        if (!caps.valid())
+            status = Status(Status::ResourceUnavailable, "WMS GetCapabilities returned an invalid capabilities document");
+        return caps.release();
+    }
+}
+
 WMS::Capabilities*
 WMS::CapabilitiesReader::read(const URI& location, const osgDB::ReaderWriter::Options* options)
 {
-    WMS::Capabilities* caps = NULL;
-    if (location.isRemote())
-    {
-        ReadResult rr = location.readString(options);
-        if (rr.succeeded())
-        {
-            std::istringstream in(rr.getString());
-            caps = read(in);
-        }
-    }
-    else
-    {
-        if ((osgDB::fileExists(location.full())) && (osgDB::fileType(location.full()) == osgDB::REGULAR_FILE))
-        {
-            std::ifstream in(location.full().c_str());
-            caps = read(in);
-        }
-    }
-    return caps;
+    Status status;
+    return readCapabilities(location, options, status);
 }
 
 #define ATTR_VERSION "version"
@@ -435,10 +459,11 @@ WMS::Driver::open(osg::ref_ptr<const Profile>& profile,
     }
 
     //Try to read the WMS capabilities
-    osg::ref_ptr<WMS::Capabilities> capabilities = WMS::CapabilitiesReader::read(capUrl, _readOptions.get());
+    Status discovery;
+    osg::ref_ptr<WMS::Capabilities> capabilities = readCapabilities(capUrl, _readOptions.get(), discovery);
     if (!capabilities.valid())
     {
-        return Status::Error(Status::ResourceUnavailable, "Unable to read WMS GetCapabilities.");
+        return discovery;
     }
     else
     {

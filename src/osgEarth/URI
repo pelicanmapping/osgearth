@@ -190,6 +190,14 @@ namespace osgEarth
 
     public:
 
+        //! Record equivalent resource URLs for looking up cache entries written before mirror-independent keys.
+        void setCacheMirrors(std::vector<std::string> urls) {
+            _cacheMirrors = std::make_shared<const std::vector<std::string>>(std::move(urls));
+        }
+
+        //! Optional concrete mirrors of this resource, shared across URI and HTTP request copies.
+        const auto& cacheMirrors() const { return _cacheMirrors; }
+
         /** Sets a cache key. By default the cache key is the full URI, but you can override that. */
         void setCacheKey( const std::string& key ) { _cacheKey = key; }
 
@@ -269,6 +277,7 @@ namespace osgEarth
         std::string _baseURI;
         std::string _fullURI;
         std::string _cacheKey;
+        std::shared_ptr<const std::vector<std::string>> _cacheMirrors;
         URIContext  _context;
         optional<std::string> _optionString;
 

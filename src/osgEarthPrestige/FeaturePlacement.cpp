@@ -146,7 +146,8 @@ namespace
                 if (!record.feature || !record.feature->getGeometry() || !record.feature->getSRS()) continue;
                 std::vector<const CoverageRule*> matches;
                 for (const auto& rule : rules)
-                    if (rule.matches(record.source, group, *record.feature)) matches.push_back(&rule);
+                    if (rule.matches(record.source, group, *record.feature) &&
+                        rule.acceptsAnyPart(record.feature->getGeometry())) matches.push_back(&rule);
                 if (matches.empty()) continue;
                 vertices += record.feature->getGeometry()->getTotalPointCount();
                 if (vertices > 2000000u)
@@ -172,6 +173,7 @@ namespace
                     const auto type = geometry->getType();
                     for (const auto* rule : matches)
                     {
+                        if (!rule->acceptsGeometry(type)) continue;
                         if (rule->action == "points" && (type == Geometry::TYPE_POINT || type == Geometry::TYPE_POINTSET))
                         {
                             for (const auto& location : *geometry)
@@ -395,6 +397,7 @@ CoverageRule::CoverageRule(const Config& conf)
     conf.get("source", source); conf.get("group", group); conf.get("key", key); conf.get("value", value);
     conf.get("except", exceptValue); conf.get("action", action); conf.get("buffer", buffer); conf.get("density", density);
     conf.get("strategy", strategy); conf.get("name", name); conf.get("priority", priority);
+    conf.get("geometry", geometry);
     parameters = conf.child("placement");
 }
 
@@ -404,6 +407,7 @@ Config CoverageRule::getConfig() const
     conf.set("source", source); conf.set("group", group); conf.set("key", key); conf.set("value", value);
     conf.set("except", exceptValue); conf.set("action", action); conf.set("buffer", buffer); conf.set("density", density);
     conf.set("strategy", strategy); conf.set("name", name); conf.set("priority", priority);
+    if (geometry != "*") conf.set("geometry", geometry);
     if (strategy != "scatter") { Config settings = parameters; settings.key() = "placement"; conf.add(settings); }
     return conf;
 }
@@ -418,6 +422,14 @@ Status CoverageRule::validate() const
         return Status(Status::ConfigurationError, "Coverage needs density 0..1 and exclusion buffer 0..100 meters");
     if (strategy.empty() || (strategy != "scatter" && (name.empty() || action != "include")))
         return Status(Status::ConfigurationError, "Region strategies require a name and polygon include action");
+    // A filter that leaves the action nothing to use is a mistake, not an empty rule.
+    const bool fits = geometry == "*" ||
+        (action == "points" ? geometry == "point" :
+         action == "include" ? geometry == "polygon" :
+         geometry == "polygon" || (geometry == "line" && buffer > 0.0));
+    if (!fits)
+        return Status(Status::ConfigurationError, "Coverage rule geometry must be *, polygon, line (buffered exclude) or "
+            "point (points action), and fit the action");
     return Status::NoError;
 }
 
@@ -427,6 +439,25 @@ bool CoverageRule::matches(const std::string& input, const ScatterGroup& populat
         return false;
     const auto v = feature.getString(key);
     return (value == "*" || v == value) && (exceptValue.empty() || v != exceptValue);
+}
+
+bool CoverageRule::acceptsGeometry(Geometry::Type type) const
+{
+    if (geometry == "*") return true;
+    if (geometry == "polygon") return type == Geometry::TYPE_POLYGON || type == Geometry::TYPE_RING;
+    if (geometry == "line") return type == Geometry::TYPE_LINESTRING;
+    if (geometry == "point") return type == Geometry::TYPE_POINT || type == Geometry::TYPE_POINTSET;
+    return false;
+}
+
+bool CoverageRule::acceptsAnyPart(const Geometry* shape) const
+{
+    if (!shape) return false;
+    if (geometry == "*") return true;
+    ConstGeometryIterator parts(shape, false);
+    while (parts.hasMore())
+        if (acceptsGeometry(parts.next()->getType())) return true;
+    return false;
 }
 
 RowLayout::RowLayout(const Config& conf)
@@ -970,7 +1001,7 @@ Status FeatureScatterSource::queryFieldBuffered(const TileKey& key, const Scatte
     PlacementFeatureFilter filter = [&](const std::string& input, const Feature& feature)
     {
         for (const auto& rule : _rules)
-            if (rule.matches(input, group, feature)) return true;
+            if (rule.matches(input, group, feature) && rule.acceptsAnyPart(feature.getGeometry())) return true;
         return false;
     };
     auto provider = _provider->snapshot();

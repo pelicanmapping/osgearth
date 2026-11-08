@@ -33,6 +33,7 @@ SET(TARGET_SRC
     DrawState.cpp
     DrawTileCommand.cpp
     GeometryPool.cpp
+    KdTreePool.cpp
     RexTerrainEngineNode.cpp
     RexTerrainEngineDriver.cpp
     LayerDrawable.cpp
@@ -56,6 +57,7 @@ SET(TARGET_H
     DrawState
     DrawTileCommand
     GeometryPool
+    KdTreePool
     Shaders
     RexTerrainEngineNode
     LayerDrawable
@@ -81,3 +83,6 @@ add_osgearth_plugin(
     SHADERS ${TARGET_GLSL}
     TEMPLATES ${TARGET_IN}
     LIBRARIES OpenGL::GL)
+
+# Preserve the upstream license for the adapted KdTree builder.
+install(FILES KdTreePool.LICENSE.txt DESTINATION ${OSGEARTH_INSTALL_DATADIR}/licenses)

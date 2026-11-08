@@ -657,7 +657,8 @@ MapBoxGL::StyleSheet MapBoxGL::StyleSheet::load(const URI& location, const osgDB
     styleSheet._sprite = URI(root.get("sprite", "").asString(), URIContext(location.full()));
     styleSheet._glyphs = URI(root.get("glyphs", "").asString(), URIContext(location.full()));
 
-    styleSheet._spriteLibrary = loadSpriteLibrary(styleSheet._sprite);
+    if (!styleSheet._sprite.empty())
+        styleSheet._spriteLibrary = loadSpriteLibrary(styleSheet._sprite, options);
 
     if (root.isMember("sources"))
     {
@@ -756,19 +757,23 @@ MapBoxGL::StyleSheet MapBoxGL::StyleSheet::load(const URI& location, const osgDB
     return styleSheet;
 }
 
-ResourceLibrary* MapBoxGL::StyleSheet::loadSpriteLibrary(const URI& sprite)
+// Loads the sprite atlas and index under the same cache policy as the style.
+ResourceLibrary* MapBoxGL::StyleSheet::loadSpriteLibrary(const URI& sprite, const osgDB::Options* options)
 {
     ResourceLibrary* library = nullptr;
-    URI uri(Stringify() << sprite.full() << ".json");
+    URI uri = sprite.append(".json");
 
-    URI imagePath(Stringify() << sprite.full() << ".png");
-    osg::ref_ptr< osg::Image > image = imagePath.getImage();
+    URI imagePath = sprite.append(".png");
+    osg::ref_ptr< osg::Image > image = imagePath.getImage(options);
     if (image.valid())
     {
         unsigned int imageWidth = image->s();
         unsigned int imageHeight = image->t();
 
         // Flip the image and convert the image to BGRA premultiplie alpha for blend2d so it doesn't need to do it each time an icon is rendered.
+        // The URI result cache may share this image with other styles.
+        if (image->referenceCount() > 1)
+            image = new osg::Image(*image, osg::CopyOp::DEEP_COPY_ALL);
         image->flipVertical();
         ImageUtils::PixelReader imageReader(image.get());
         ImageUtils::PixelWriter imageWriter(image.get());
@@ -786,7 +791,7 @@ ResourceLibrary* MapBoxGL::StyleSheet::loadSpriteLibrary(const URI& sprite)
             }
         }
 
-        auto data = uri.getString();
+        auto data = uri.getString(options);
         Json::Reader reader;
         Json::Value root(Json::objectValue);
         if (reader.parse(data, root, false))

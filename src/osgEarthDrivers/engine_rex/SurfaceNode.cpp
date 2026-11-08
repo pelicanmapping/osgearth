@@ -75,7 +75,7 @@ SurfaceNode::SurfaceNode(const TileKey& tilekey, TileDrawable* drawable) :
     setMatrix(local2world);
 
     // Initialize the cached bounding box.
-    setElevationRaster(nullptr, osg::Matrixf::identity());
+    updateCullingData();
 }
 
 osg::BoundingSphere
@@ -99,6 +99,15 @@ SurfaceNode::setElevationRaster(Texture::Ptr raster, const osg::Matrixf& scaleBi
 
     // communicate the raster to the drawable:
     _drawable->setElevationRaster( raster, scaleBias );
+
+    updateCullingData();
+}
+
+void
+SurfaceNode::updateCullingData()
+{
+    if (!_drawable.valid())
+        return;
 
     // next compute the bounding box in local space:
     const osg::BoundingBox& box = _drawable->getBoundingBox();

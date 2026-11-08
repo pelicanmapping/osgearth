@@ -45,8 +45,7 @@ osgEarth::Util::parseDouble(const std::string& input)
 std::pair<bool, double>
 osgEarth::Util::isValidNumber(const std::string& input)
 {
-    auto a = parseDoubleAndIndex(input); auto& value = a.first; auto& index = a.second;
-    // auto [value, index] = parseDoubleAndIndex(input); // C++17
+    const auto [value, index] = parseDoubleAndIndex(input);
     return std::make_pair(!std::isnan(value) && index == input.length(), value);
 }
 

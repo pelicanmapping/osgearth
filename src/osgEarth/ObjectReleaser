@@ -1,0 +1,99 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/Common>
+#include <osg/Referenced>
+#include <osg/ref_ptr>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace osgEarth
+{
+    /** Releases detached CPU objects through the existing job system, without a GL context.
+     * Obtain the shared service from Registry. Callers must detach live graph links before submission;
+     * destructors must support worker execution. External owners and OSG's DeleteHandler can delay destruction.
+     */
+    class OSGEARTH_EXPORT ObjectReleaser : public osg::Referenced
+    {
+        struct State;
+        struct Queue;
+    public:
+        using Objects = std::vector<osg::ref_ptr<osg::Referenced>>;
+
+        //! Copyable submission handle; copies share admission and drain accounting, but do not drain on destruction.
+        class OSGEARTH_EXPORT Client
+        {
+        public:
+            //! Constructs an inactive handle; release on an inactive handle is synchronous.
+            Client() = default;
+
+            //! Advisory, thread-safe expiry gate: fewer than two client batches and 64 service batches outstanding.
+            bool available() const;
+
+            /** Takes every reference, leaving objects empty. Thread-safe; does not wait for destruction.
+             * Explicit unloads may exceed the admission thresholds to avoid blocking or retaining live content.
+             * After service shutdown (or with no service), releases synchronously for terminal teardown.
+             * Allocation failures propagate; call only after retaining and detaching the objects safely.
+             */
+            void release(Objects& objects) const;
+
+            //! Transfers a typed reference vector after retaining its entries in a generic batch.
+            template<typename T> void release(std::vector<osg::ref_ptr<T>>& objects) const
+            {
+                Objects batch(objects.begin(), objects.end());
+                objects.clear();
+                release(batch);
+            }
+
+            /** Teardown only, with producers stopped: waits for this client's submitted releases.
+             * Reentrant worker drains execute queued releases inline and never wait on their own active batch.
+             */
+            void drain() const;
+
+        private:
+            friend class ObjectReleaser;
+            std::shared_ptr<State> _state;
+            std::shared_ptr<Queue> _queue;
+        };
+
+        //! Creates an independent accounting handle with a stable profiling label; thread-safe.
+        Client createClient(const std::string& label);
+
+        //! Closes submission and drains all accepted work before jobs shutdown; stop scene traversal first.
+        void shutdown();
+
+        /** Retains a value (including a future handle) until worker release, closing completion/reset races.
+         * A retained future delays reference-count-based cancellation until the worker releases this holder.
+         * Does not wait for completion; late producers retain responsibility for their own result references.
+         */
+        template<typename T> static osg::ref_ptr<osg::Referenced> hold(const T& value)
+        {
+            struct Holder : osg::Referenced
+            {
+                //! Copies the handle so its payload cannot disappear during caller-side reset.
+                explicit Holder(const T& input) : value(input) { }
+                T value;
+            };
+            return new Holder(value);
+        }
+
+    protected:
+        //! Drains outstanding work before destroying the service; the jobs runtime must still be alive.
+        ~ObjectReleaser() override;
+
+    private:
+        friend class Registry;
+
+        //! Registry alone creates the service, backed by the single oe.dispose job worker.
+        ObjectReleaser();
+        //! A service has one lifetime; clients provide copyable submission handles instead.
+        ObjectReleaser(const ObjectReleaser&) = delete;
+        ObjectReleaser& operator=(const ObjectReleaser&) = delete;
+
+        std::shared_ptr<State> _state;
+    };
+}

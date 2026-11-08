@@ -46,9 +46,8 @@ DecalNode::traverse(osg::NodeVisitor& nv)
                     osg::Matrix localToWorld = mvm * invview;
                     for (auto& decal : _decals)
                     {
-                        Decal leaf = decal;
+                        auto& leaf = leaves.emplace_back(decal);
                         leaf.matrix = localToWorld * decal.matrix;
-                        leaves.emplace_back(std::move(leaf));
                     }
                 }
 
@@ -250,9 +249,8 @@ DecalRTTNode::traverse(osg::NodeVisitor& nv)
                 {
                     auto& leaves = drawList->_perCamera.get(cv->getState()).leaves;
                     const auto& mm = *cv->getModelViewMatrix() * cv->getCurrentCamera()->getInverseViewMatrix();
-                    Decal leaf = _decal;
+                    auto& leaf = leaves.emplace_back(_decal);
                     leaf.matrix = mm * _decal.matrix;
-                    leaves.emplace_back(std::move(leaf));
                 }
             }
         }

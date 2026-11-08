@@ -208,6 +208,8 @@ macro(add_osgearth_library)
         ${MY_SHADERS}
         ${MY_TEMPLATES} )
 
+    target_compile_features(${MY_TARGET} PUBLIC cxx_std_17)
+
     # Link:
     if(NOT "${MY_TARGET}" STREQUAL "osgEarth")
         target_link_libraries(${MY_TARGET} PRIVATE osgEarth ${OPENSCENEGRAPH_LIBRARIES} ${MY_LIBRARIES})

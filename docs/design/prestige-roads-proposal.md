@@ -138,10 +138,8 @@ Proposed compilation rules:
    movements may suppress specific paint, but need not block otherwise valid pavement. Produce a readable
    diagnostic for contradictory constraints and permit local corrections without rewriting the OSM source.
 
-Use an independent offline ingestion toolchain. Current libosmium upstream requires C++17, so adding its latest
-headers directly to osgEarth would conflict with this repository's C++14 requirement. An external Osmium/OSM
-adapter can emit lossless records for a C++14 compiler and runtime. Keep Rust, Python, or JVM evaluation tools
-outside the runtime dependency graph.
+Use an independent offline ingestion toolchain. An external Osmium/OSM adapter can emit lossless records
+for the runtime. Keep Rust, Python, or JVM evaluation tools outside the runtime dependency graph.
 [libosmium prerequisites](https://github.com/osmcode/libosmium#prerequisites)
 
 Use a versioned binary tile contract for delivery, with debug exports to GeoJSON and optionally OpenDRIVE.

@@ -54,7 +54,9 @@ ThreeDTilesLayer::Options::getConfig() const
     Config conf = VisibleLayer::Options::getConfig();
     conf.set("url", _url);
     conf.set("max_sse", _maximumScreenSpaceError);
+    conf.set("ignore_unlit", ignoreUnlit());
     conf.set("nvgl", nvgl());
+    conf.set("backface_culling", backfaceCulling());
     return conf;
 }
 
@@ -64,7 +66,9 @@ ThreeDTilesLayer::Options::fromConfig( const Config& conf )
     _maximumScreenSpaceError.init(15.0f);
     conf.get("url", _url);
     conf.get("max_sse", _maximumScreenSpaceError);
+    conf.get("ignore_unlit", ignoreUnlit());
     conf.get("nvgl", nvgl());
+    conf.get("backface_culling", backfaceCulling());
 }
 
 //........................................................................
@@ -95,15 +99,21 @@ ThreeDTilesLayer::openImplementation()
     if (parentStatus.isError())
         return parentStatus;
 
+    return openTileset(*_options->url(), "");
+}
+
+Status
+ThreeDTilesLayer::openTileset(const URI& url, const std::string& authorizationHeader)
+{
     osg::ref_ptr< osgDB::Options > readOptions = osgEarth::Registry::instance()->cloneOrCreateOptions(this->getReadOptions());
 
-    ReadResult rr = _options->url()->readString(readOptions.get());
+    ReadResult rr = url.readString(readOptions.get());
     if (rr.failed())
     {
         return Status(Status::ResourceUnavailable, Stringify() << "Error loading tileset: " << rr.errorDetail());
     }
 
-    Tileset* tileset = Tileset::create(rr.getString(), _options->url()->full());
+    Tileset* tileset = Tileset::create(rr.getString(), url.full());
     if (!tileset)
     {
         return Status(Status::GeneralError, "Bad tileset");
@@ -127,7 +137,12 @@ ThreeDTilesLayer::openImplementation()
         };
     }
 
-    _tilesetNode = new ThreeDTilesetNode(tileset, "", getSceneGraphCallbacks(), readOptions.get(), processContent);
+    if (*options().ignoreUnlit())
+    {
+        readOptions->setOptionString(readOptions->getOptionString() + " gltfIgnoreUnlit");
+    }
+
+    _tilesetNode = new ThreeDTilesetNode(tileset, authorizationHeader, getSceneGraphCallbacks(), readOptions.get(), processContent);
     if (textures.valid())
     {
         _tilesetNode->getOrCreateStateSet()->setAttribute(textures, osg::StateAttribute::ON);
@@ -142,6 +157,12 @@ ThreeDTilesLayer::openImplementation()
             return true;
         }));
     }
+    // OVERRIDE is required because the glTF reader enables culling in the content state below this node.
+    if (!*options().backfaceCulling())
+    {
+        _tilesetNode->getOrCreateStateSet()->setMode(GL_CULL_FACE, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE);
+    }
+
     _tilesetNode->setMaximumScreenSpaceError(*options().maximumScreenSpaceError());
     _tilesetNode->setOwnerName(getName());
 

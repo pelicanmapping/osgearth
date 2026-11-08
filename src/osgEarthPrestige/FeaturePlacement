@@ -67,6 +67,7 @@ namespace osgEarthPrestige
     {
         std::string source = "*", group = "*", key, value = "*", exceptValue;
         std::string action = "include"; // include polygon, exclude polygon/line, or explicit points
+        std::string geometry = "*"; // "*", or only polygon, line or point parts of a matching feature
         std::string strategy = "scatter", name; // named region rules select a registered strategy
         int priority = 0; // higher inclusion wins; equal priority prefers a region strategy; exclusions always win
         Config parameters; // strategy-owned <placement> settings; source adapters do not interpret these
@@ -80,8 +81,14 @@ namespace osgEarthPrestige
         Config getConfig() const;
         //! Rejects unsupported actions, missing keys, and unbounded parameters.
         Status validate() const;
-        //! Tests source, population, and attributes without changing the feature.
+        //! Tests source, population, and attributes without changing the feature; geometry is tested per part.
         bool matches(const std::string& input, const ScatterGroup&, const Feature&) const;
+        //! Whether the geometry filter admits one part of a feature. Multi-geometries are iterated into their parts, so
+        //! "polygon" takes every polygon of a multipolygon (and closed rings), "line" every linestring and "point" points
+        //! and point sets. "*" admits everything the action can use.
+        bool acceptsGeometry(Geometry::Type) const;
+        //! Whether at least one part of the geometry passes the filter, so features with no usable part are not kept.
+        bool acceptsAnyPart(const Geometry*) const;
     };
 
     //! Immutable feature owned by a query result, with its stable provider namespace.

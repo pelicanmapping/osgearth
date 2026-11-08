@@ -135,7 +135,9 @@
           </rule>
           <!-- All populations share OSM exclusions. Explicit mapped trees bypass line buffers; polygon exclusions still apply. -->
           <rule key="building" value="*" except="no" action="exclude"/>
-          <rule key="natural" value="water" action="exclude"/>
+          <!-- geometry="polygon" skips water centerlines; without it, a rule uses every part its action can
+               (polygons for include/exclude, lines for buffered exclusions, points for action="points"). -->
+          <rule key="natural" value="water" action="exclude" geometry="polygon"/>
           <rule key="waterway" value="riverbank" action="exclude"/>
           <!-- Buffer is half-width, in meters; road-class/width attributes can be refined later. -->
           <rule key="highway" value="*" except="no" action="exclude" buffer="4"/>

@@ -9,7 +9,9 @@
 #include <osgEarth/Utils>
 #include <osgEarth/Capabilities>
 #include <osgEarth/Registry>
+#include <osgEarth/ObjectReleaser>
 #include <osgEarth/Notify>
+#include "ResourceLifetimeTrace.h"
 
 #include <osg/GraphicsContext>
 #include <osg/ContextData>
@@ -450,9 +452,39 @@ namespace
 
 }
 
+namespace
+{
+    //! Add exact CPU swap intervals to the resource trace while preserving an application's existing callback.
+    struct ResourceTraceSwapCallback : osg::GraphicsContext::SwapCallback
+    {
+        osg::ref_ptr<osg::GraphicsContext::SwapCallback> next;
+
+        //! Keep the previous callback alive for as long as this diagnostic wrapper is installed.
+        explicit ResourceTraceSwapCallback(osg::GraphicsContext::SwapCallback* callback) : next(callback) { }
+
+        //! Delegate exactly once; no extra flush, finish, fence, or GL error query is issued.
+        void swapBuffersImplementation(osg::GraphicsContext* gc) override
+        {
+            auto* state = gc->getState();
+            auto* stamp = state ? state->getFrameStamp() : nullptr;
+            detail::ResourceTraceScope trace("resource.swap", nullptr, state ? int(state->getContextID()) : -1,
+                false, stamp ? std::int64_t(stamp->getFrameNumber()) : -1);
+            if (next) next->swapBuffersImplementation(gc);
+            else gc->swapBuffersImplementation();
+        }
+    };
+}
+
 void
 CustomRealizeOperation::operator()(osg::Object* object)
 {
+    if (detail::resourceTraceEnabled())
+    {
+        auto* gc = dynamic_cast<osg::GraphicsContext*>(object);
+        if (gc && !dynamic_cast<ResourceTraceSwapCallback*>(gc->getSwapCallback()))
+            gc->setSwapCallback(new ResourceTraceSwapCallback(gc->getSwapCallback()));
+    }
+
     if (_vsync.isSet())
     {
         osgViewer::GraphicsWindow* win = dynamic_cast<osgViewer::GraphicsWindow*>(object);
@@ -628,6 +660,7 @@ GLObjectPool::watch(GLObject::Ptr object)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _objects.emplace_back(object);
+    detail::ResourceTraceScope trace("resource.create", object.get(), int(getContextID()), true);
 }
 
 void
@@ -730,8 +763,7 @@ GLObjectPool::releaseOrphans(const osg::GraphicsContext* gc)
 
     // then check for objects to add to the orphan list:
     GLsizeiptr bytes = 0;
-    Collection keepers;
-    keepers.reserve(_objects.size());
+    std::size_t kept = 0;
     for (unsigned i = 0; i < _objects.size(); ++i)
     {
         auto& object = _objects[i];
@@ -743,6 +775,12 @@ GLObjectPool::releaseOrphans(const osg::GraphicsContext* gc)
             continue;
         }
 
+        // Capture the first observed orphan without changing the deletion/recycling policy.
+        if (object.use_count() == 1 && bytes_remaining > 0 && object->_orphan_frames == 0)
+        {
+            detail::ResourceTraceScope trace("resource.orphan", object.get(), int(getContextID()));
+        }
+
         // the object is not referenced anywhere else but here,
         // and we've satisfied the byte-slice and time-slice requirements,
         // release its memory and drop it from the tracker pool.
@@ -750,6 +788,7 @@ GLObjectPool::releaseOrphans(const osg::GraphicsContext* gc)
             bytes_remaining > 0 &&
             object->_orphan_frames++ >= _frames_to_delay_deletion)
         {
+            detail::ResourceTraceScope trace("resource.pool_delete", object.get(), int(getContextID()));
             const int object_size = object->size();
             object->release();
             bytes_remaining -= object_size;
@@ -760,11 +799,15 @@ GLObjectPool::releaseOrphans(const osg::GraphicsContext* gc)
 
         // keep the object around.
         bytes += object->size();
-        keepers.emplace_back(std::move(object));
+        // Keep survivor order without allocating. Swapping preserves removed references
+        // in the scanned tail until every orphan ownership decision is complete.
+        if (kept != i)
+            _objects[kept].swap(object);
+        ++kept;
     }
 
-    _objects.swap(keepers);
     _totalBytes = bytes;
+    _objects.resize(kept); // Drop removed owners after the scan; retain capacity for the next frame.
 
     if (glObjectPoolDebugEnabled())
     {
@@ -795,6 +838,7 @@ GLObject::debugLabel(const std::string& category, const std::string& uniqueid)
     // Keep the label for error reports even without a GL debug context.
     _category = category;
     _uid = uniqueid;
+    detail::ResourceTraceScope trace("resource.label", this);
 
     if (GLUtils::isGLDebuggingEnabled())
     {
@@ -946,6 +990,7 @@ GLBuffer::create(GLenum target, osg::State& state, GLsizei sizeHint, GLsizei chu
     if (object)
     {
         object->_target = target;
+        detail::ResourceTraceScope trace("resource.recycle", object.get(), int(state.getContextID()));
         return object;
     }
     else
@@ -1047,6 +1092,7 @@ GLBuffer::bufferData(GLsizei datasize, const GLvoid* data, GLbitfield flags) con
 
     _alloc_size = alloc_size;
     _immutable = false;
+    detail::ResourceTraceScope trace("resource.buffer_storage", this);
 }
 
 void
@@ -1081,6 +1127,7 @@ GLBuffer::bufferStorage(GLsizei datasize, const GLvoid* data, GLbitfield flags) 
     }
 
     _immutable = true;
+    detail::ResourceTraceScope trace("resource.buffer_storage", this);
 }
 
 void
@@ -1109,6 +1156,7 @@ GLBuffer::bufferStorage(GLsizei buffersize, GLsizei datasize, const GLvoid* data
     }
 
     _immutable = true;
+    detail::ResourceTraceScope trace("resource.buffer_storage", this);
 }
 
 void
@@ -1174,6 +1222,7 @@ GLBuffer::bindBufferBase(GLuint index) const
 void
 GLBuffer::release()
 {
+    detail::ResourceTraceScope trace("resource.delete_buffer", valid() ? this : nullptr);
     if (_name != 0)
     {
         OE_DEVEL << LC << "GLBuffer::release, name=" << name() << std::endl;
@@ -1468,6 +1517,7 @@ GLTexture::Ptr
 GLTexture::wrap(GLenum target, GLuint name, osg::State& state)
 {
     Ptr object(new GLTexture(target, name, state));
+    detail::ResourceTraceScope trace("resource.borrow_osg_texture", object.get(), int(state.getContextID()), true);
     // not adding it to the watcher; caller is responsible for resources.
     return object;
 }
@@ -1495,6 +1545,7 @@ GLTexture::create(GLenum target, osg::State& state, const Profile& profileHint)
     Ptr object = GLObjectPool::get(state)->recycle<GLTexture>(comp);
     if (object)
     {
+        detail::ResourceTraceScope trace("resource.recycle", object.get(), int(state.getContextID()));
         return object;
     }
     else
@@ -1633,6 +1684,7 @@ GLTexture::isResident(const osg::State& state) const
 void
 GLTexture::release()
 {
+    detail::ResourceTraceScope trace("resource.delete_texture", valid() ? this : nullptr);
     OE_DEVEL << LC << "GLTexture::release, name=" << name() << std::endl;
     if (_handle != 0)
     {        
@@ -1687,6 +1739,7 @@ GLTexture::storage2D(const Profile& profile)
 
 
         _size = _profile._size;
+        detail::ResourceTraceScope trace("resource.texture_storage", this);
     }
 }
 
@@ -1712,6 +1765,7 @@ GLTexture::storage3D(const Profile& profile)
         glTexParameterf(_target, GL_TEXTURE_MAX_ANISOTROPY_EXT, profile._maxAnisotropy);
 
         _size = _profile._size;
+        detail::ResourceTraceScope trace("resource.texture_storage", this);
     }
 }
 
@@ -2122,6 +2176,7 @@ namespace
         void operator()(osg::GraphicsContext* context) override
         {
             osg::State* state = context->getState();
+            detail::ResourceTraceScope trace("resource.ico_compile_and_flush", nullptr, int(state->getContextID()));
             osg::GLExtensions* ext = state->get<osg::GLExtensions>();
             if (ext->glBindVertexArray && ext->glIsVertexArray && ext->glIsBuffer)
             {
@@ -2135,21 +2190,55 @@ namespace
         }
     };
 
+    /** Retires final compiler ownership independently of the ICO implementation.
+     * OSG keeps this set alive while any context or temporary compile list uses it.
+     * Only its final destructor transfers the remaining CPU references; no GL calls run on the worker.
+     */
+    struct RetiringCompileSet : public ICO::CompileSet
+    {
+        ObjectReleaser::Client _releaser;
+        ObjectReleaser::Objects _retired;
+
+        //! Allocate an empty ownership carrier before compilation, so teardown only swaps members and queues it.
+        RetiringCompileSet() :
+            _releaser(Registry::instance()->getObjectReleaser()->createClient("ICO compile set")),
+            _retired{ new ICO::CompileSet() }
+        {
+        }
+
+        /** Final release on any thread: empty every strong-owning base member before handing off the carrier.
+         * The worker may run immediately. The original set is never resurrected or submitted from its destructor.
+         * After OR shutdown its terminal synchronous-release behavior applies; no Registry lookup is needed here.
+         */
+        ~RetiringCompileSet() override
+        {
+            auto* retired = static_cast<ICO::CompileSet*>(_retired.front().get());
+            _subgraphToCompile.swap(retired->_subgraphToCompile);
+            _compileCompletedCallback.swap(retired->_compileCompletedCallback);
+            _compileMap.swap(retired->_compileMap);
+            _markerObject.swap(retired->_markerObject);
+            _releaser.release(_retired);
+        }
+    };
+
     struct ICOCallback : public ICO::CompileCompletedCallback
     {
         jobs::promise<osg::ref_ptr<osg::Node>> _promise;
         osg::ref_ptr<osg::Node> _node;
         std::atomic_int& _jobsActive;
 
+        //! Keep the node and completion promise alive until the compile set retires its callback.
         ICOCallback(const osg::ref_ptr<osg::Node>& node, std::atomic_int& jobsActive) :
             _node(node),
             _jobsActive(jobsActive) { }
 
+        //! Account for the final callback release, including deferred or canceled compile sets.
         virtual ~ICOCallback()
         {
             _jobsActive--;
         }
 
+        //! Publish on OSG's completion thread; retirement must not change continuation/merge ordering.
         bool compileCompleted(ICO::CompileSet* compileSet) override
         {
             _promise.resolve(_node);
@@ -2215,7 +2304,7 @@ GLObjectsCompiler::compileAsync(
 
             if (state->empty() == false)
             {
-                auto compileSet = new osgUtil::IncrementalCompileOperation::CompileSet();
+                osg::ref_ptr<ICO::CompileSet> compileSet = new RetiringCompileSet();
                 compileSet->buildCompileMap(ico->getContextSet(), *state.get());
                 ICOCallback* callback = new ICOCallback(node, _jobsActive);
                 result = callback->_promise;
@@ -2255,7 +2344,7 @@ GLObjectsCompiler::compileAsync(
         osg::ref_ptr<ICO> ico;
         if (ObjectStorage::get(host, ico) && ico->isActive())
         {
-            auto compileSet = new osgUtil::IncrementalCompileOperation::CompileSet();
+            osg::ref_ptr<ICO::CompileSet> compileSet = new RetiringCompileSet();
             compileSet->buildCompileMap(ico->getContextSet(), *state);
             ICOCallback* callback = new ICOCallback(node, _jobsActive);
             result = callback->_promise;
@@ -2311,7 +2400,7 @@ GLObjectsCompiler::requestIncrementalCompileWithICO(
         osg::ref_ptr<ICO> ico;
         if (ico_weak.lock(ico) && ico->isActive())
         {
-            auto compileSet = new osgUtil::IncrementalCompileOperation::CompileSet();
+            osg::ref_ptr<ICO::CompileSet> compileSet = new RetiringCompileSet();
             compileSet->buildCompileMap(ico->getContextSet(), *state);
             ICOCallback* callback = new ICOCallback(node, _jobsActive);
             callback->_promise = promise;

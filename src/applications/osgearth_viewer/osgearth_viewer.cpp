@@ -13,6 +13,10 @@
 
 #include <osgEarth/Metrics>
 
+#ifdef _WIN32
+#include <osgEarth/Gamepad>
+#endif
+
 #define LC "[viewer] "
 
 using namespace osgEarth;
@@ -24,6 +28,11 @@ usage(const char* name)
     std::cout
         << "View an earth file: " << name << " file.earth" << std::endl
         << "View an OSG model: " << name << " [modelfile.ext] [--light]" << std::endl
+#ifdef _WIN32
+        << "  --gamepad: XInput prototype (earth files, foreground window only)" << std::endl
+        << "    Left stick: pan; right stick: heading/pitch; LT/RT: zoom out/in" << std::endl
+        << "    LB/RB: slow/fast; A: home. Release controls after connecting or switching windows." << std::endl
+#endif
         << Util::MapNodeHelper().usage() << std::endl;
 
     return 0;
@@ -36,6 +45,10 @@ main(int argc, char** argv)
     osg::ArgumentParser arguments(&argc,argv);
     if ( arguments.read("--help") )
         return usage(argv[0]);
+
+#ifdef _WIN32
+    const bool gamepad = arguments.read("--gamepad");
+#endif
 
     // start up osgEarth
     osgEarth::initialize(arguments);
@@ -56,6 +69,14 @@ main(int argc, char** argv)
         if (MapNode::get(node))
         {
             viewer.setSceneData(node);
+#ifdef _WIN32
+            if (gamepad)
+            {
+                // Polling needs frames even when idle; keep this policy local to the prototype viewer.
+                viewer.setRunFrameScheme(osgViewer::ViewerBase::CONTINUOUS);
+                viewer.addEventHandler(new GamepadHandler());
+            }
+#endif
             return viewer.run();
         }
         else

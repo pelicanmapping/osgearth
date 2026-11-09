@@ -5,11 +5,11 @@ Build with `configure.bat` and `build.bat`. From a Command Prompt in the reposit
 ```bat
 call osgearth_shell.bat
 cd tests
-osgearth_imgui simple.earth --gamepad
+osgearth_imgui simple.earth
 ```
 
 Open **Tools > Camera** and select **Map**, **Fly**, **Walk**, or **Drive**.
-The Gamepad checkbox can enable Windows XInput without a command-line flag.
+Windows XInput controllers are detected automatically. Use the Gamepad checkbox to disable or re-enable input.
 Keyboard and mouse controls also work without a gamepad, including on other platforms.
 
 | Mode | Left stick | Right stick | LT / RT |

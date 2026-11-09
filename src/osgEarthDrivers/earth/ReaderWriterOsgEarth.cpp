@@ -277,6 +277,10 @@ class ReaderWriterEarth : public osgDB::ReaderWriter
             MapNode* mapNode = MapNode::get(node.get());
             if (mapNode)
             {
+                // Retain the source even when the earth file has no <options> element.
+                // Applications can use this to reload the currently displayed map.
+                mapNode->setUserValue("osgEarth.earthFile", uriContext.referrer());
+
                 // If the user passed in a cache object, apply it to the map now
                 CacheSettings* cacheSettings = CacheSettings::get(readOptions);
                 if (cacheSettings && cacheSettings->getCache())

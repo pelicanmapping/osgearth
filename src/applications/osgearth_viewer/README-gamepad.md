@@ -6,8 +6,10 @@ in a Command Prompt:
 ```bat
 call osgearth_shell.bat
 cd tests
-osgearth_viewer simple.earth --gamepad
+osgearth_viewer simple.earth
 ```
+
+Windows XInput controllers are detected automatically; no command-line switch is required.
 
 The shared `osgEarth::GamepadHandler` uses the view's existing `EarthManipulator`.
 Its Windows backend links against the Windows SDK's `xinput9_1_0` library.

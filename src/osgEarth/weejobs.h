@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <functional>
 #include <mutex>
+#include <memory>
+#include <stdexcept>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -548,7 +550,7 @@ namespace WEEJOBS_NAMESPACE
         void set_concurrency(unsigned value)
         {
             value = std::max(value, 1u);
-            if (_target_concurrency != value)
+            if (!_done && _target_concurrency != value)
             {
                 _target_concurrency = value;
                 start_threads();
@@ -568,13 +570,24 @@ namespace WEEJOBS_NAMESPACE
             _can_steal_work = value;
         }
 
-        //! Discard all queued jobs
+        //! Cancels queued work and releases group counts; destroys captures outside the scheduler lock.
         void cancel_all()
         {
-            std::lock_guard<std::mutex> lock(_queue_mutex);
-            _queue.clear();
-            _metrics.canceled += _metrics.pending;
-            _metrics.pending = 0;
+            std::vector<detail::job> canceled;
+            take_canceled_jobs(canceled);
+        }
+
+        //! Detaches into empty output and releases group counts; caller destroys captures after dependent queues stop.
+        void take_canceled_jobs(std::vector<detail::job>& canceled)
+        {
+            {
+                std::lock_guard<std::mutex> lock(_queue_mutex);
+                canceled.swap(_queue);
+                _metrics.canceled += _metrics.pending.exchange(0);
+            }
+            for (auto& job : canceled)
+                if (job.ctx.group)
+                    job.ctx.group->release();
         }
 
         //! Schedule an asynchronous task on this scheduler
@@ -583,35 +596,28 @@ namespace WEEJOBS_NAMESPACE
         //! @param context Job details
         void _dispatch_delegate(std::function<bool()>& delegate, const context& context)
         {
-            if (!_done)
             {
-                // If we have a group semaphore, acquire it BEFORE queuing the job
-                if (context.group)
-                {
-                    context.group->acquire();
-                }
-
+                std::lock_guard<std::mutex> lock(_queue_mutex);
+                // Admission and stopping share this lock: nothing can be queued after cancellation.
+                if (_done)
+                    return;
                 if (_target_concurrency > 0)
                 {
-                    std::lock_guard<std::mutex> lock(_queue_mutex);
-
                     _queue.emplace_back(detail::job{ context, delegate });
-
+                    if (context.group)
+                        context.group->acquire();
                     _metrics.pending++;
                     _metrics.total++;
                     _block.notify_one();
+                    return;
                 }
-                else
-                {
-                    // no threads? run synchronously.
-                    delegate();
-
-                    if (context.group)
-                    {
-                        context.group->release();
-                    }
-                }
+                if (context.group)
+                    context.group->acquire();
             }
+            // A zero-thread pool executes outside the lock, including capture destruction in the caller.
+            delegate();
+            if (context.group)
+                context.group->release();
         }
 
         //! removes the highest priority job from the queue and places it
@@ -673,7 +679,7 @@ namespace WEEJOBS_NAMESPACE
         inline void start_threads();
 
         //! Signall all threads to stop
-        inline void stop_threads();
+        inline void stop_threads(std::vector<detail::job>* canceled = nullptr);
 
         //! Wait for all threads to exit (after calling stop_threads)
         inline void join_threads();
@@ -719,7 +725,9 @@ namespace WEEJOBS_NAMESPACE
     };
 
     /**
-    * Runtime singleton object;
+    * Runtime singleton object. WEEJOBS_INSTANCE gives it process lifetime: normal process exit
+    * does not run scheduler destructors or wait for unfinished jobs. Use shutdown() only when
+    * the application needs explicit quiescence while it is still running, or destroy() for final deletion.
     * Declare with WEEJOBS_INSTANCE in one of your .cpp files.
     */
     namespace detail
@@ -728,8 +736,11 @@ namespace WEEJOBS_NAMESPACE
         {
             inline runtime();
             inline ~runtime();
+            //! Terminal shutdown from an external controller; producers must stop before runtime destruction.
             inline void shutdown();
 
+            std::mutex _shutdown_mutex;
+            bool _shutdown_complete = false;
             std::atomic<bool> _alive = { true };
             std::atomic<bool> _stealing_allowed = { false };
             std::mutex _pools_mutex;
@@ -739,8 +750,50 @@ namespace WEEJOBS_NAMESPACE
         };
     }
 
-    //! Access to the runtime singleton - users need not call this
+    namespace detail
+    {
+        // Static, allocation-free bookkeeping survives explicit deletion without resurrecting the singleton.
+        struct runtime_owner
+        {
+            std::once_flag initialized;
+            std::atomic<runtime*> value{nullptr};
+            std::atomic<bool> destroyed{false};
+            bool destroying = false; // Accessed only by the external finalizer; also prevents reentrant deletion.
+        };
+
+        //! Shared singleton bookkeeping; final destruction must not race other API calls or finalizers.
+        extern WEEJOBS_EXPORT runtime_owner& owner();
+    }
+
+    //! Accesses the runtime, creating it once; throws std::logic_error after destroy().
     extern WEEJOBS_EXPORT detail::runtime& instance();
+
+    /** Optional final teardown: stops jobs and deletes every pool and the runtime; safe to repeat.
+     * Call from one external controller with producers stopped and all runtime handles relinquished.
+     * Invalidates pool/metrics pointers and contexts; no restart is permitted. Does not create an unused runtime.
+     */
+    inline void destroy()
+    {
+        auto& storage = detail::owner();
+        if (storage.destroyed.load() || storage.destroying)
+            return;
+        storage.destroying = true;
+        try
+        {
+            auto* runtime = storage.value.load();
+            if (runtime)
+                runtime->shutdown(); // Completing workers still need instance() during orderly shutdown.
+            storage.destroyed.store(true);
+            storage.value.store(nullptr);
+            delete runtime;
+            storage.destroying = false;
+        }
+        catch (...)
+        {
+            storage.destroying = false;
+            throw;
+        }
+    }
 
     //! Returns the job pool with the given name, creating a new one if it doesn't 
     //! already exist. If you don't specify a name, a default pool is used.
@@ -759,7 +812,11 @@ namespace WEEJOBS_NAMESPACE
         auto new_pool = new jobpool(name, pool_size);
         instance()._pools.push_back(new_pool);
         instance()._metrics._pools.push_back(&new_pool->_metrics);
-        new_pool->start_threads();
+        // Late lookups return a valid, stopped handle; they must never resurrect workers during teardown.
+        if (instance()._alive)
+            new_pool->start_threads();
+        else
+            new_pool->_done = true;
         return new_pool;
     }
 
@@ -768,17 +825,19 @@ namespace WEEJOBS_NAMESPACE
         // dispatches a function to the appropriate job pool.
         inline void pool_dispatch(std::function<bool()> delegate, const context& context)
         {
+            // Check lifetime before dereferencing even an explicitly supplied (possibly obsolete) pool handle.
+            auto& runtime = instance();
             auto pool = context.pool ? context.pool : get_pool({});
             if (pool)
             {
                 pool->_dispatch_delegate(delegate, context);
 
                 // if work stealing is enabled, wake up all pools
-                if (instance()._stealing_allowed)
+                if (runtime._stealing_allowed)
                 {
-                    std::lock_guard<std::mutex> lock(instance()._pools_mutex);
+                    std::lock_guard<std::mutex> lock(runtime._pools_mutex);
 
-                    for (auto pool : instance()._pools)
+                    for (auto pool : runtime._pools)
                     {
                         pool->_block.notify_all();
                     }
@@ -859,16 +918,21 @@ namespace WEEJOBS_NAMESPACE
         return &instance()._metrics;
     }
 
-    //! stop all threads, wait for them to exit, and shut down the system
+    //! Optional terminal shutdown from an external controller; normal application exit needs no call.
     inline void shutdown()
     {
-        instance().shutdown();
+        if (!detail::owner().destroyed.load())
+            instance().shutdown();
     }
 
-    //! Whether the weejobs runtime is still alive (has not been shutdown)
+    //! Whether jobs may run; returns false after shutdown/destroy without creating a runtime just to query it.
     inline bool alive()
     {
-        return instance()._alive;
+        auto& storage = detail::owner();
+        if (storage.destroyed.load())
+            return false;
+        auto* runtime = storage.value.load();
+        return runtime == nullptr || runtime->_alive.load();
     }
 
     //! Install a function that the SDK can use to set job pool thread names
@@ -892,29 +956,44 @@ namespace WEEJOBS_NAMESPACE
     inline detail::runtime::~runtime()
     {
         shutdown();
+        // Raw pool handles and metrics remain valid until the runtime itself dies, not just until shutdown.
+        // All external producers must have stopped before this destructor runs.
+        for (auto* pool : _pools)
+            delete pool;
     }
 
     inline void detail::runtime::shutdown()
     {
-        std::lock_guard<std::mutex> lock(_pools_mutex);
+        std::unique_lock<std::mutex> shutdownLock(_shutdown_mutex);
+        if (_shutdown_complete)
+            return;
 
-        _alive = false;
+        std::vector<jobpool*> pools;
+        {
+            std::lock_guard<std::mutex> lock(_pools_mutex);
+            pools = _pools;
+            _alive = false;
+            for (auto* pool : pools)
+                pool->_done = true;
+        }
 
-        //std::cout << "stopping " << _pools.size() << " threads..." << std::endl;
-        for (auto& pool : _pools)
-            if (pool)
-                pool->stop_threads();
+        // Workers and capture destructors may look up pools or dispatch continuations. Never hold
+        // the pool registry lock while canceling captures or waiting for those workers to exit.
+        // Release every queued group count before destroying any capture: a destructor may join
+        // a group in a different pool whose workers have already received their stop signal.
+        std::vector<std::vector<detail::job>> canceled(pools.size());
+        for (std::size_t i = 0; i < pools.size(); ++i)
+            pools[i]->stop_threads(&canceled[i]);
+        canceled.clear();
+        for (auto* pool : pools)
+            pool->join_threads();
 
-        //std::cout << "joining " << _pools.size() << " threads..." << std::endl;
-        for (auto& pool : _pools)
-            if (pool)
-                pool->join_threads();
-
-        for (auto& pool : _pools)
-            if (pool)
-                delete pool;
-
-        _pools.clear();
+        _shutdown_complete = true;
+        // Naming callbacks may retain application resources. Release them while services are still alive,
+        // outside scheduler locks, before final destruction invalidates the singleton and pool handles.
+        std::function<void(const char*)> naming;
+        naming.swap(_set_thread_name);
+        shutdownLock.unlock();
     }
 
     inline void jobpool::run()
@@ -1012,26 +1091,17 @@ namespace WEEJOBS_NAMESPACE
         }
     }
 
-    inline void jobpool::stop_threads()
+    inline void jobpool::stop_threads(std::vector<detail::job>* canceled)
     {
-        _done = true;
-
-        // Clear out the queue
-        std::lock_guard<std::mutex> lock(_queue_mutex);
-
-        // reset any group semaphores so that JobGroup.join()
-        // will not deadlock.
-        for (auto& queuedjob : _queue)
         {
-            if (queuedjob.ctx.group != nullptr)
-            {
-                queuedjob.ctx.group->release();
-            }
+            std::lock_guard<std::mutex> lock(_queue_mutex);
+            _done = true;
         }
-        _queue.clear();
-
-        // wake up all threads so they can exit
         _block.notify_all();
+        if (canceled)
+            take_canceled_jobs(*canceled);
+        else
+            cancel_all();
     }
 
     //! Wait for all threads to exit (after calling stop_threads)
@@ -1280,11 +1350,20 @@ namespace WEEJOBS_NAMESPACE
         return count;
     }
 
-    // Use this macro ONCE in your application in a .cpp file to 
-    // instaniate the weejobs runtime singleton.
+    // Define once per process runtime. Unless explicitly destroyed, retain locks, handles and captures until
+    // the OS reclaims the process; static/DLL destruction is not a safe place to join arbitrary worker jobs.
 #define WEEJOBS_INSTANCE \
     namespace WEEJOBS_NAMESPACE { \
-        static detail::runtime runtime_singleton_instance; \
-        detail::runtime& instance() { return runtime_singleton_instance; } \
+        detail::runtime_owner& detail::owner() { \
+            static runtime_owner storage; \
+            return storage; \
+        } \
+        detail::runtime& instance() { \
+            auto& storage = detail::owner(); \
+            if (storage.destroyed.load()) \
+                throw std::logic_error("weejobs runtime has been destroyed"); \
+            std::call_once(storage.initialized, [&]() { storage.value.store(new detail::runtime); }); \
+            return *storage.value.load(); \
+        } \
     }
 }

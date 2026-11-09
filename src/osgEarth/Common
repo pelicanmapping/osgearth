@@ -29,6 +29,13 @@ namespace osgEarth
 
     extern OSGEARTH_EXPORT void initialize(osg::ArgumentParser&);
 
+    /** Optional final teardown for leak checking: drains retirement, stops workers, and deletes shared services.
+     * First release all application-owned osgEarth objects/handles and stop traversal, graphics, and external
+     * producer threads. Call on one external controller, never from a job or concurrently with other API calls.
+     * Safe to repeat, including before initialization. No restart is permitted; normal exit needs no call.
+     */
+    extern OSGEARTH_EXPORT void finalize();
+
     //! Generate an application-wide unique identifier.
     extern OSGEARTH_EXPORT UID createUID();
 }

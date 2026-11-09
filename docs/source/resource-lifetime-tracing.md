@@ -834,3 +834,127 @@ disposal, and Prestige asphalt sharing remain on the deferred action list.
 Publication's longest individual scope (1.022 ms) included 0.769 ms of heap-lock
 wait while resetting future bookkeeping; its enclosing frame still met 16.67 ms.
 Different camera workloads preclude a controlled comparison with earlier captures.
+
+## Shutdown deadlocks and process-lifetime services (November 8)
+
+Normal application exit requires no explicit shutdown call on any platform. The
+shared Registry and weejobs runtime default to process lifetime: they are created
+once, remain available while the application runs, and are reclaimed with the
+process unless the application requests the optional final teardown below. Neither installs an exit callback or runs a destructor that joins workers
+at process teardown. There is no Windows-specific exit hook or viewer shutdown
+guard. The existing named pools and their handles remain valid for this lifetime.
+
+This policy avoids depending on worker progress during static/DLL cleanup. A test
+against the old installed library reproduced a hang by returning from main while
+an ObjectReleaser batch was active; Windows had terminated its worker before the
+Registry's DLL exit callback waited for the batch. The same test now exits 0 in
+0.353 seconds without waiting for the one-second test destructor. Pending jobs and
+retirement batches are not guaranteed to complete when the process ends. Callers
+that need a particular result or write completed should await its future/job group
+while the application is running. ObjectReleaser's ordinary scene retirement and
+per-owner cleanup continue unchanged; this does not retain every retired resource
+until exit.
+
+`jobs::shutdown()` and `Registry::release()` remain optional terminal operations
+for an application that wants to quiesce the runtime while it is still running.
+They must run on an external controller after scene traversal/external producers
+stop, not inside a job. Explicit Registry release still drains accepted disposal
+before stopping jobs, is idempotent, and keeps the stopped service for synchronous
+late retirement. A first disposal client created after release also operates
+synchronously. The explicit-release reproducer exits 0 in 1.223 seconds after its
+destructor completes. The process-lifetime policy assumes the module owning the
+runtime stays loaded; live unload/reload of osgEarth is outside this change's scope.
+
+The independent scheduler deadlock fix is retained: shutdown closes admission under
+the pool registry lock, then cancels and joins outside that lock. All queued group
+counts are released across all pools before canceled captures are destroyed. Queue
+locks likewise do not cover capture destruction. Stopped pool handles/metrics remain
+valid after shutdown; late lookups and dispatches cannot restart workers. Final
+teardown, unlike shutdown, invalidates those handles.
+The public ABI advances from 208 to 209 for Registry/runtime layout changes.
+
+Validation used MSVC/C++17 on Windows and GCC/C++17 on Ubuntu 26.04 under WSL. On each
+platform, eight scheduler regression scenarios passed ten runs each, and five
+lifetime/functionality scenarios passed five runs each (105 runs per platform).
+Coverage includes optional/concurrent shutdown, reentrant capture destruction,
+cross-pool group cancellation, racing late dispatch, pool lookup, work stealing,
+zero-thread dispatch, priorities, futures, supplied promises, continuations, and
+cancelable/noncancelable jobs. Idle and busy processes return normally without any
+shutdown call, including a worker deliberately left in a 30-second task and another
+job still queued. This verifies the actual weejobs header on both platforms; the
+full osgEarth build and GPU tests were run on Windows only.
+
+The final build.bat build/install succeeded. Paging/texture tests passed 268
+assertions in 19 cases. Both viewers completed 180-frame vsync-on local composite-
+elevation smoke runs and exited 0 without shutdown guards. Logs retain the existing
+missing RexEngine.GL4.glsl warning. Transient probes, results, and build logs are
+outside the repository at `D:/Captures/shutdown-review-2026-11-08`.
+
+The user's original killed run supplied no dump, so this establishes reproduced
+failure mechanisms and their fixes without identifying that particular hang.
+Buffer upload identity/cost, swap-window disposal scheduling, and Prestige asphalt
+sharing remain deferred.
+
+## Optional full teardown for leak checking (November 8)
+
+`osgEarth::finalize()` is the opt-in final operation. It drains retirement, stops
+and joins the scheduler, flushes OSG's deferred-deletion queue, and actually deletes
+the Registry, its shared ObjectReleaser, every job pool, and the weejobs runtime.
+The default normal-exit path is unchanged and needs no call on any platform.
+
+```cpp
+osgEarth::initialize();
+{
+    // Own and run the viewer, scene, and other osgEarth objects here.
+    // Stop traversal, graphics, and external producer threads before leaving.
+}
+osgEarth::finalize();
+```
+
+Call from one external controller while the application is still running, after
+releasing application-owned osgEarth objects, retirement clients, and job handles.
+Do not call from a worker, during static/DLL destruction, or concurrently with
+other application API calls/finalizers. Running internal jobs may finish during
+shutdown, but no external producer may submit more work. This call waits for
+active jobs/destructors; it cannot force an uncooperative job to finish.
+
+Finalization is terminal and safe to repeat, including before initialization.
+`Registry::instance()` subsequently returns null; `initialize()` rejects restart
+with `std::logic_error`. Standalone weejobs users can call `jobs::destroy()` under
+the same controller/ownership conditions. It invalidates pool/metrics pointers and
+contexts, clears the singleton pointer, and prevents recreation. Later runtime
+access throws `std::logic_error`; `jobs::alive()` returns false, and repeated
+`shutdown()`/`destroy()` calls do nothing. `jobs::shutdown()` alone still retains
+stopped pools and valid handles. Neither finalizer allocates an unused singleton
+just to delete it. Only allocation-free static bookkeeping remains.
+
+Services remain available while completing jobs, callback captures, deferred OSG
+objects, and Registry members are destroyed. Finalization temporarily selects
+immediate deletion in OSG's standard DeleteHandler and restores the host's policy
+afterward. All threads that could use deferred objects must already be stopped.
+Reentrant finalizer calls from cleanup on the controller do nothing. This is not
+support for unloading/reloading osgEarth or for use after finalization.
+
+Validation of the final installed build:
+
+- MSVC/Windows and GCC/Linux each passed 30 new scheduler finalization process runs:
+  unused/used runtime, active worker completion, shutdown-before-destroy, concurrent
+  first access, reentrant callback cleanup, repeated calls, and rejection of late
+  dispatch (including an obsolete explicit pool context).
+- All 30 Linux finalization runs also passed AddressSanitizer/LeakSanitizer with no
+  errors or leaks. This checks weejobs ownership; it is not a claim that every
+  third-party graphics/GDAL/OSG cache in a full application is leak-free.
+- The existing 105 scheduler/default-exit regression runs per platform passed again.
+- Fifteen installed-library probe runs verified actual Registry-owned object and
+  ObjectReleaser deletion, deferred OSG deletion, restored DeleteHandler policy,
+  finalize-before-initialize, release-before-finalize, and rejected restart.
+- A 180-frame real viewer using local composite elevation released its scene/viewer,
+  finalized twice, and exited 0 (4.238 seconds). Paging/texture tests passed all
+  268 assertions in 19 cases.
+
+`build.bat` completed and installed successfully; built/installed osgEarth DLLs match
+SHA256 `8EB97703CEF9E815EBFD6269C3375A4D42A5441AE57E08EDE2C404B37B1A345F`.
+Transient probes and results remain outside the repository in
+`D:/Captures/shutdown-review-2026-11-08`.
+
+Buffer uploads, swap-window disposal, and Prestige asphalt sharing remain deferred.

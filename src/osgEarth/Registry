@@ -41,10 +41,10 @@ namespace osgEarth
     class OSGEARTH_EXPORT Registry
     {
     public:
-        //! Access the global Registry singleton.
+        //! Access the process-lifetime Registry singleton; returns nullptr after osgEarth::finalize().
         static Registry* instance();
 
-        //! Thread-safe lazy access to the shared CPU retirement service; jobs must be running.
+        //! Thread-safe lazy access to retirement; clients created after release() dispose synchronously.
         osg::ref_ptr<ObjectReleaser> getObjectReleaser();
 
         /** Gets a default cache object - based on environment settings - unless setDefaultCache
@@ -272,7 +272,10 @@ namespace osgEarth
          */
         void releaseGLObjects(class osg::State*) const;
 
-        //! Release any resources held by the registry so it can be re-used
+        /** Optional terminal, idempotent shutdown while the process is still running; not needed for normal exit.
+         * Stop scene traversal and external producers first. Waits for workers; never call from a job.
+         * The runtime cannot be restarted after release. Shared services otherwise have process lifetime.
+         */
         void release();
 
         //! Register singleton objects with the registry and defer
@@ -307,6 +310,7 @@ namespace osgEarth
     protected:
         Registry();
 
+        std::atomic<bool> _released{false};
         mutable std::mutex _regMutex;
         osg::ref_ptr<ObjectReleaser> _objectReleaser;
 

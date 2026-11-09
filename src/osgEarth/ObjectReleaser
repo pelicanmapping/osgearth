@@ -36,7 +36,8 @@ namespace osgEarth
 
             /** Takes every reference, leaving objects empty. Thread-safe; does not wait for destruction.
              * Explicit unloads may exceed the admission thresholds to avoid blocking or retaining live content.
-             * After service shutdown (or with no service), releases synchronously for terminal teardown.
+             * After orderly service shutdown (or with no service), releases synchronously.
+             * The shared service has process lifetime; normal process exit does not drain pending batches.
              * Allocation failures propagate; call only after retaining and detaching the objects safely.
              */
             void release(Objects& objects) const;
@@ -63,7 +64,7 @@ namespace osgEarth
         //! Creates an independent accounting handle with a stable profiling label; thread-safe.
         Client createClient(const std::string& label);
 
-        //! Closes submission and drains all accepted work before jobs shutdown; stop scene traversal first.
+        //! Optional orderly shutdown: closes submission and drains before jobs stop; not required for process exit.
         void shutdown();
 
         /** Retains a value (including a future handle) until worker release, closing completion/reset races.

@@ -15,6 +15,7 @@
 #include "ScriptEngine"
 
 #include <osg/ArgumentParser>
+#include <osg/DeleteHandler>
 #include <osgText/Font>
 #include <osgDB/Registry>
 
@@ -33,13 +34,16 @@ using namespace osgEarth;
 
 #define LC "[Registry] "
 
-// define the threading library singleton
+// The shared scheduler has process lifetime; ordinary application exit requires no shutdown call.
 WEEJOBS_INSTANCE;
 
 void osgEarth::initialize()
 {
     // Create the registry singleton.
-    Registry::instance()->getCapabilities();
+    auto* registry = Registry::instance();
+    if (!registry)
+        throw std::logic_error("osgEarth has been finalized");
+    registry->getCapabilities();
     
     // Tell the weetjobs library how to set a thread name
     jobs::set_thread_name_function([](const char* value) {
@@ -295,50 +299,90 @@ Registry::~Registry()
     OE_INFO << "Goodbye." << std::endl;
 }
 
-// Destroy the registry explicitly: this is called in an atexit() hook.  See comment in
-// Registry::instance(bool reset).
 namespace
 {
-    static bool g_registry_created = false;
-    static bool g_registry_destroyed = false;
-
-    static std::once_flag g_registry_once;
-    static Registry* g_registry = nullptr;
-
-    void destroyRegistry()
+    // Only explicit finalization deletes the singleton; this static bookkeeping owns no heap storage.
+    struct RegistryStorage
     {
-        if (g_registry)
-        {
-            g_registry->release();
-            delete g_registry;
-            g_registry = nullptr;
-            g_registry_destroyed = true;
-        }
+        std::once_flag initialized;
+        std::atomic<Registry*> value{nullptr};
+        bool finalizing = false;
+        std::atomic<bool> finalized{false};
+    };
+
+    //! Returns shared bookkeeping; finalization requires an external controller with other callers stopped.
+    RegistryStorage& registryStorage()
+    {
+        static RegistryStorage storage;
+        return storage;
     }
+
+    struct ImmediateDeletion
+    {
+        osg::DeleteHandler* handler = osg::Referenced::getDeleteHandler();
+        unsigned frames = handler ? handler->getNumFramesToRetainObjects() : 0u;
+
+        //! Flushes deferred OSG objects after all workers/graphics threads have stopped, retaining service access.
+        ImmediateDeletion()
+        {
+            if (handler)
+            {
+                handler->setNumFramesToRetainObjects(0);
+                handler->flushAll();
+            }
+        }
+
+        //! Restores the host's deletion policy; no application-owned objects may outlive finalization.
+        ~ImmediateDeletion()
+        {
+            if (handler)
+                handler->setNumFramesToRetainObjects(frames);
+        }
+    };
 }
 
 Registry*
 Registry::instance()
 {
-    std::call_once(g_registry_once, []() 
-        {
-            g_registry = new Registry();
-            g_registry_created = true;
-            g_registry_destroyed = false;
-            std::atexit(destroyRegistry);
-        });
-
-    if (g_registry_destroyed)
-    {
+    auto& storage = registryStorage();
+    if (storage.finalized.load())
         return nullptr;
-    }
+    std::call_once(storage.initialized, [&]() { storage.value.store(new Registry()); });
+    return storage.value.load();
+}
 
-    if (g_registry_created == true && g_registry == nullptr)
+void osgEarth::finalize()
+{
+    auto& storage = registryStorage();
+    if (storage.finalized.load() || storage.finalizing)
+        return;
+    storage.finalizing = true;
+    try
     {
-        OE_HARD_ASSERT(false, "Registry::instance() called recursively. Contact support.");
-    }
+        auto* registry = storage.value.load();
+        if (registry)
+            registry->release();
+        else if (auto* runtime = jobs::detail::owner().value.load())
+            runtime->shutdown(); // Do not allocate a runtime solely to finalize an unused library.
 
-    return g_registry;
+        // Workers have stopped. Deferred scene destruction and Registry-owned fields may still consult
+        // services, so keep both singletons available until Registry destruction has finished.
+        ImmediateDeletion immediate;
+        // A completing job or deferred destructor may have requested the first Registry during shutdown.
+        registry = storage.value.load();
+        if (registry)
+            registry->release();
+        delete registry;
+        storage.value.store(nullptr);
+        storage.finalized.store(true);
+        jobs::destroy();
+        storage.finalizing = false;
+    }
+    catch (...)
+    {
+        storage.finalizing = false;
+        throw;
+    }
 }
 
 void
@@ -361,19 +405,33 @@ Registry::getObjectReleaser()
 {
     std::lock_guard<std::mutex> lock(_regMutex);
     if (!_objectReleaser.valid())
+    {
         _objectReleaser = new ObjectReleaser();
+        if (_released)
+            _objectReleaser->shutdown(); // Newly created and empty; late clients release synchronously.
+    }
     return _objectReleaser;
 }
 
 void
 Registry::release()
 {
+    if (_released.exchange(true))
+        return;
+
     // ensure that _defaultCache cleans up before weejobs shutdown
     _defaultCache = nullptr;
 
-    // Stop traversal/producers before release. Drain CPU retirement while jobs and engine services still exist.
-    if (_objectReleaser.valid())
-        _objectReleaser->shutdown();
+    // A finishing worker may still request its first disposal client. Snapshot under the creation lock;
+    // _released makes any subsequently created service synchronous, without opening another dispatcher.
+    osg::ref_ptr<ObjectReleaser> releaser;
+    {
+        std::lock_guard<std::mutex> lock(_regMutex);
+        releaser = _objectReleaser;
+    }
+    // Drain outside the registry lock: retired objects may themselves query engine services.
+    if (releaser.valid())
+        releaser->shutdown();
 
     // shut down running jobs:
     WEEJOBS_NAMESPACE::instance().shutdown();
@@ -396,7 +454,7 @@ Registry::release()
     // Dereference all registered singletons
     _singletons.clear();
     _namedSingletons.clear();
-    _objectReleaser = nullptr;
+    // Keep the stopped service available for late object destructors; never create a new disposal worker.
 }
 
 osg::ref_ptr<SpatialReference>

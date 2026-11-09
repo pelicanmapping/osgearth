@@ -108,6 +108,7 @@ thread_local std::vector<ObjectReleaser::Queue*> ObjectReleaser::State::active;
 
 ObjectReleaser::ObjectReleaser() : _state(std::make_shared<State>())
 {
+    _state->stopped = !jobs::alive();
     _state->job.name = "Destroy retired objects";
     _state->job.pool = jobs::get_pool("oe.dispose", 1);
     _state->job.pool->set_can_steal_work(false);

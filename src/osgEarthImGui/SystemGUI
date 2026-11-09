@@ -68,6 +68,33 @@ namespace osgEarth
         float _fontScale = 1.0f;
         bool _first = true;
 
+#ifdef _WIN32
+        // Shared across panels to match the process-wide Registry DPR function.
+        inline static bool _autoDPR = true;
+
+        //! Apply Windows DPI scaling or unit scaling before rendering starts or on the GUI thread.
+        static void applyAutoDPR()
+        {
+            if (_autoDPR)
+            {
+                Registry::instance()->setDevicePixelRatioFunction([](osg::GraphicsContext* gc)
+                    {
+                        if (gc)
+                        {
+                            auto win = dynamic_cast<osgViewer::GraphicsWindowWin32*>(gc);
+                            if (win) return GetDpiForWindow(win->getHWND()) / 96.0f;
+                        }
+                        return GetDpiForSystem() / 96.0f;
+                    });
+            }
+            else
+            {
+                Registry::instance()->setDevicePixelRatioFunction(
+                    [](osg::GraphicsContext*) { return 1.0f; });
+            }
+        }
+#endif
+
         //! Editable snapshot; native ICO setters are applied together between frames.
         struct ICOSettings
         {
@@ -184,28 +211,45 @@ namespace osgEarth
         }
 
     public:
+        //! Initialize default DPI scaling; subsequently loaded settings can override it.
         SystemGUI() : ImGuiPanel("System"),
             _renderViewNormals(false), _renderModelNormals(false),
             _renderWinding(false), _renderOutlines(false),
-            _showArenaControls(false) {}
+            _showArenaControls(false)
+        {
+#ifdef _WIN32
+            applyAutoDPR();
+#endif
+        }
 
         void load(const Config& conf) override
         {
             conf.get("System.fontScale", _fontScale);
+#ifdef _WIN32
+            if (conf.get("System.autoDPR", _autoDPR))
+                applyAutoDPR();
+#endif
         }
 
         void save(Config& conf) override
         {
             conf.set("System.fontScale", _fontScale);
+#ifdef _WIN32
+            conf.set("System.autoDPR", _autoDPR);
+#endif
+        }
+
+        //! Refresh UI scaling on the GUI thread, including when this panel is closed.
+        void update(osg::RenderInfo& ri) override
+        {
+            _dpr = Registry::instance()->getDevicePixelRatio(ri.getCurrentCamera()->getGraphicsContext());
+            ImGui::GetIO().FontGlobalScale = _dpr * _fontScale;
         }
 
         void draw(osg::RenderInfo& ri) override
         {
             if (!isVisible())
                 return;
-
-            _dpr = Registry::instance()->getDevicePixelRatio(ri.getCurrentCamera()->getGraphicsContext());
-            ImGui::GetIO().FontGlobalScale = _dpr * _fontScale;
 
             ImGui::Begin(name(), visible());
             {
@@ -327,32 +371,14 @@ namespace osgEarth
 
 #ifdef _WIN32
                 ImGui::Separator();
-                static bool autoDPR = false;
                 static float manualDPR = 1.0f;
-                if (ImGui::Checkbox("Automatic DPR", &autoDPR))
+                if (ImGui::Checkbox("Automatic DPR", &_autoDPR))
                 {
-                    if (autoDPR)
-                    {
-                        // configure osgEarth:
-                        Registry::instance()->setDevicePixelRatioFunction([](osg::GraphicsContext* gc)
-                            {
-                                if (gc)
-                                {
-                                    auto win = dynamic_cast<osgViewer::GraphicsWindowWin32*>(gc);
-                                    if (win) return GetDpiForWindow(win->getHWND()) / 96.0f;
-                                }
-                                return GetDpiForSystem() / 96.0f;
-                            });
-                    }
-                    else
-                    {
-                        Registry::instance()->setDevicePixelRatioFunction(
-                            [&](osg::GraphicsContext*) { return 1.0f; });
-
-                    }
+                    applyAutoDPR();
+                    dirtySettings();
                 }
 
-                if (autoDPR)
+                if (_autoDPR)
                 {
                     ImGui::SameLine();
                     ImGui::Text("(%.1f)", _dpr);

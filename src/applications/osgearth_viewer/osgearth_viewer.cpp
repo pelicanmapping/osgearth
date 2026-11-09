@@ -8,6 +8,7 @@
 #include <osgEarth/ExampleResources>
 #include <osgEarth/MapNode>
 #include <osgEarth/PhongLightingEffect>
+#include <osgEarth/Registry>
 #include <osgGA/TrackballManipulator>
 #include <iostream>
 
@@ -15,6 +16,8 @@
 
 #ifdef _WIN32
 #include <osgEarth/Gamepad>
+#include <windows.h>
+#include <osgViewer/api/Win32/GraphicsWindowWin32>
 #endif
 
 #define LC "[viewer] "
@@ -52,6 +55,19 @@ main(int argc, char** argv)
 
     // start up osgEarth
     osgEarth::initialize(arguments);
+
+#ifdef _WIN32
+    // Use the window's DPI for map symbols and text, with system DPI as the fallback.
+    Registry::instance()->setDevicePixelRatioFunction([](osg::GraphicsContext* gc)
+        {
+            if (gc)
+            {
+                auto win = dynamic_cast<osgViewer::GraphicsWindowWin32*>(gc);
+                if (win) return GetDpiForWindow(win->getHWND()) / 96.0f;
+            }
+            return GetDpiForSystem() / 96.0f;
+        });
+#endif
 
     // create a simple view
     osgViewer::Viewer viewer(arguments);

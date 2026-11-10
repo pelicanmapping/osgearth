@@ -1,0 +1,466 @@
+<map name="Prestige Demo"
+    xmlns:prestige="osgEarthPrestige">
+  <TMSImage name="Worldwide High Resolution Imagery" texture_compression="auto">
+    <url>http://vr-theworld.com/vr-theworld/tiles/1.0.0/142/</url>
+  </TMSImage>
+  <xi:include href="readymap_imagery.xml" texture_compression="auto" open="false"/>
+  <xi:include href="readymap_elevation.xml"/>
+  <!-- OpenFreeMap / OpenMapTiles / OpenStreetMap contributors.
+       Vector strokes and Prestige labels require OSGEARTH_ENABLE_SLUGHORN=ON. -->
+  <XYZFeatures name="OpenFreeMap administrative boundaries">
+    <url>https://tiles.openfreemap.org/planet/latest</url>
+    <layers>boundary</layers>
+    <l2_cache_size>32</l2_cache_size>
+  </XYZFeatures>
+
+  <!-- max_level limits visibility as well as paging; boundaries stop after LOD 12. -->
+  <FeatureImage name="Country and state boundaries" mode="vector" max_level="12">
+    <features>OpenFreeMap administrative boundaries</features>
+    <styles>
+      <style type="text/css"><![CDATA[
+        states {
+          select: feature.tile_level >= 4 && feature.properties.maritime != 1 &&
+              feature.properties.admin_level >= 3 && feature.properties.admin_level <= 4;
+          stroke: #ded9cd;
+          stroke-width: 0.75px;
+          stroke-opacity: 0.45;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }
+        countries {
+          select: feature.properties.admin_level == 2 && feature.properties.maritime != 1;
+          stroke: #eee8d9;
+          stroke-width: 1px;
+          stroke-opacity: 0.6;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }
+      ]]></style>
+    </styles>
+  </FeatureImage>
+
+  <XYZFeatures name="OpenFreeMap major places">
+    <url>https://tiles.openfreemap.org/planet/latest</url>
+    <layers>place</layers>
+    <l2_cache_size>32</l2_cache_size>
+    <!-- OpenMapTiles ranks 1-10 identify the most important cities.
+         Filtering runs when source tiles load, not during frame rendering.
+         Schema: https://openmaptiles.org/docs/schema/#place -->
+    <filters>
+      <script><![CDATA[
+        ['country', 'state', 'province'].indexOf(feature.properties['class']) >= 0 ||
+        (feature.properties['class'] === 'city' &&
+         feature.properties.rank >= 1 && feature.properties.rank <= 10);
+      ]]></script>
+    </filters>
+  </XYZFeatures>
+
+  <prestige:labels name="Countries, states and major cities">
+    <features>OpenFreeMap major places</features>
+    <text_attribute>name:en</text_attribute>
+    <fallback_text_attribute>name</fallback_text_attribute>
+    <rank_attribute>rank</rank_attribute>
+    <declutter_padding>3</declutter_padding>
+    <tile_pixels>512</tile_pixels>
+    <!-- Keep paging through 14: the last style ends at 13, so level 14 has no labels.
+         Label levels use source Web Mercator tiles, independently of terrain LOD. -->
+    <max_level>14</max_level>
+    <styles>
+      <style classes="country" min_level="0" max_level="5" priority="900">
+        text-size: 22; text-fill: #f5f1e8;
+        text-halo: #202832; text-halo-width: 1.5px; text-halo-softness: 0;
+        text-halo-backdrop-type: outline;
+      </style>
+      <style classes="state,province" min_level="3" max_level="8" priority="800">
+        text-size: 18; text-fill: #e8e6de;
+        text-halo: #202832; text-halo-width: 1.5px; text-halo-softness: 0;
+        text-halo-backdrop-type: outline;
+      </style>
+      <style classes="city" min_level="6" max_level="13" priority="700">
+        text-size: 16; text-fill: #f5f1e8;
+        text-halo: #202832; text-halo-width: 1.5px; text-halo-softness: 0;
+        text-halo-backdrop-type: outline;
+      </style>
+    </styles>
+  </prestige:labels>
+
+  <ThreeDTiles name="Prestige Buildings" caching="true">
+    <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/tileset.json</url>
+    <max_sse>15</max_sse>
+  </ThreeDTiles>
+  <prestige:grime name="Grime">
+    <opacity>0.5</opacity>
+    <model>Prestige Buildings</model>
+    <anchor>-71.06,42.36,0</anchor>
+    <seed>17</seed>
+    <volume_size>128</volume_size>
+    <amount>1.0</amount>
+    <tint>0.135,0.130,0.124</tint>
+    <macro_period>7.5</macro_period>
+    <streak_period>1.2,1.2,6.8</streak_period>
+    <!-- Start with smoother stains so the change shows on the matte building skins.
+          Tune these live in LayersGUI; roughen_only=true is useful for dry deposits. -->
+    <roughness>0.25</roughness>
+    <roughness_amount>0.8</roughness_amount>
+    <roughen_only>false</roughen_only>
+    <!-- Smooth materials keep their roughness and receive only 15% of the stain. -->
+    <smooth_threshold>0.2</smooth_threshold>
+    <smooth_feather>0.15</smooth_feather>
+    <smooth_amount>0.15</smooth_amount>
+  </prestige:grime>
+  <XYZFeatures name="data:osm">
+    <url>https://readymap.org/readymap/mbtiles/osm/{z}/{x}/{-y}.pbf</url>
+    <min_level>14</min_level>
+    <max_level>14</max_level>
+    <profile>spherical-mercator</profile>
+    <format>pbf</format>
+    <fid_attribute>@id</fid_attribute>
+    <attribution>OpenStreetMap contributors</attribution>
+  </XYZFeatures>
+  <prestige:vegetation name="Prestige Vegetation">
+    <sources>
+      <source name="osm">
+        <features>data:osm</features>
+      </source>
+      <!--
+      <source name="roads">
+        <features>Prestige road vectors</features>
+      </source>
+      -->
+      <source name="edits">
+        <overlay>
+          <type name="clearing" label="Clear vegetation" geometry="polygon">
+            <attribute key="vegetation:exclude" value="yes" />
+          </type>
+          <type name="building" label="Building footprint" geometry="polygon">
+            <attribute key="building" value="yes" />
+          </type>
+          <type name="water" label="Water area" geometry="polygon">
+            <attribute key="natural" value="water" />
+          </type>
+          <type name="path" label="Path (4m buffer each side)" geometry="line">
+            <attribute key="highway" value="path" />
+          </type>
+        </overlay>
+      </source>
+    </sources>
+    <!-- Authoring vocabulary only. Matching coverage rules below own buffers and population policy. -->
+    <coverage>
+      <rule source="edits" key="vegetation:exclude" value="yes" action="exclude"/>
+      <!-- Natural populations use OSM. Agricultural groups are included only by their row rules. -->
+      <rule source="osm" group="trees" key="natural" value="wood" action="include"/>
+      <rule source="osm" group="trees" key="landuse" value="forest" action="include"/>
+      <rule source="osm" group="shrubs" key="natural" value="wood" action="include"/>
+      <rule source="osm" group="shrubs" key="landuse" value="forest" action="include"/>
+      <rule source="osm" group="grass" key="natural" value="wood" action="include"/>
+      <rule source="osm" group="grass" key="landuse" value="forest" action="include"/>
+      <rule source="osm" group="undergrowth" key="natural" value="wood" action="include"/>
+      <rule source="osm" group="undergrowth" key="landuse" value="forest" action="include"/>
+      <rule source="osm" group="trees" key="natural" value="tree" action="points"/>
+      <!-- Agriculture replaces background random scatter where OSM land-use polygons overlap woodland. -->
+      <rule source="osm" group="trees" key="landuse" value="orchard" action="include" density="0" priority="100"/>
+      <rule source="osm" group="trees" key="landuse" value="vineyard" action="include" density="0" priority="100"/>
+      <rule source="osm" group="trees" key="landuse" value="farmland" action="include" density="0" priority="100"/>
+      <rule source="osm" group="shrubs" key="landuse" value="orchard" action="include" density="0" priority="100"/>
+      <rule source="osm" group="shrubs" key="landuse" value="vineyard" action="include" density="0" priority="100"/>
+      <rule source="osm" group="shrubs" key="landuse" value="farmland" action="include" density="0" priority="100"/>
+      <rule source="osm" group="grass" key="landuse" value="orchard" action="include" density="0" priority="100"/>
+      <rule source="osm" group="grass" key="landuse" value="vineyard" action="include" density="0" priority="100"/>
+      <rule source="osm" group="grass" key="landuse" value="farmland" action="include" density="0" priority="100"/>
+      <rule source="osm" group="undergrowth" key="landuse" value="orchard" action="include" density="0" priority="100"/>
+      <rule source="osm" group="undergrowth" key="landuse" value="vineyard" action="include" density="0" priority="100"/>
+      <rule source="osm" group="undergrowth" key="landuse" value="farmland" action="include" density="0" priority="100"/>
+      <!-- Specific perennial land use overrides any broader farmland polygon in the crop population. -->
+      <rule source="osm" group="crop_rows" key="landuse" value="orchard" action="include" density="0" priority="200"/>
+      <rule source="osm" group="crop_rows" key="landuse" value="vineyard" action="include" density="0" priority="200"/>
+      <!-- World mode needs no origin metadata. Spacing and grid-north headings below are visual defaults. -->
+      <rule name="osm-orchards" source="osm" group="orchards" key="landuse" value="orchard" action="include" strategy="rows" priority="100">
+        <placement origin_mode="world" heading="15" row_spacing="10" plant_spacing="7"/>
+      </rule>
+      <rule name="osm-vineyards" source="osm" group="vineyards" key="landuse" value="vineyard" action="include" strategy="rows" priority="100">
+        <placement origin_mode="world" heading="0" heading_attribute="vine_row_orientation" row_spacing="5" plant_spacing="2"/>
+      </rule>
+      <rule name="osm-crops" source="osm" group="crop_rows" key="landuse" value="farmland" action="include" strategy="rows" priority="100">
+        <placement origin_mode="world" heading="75" row_spacing="3" plant_spacing="1.5"/>
+      </rule>
+      <!-- All populations share OSM exclusions. Explicit mapped trees bypass line buffers; polygon exclusions still apply. -->
+      <rule key="building" value="*" except="no" action="exclude"/>
+      <rule key="natural" value="water" action="exclude"/>
+      <rule key="waterway" value="riverbank" action="exclude"/>
+      <!-- Buffer is half-width, in meters; road-class/width attributes can be refined later. -->
+      <rule key="highway" value="*" except="no" action="exclude" buffer="4"/>
+    </coverage>
+    <seed>17</seed>
+    <asset_budget_mb>64</asset_budget_mb>
+    <assets>
+      <asset canopy_trees="5" name="broadleaf" near="../data/prestige/vegetation/pbr/broadleaf-near.osg" coarse="../data/prestige/vegetation/pbr/broadleaf-coarse.osg" canopy="../data/prestige/vegetation/pbr/broadleaf-canopy.osg"/>
+      <asset canopy_trees="5" name="conifer" near="../data/prestige/vegetation/pbr/conifer-near.osg" coarse="../data/prestige/vegetation/pbr/conifer-coarse.osg" canopy="../data/prestige/vegetation/pbr/conifer-canopy.osg"/>
+      <asset name="shrub" near="../data/prestige/vegetation/pbr/shrub-near.osg" coarse="../data/prestige/vegetation/pbr/shrub-coarse.osg"/>
+      <asset name="grass-tuft" near="../data/prestige/vegetation/pbr/grass-tuft-near.osg" coarse="../data/prestige/vegetation/pbr/grass-tuft-coarse.osg"/>
+      <asset name="fern" near="../data/prestige/vegetation/pbr/fern-near.osg" coarse="../data/prestige/vegetation/pbr/fern-coarse.osg"/>
+      <asset name="boulder" near="../data/prestige/vegetation/pbr/boulder-near.osg" coarse="../data/prestige/vegetation/pbr/boulder-coarse.osg"/>
+      <asset name="canopy-cluster" near="../data/prestige/vegetation/pbr/canopy-cluster-near.osg" coarse="../data/prestige/vegetation/pbr/canopy-cluster-coarse.osg"/>
+    </assets>
+    <profile>global-geodetic</profile>
+    <elevation_resolution>10m</elevation_resolution>
+    <groups>
+      <!-- Coarse render batches support long tree ranges; placement identity remains tied to source cells. -->
+      <group name="trees" asset="trees" density="10000" cell_level="16" render_cell_level="14" canopy="true" canopy_far="true" quality_offset="128" canopy_mid_strategy="exact" canopy_far_strategy="coverage" canopy_mid_retention="0.9" canopy_far_retention="0.5" canopy_mid_gpu_culling="true" canopy_far_gpu_culling="true" canopy_transition="0.25" canopy_fade_seconds="0.4" max_range="30000" lod_pixels="96">
+        <models>
+          <model>broadleaf</model>
+          <model>conifer</model>
+        </models>
+      </group>
+      <group enabled="false" name="shrubs" asset="shrubs" density="4500" cell_level="18" render_cell_level="16" max_range="700" lod_pixels="48" density_start="150" density_end="550" far_density="0.5">
+        <models>
+          <model>shrub</model>
+        </models>
+      </group>
+      <group enabled="false" name="grass" asset="grass" density="1120000" cell_level="20" render_cell_level="17" max_range="200" lod_pixels="18" density_start="25" density_end="160" far_density="0.2">
+        <models>
+          <model>grass-tuft</model>
+        </models>
+      </group>
+      <group enabled="false" name="undergrowth" asset="undergrowth" density="48000" cell_level="19" render_cell_level="17" max_range="280" lod_pixels="28" density_start="50" density_end="220" far_density="0.35">
+        <models>
+          <model>fern</model>
+        </models>
+      </group>
+      <group name="rocks" enabled="false" asset="rocks" density="1100" cell_level="17" render_cell_level="15" max_range="1000" lod_pixels="40">
+        <models>
+          <model>boulder</model>
+        </models>
+      </group>
+      <!-- Starter proxies make the planting patterns readable; crop/vine art is provisional.
+               These populations keep independent controls; coarser render batches suit continuous agricultural coverage. -->
+      <group enabled="false" name="orchards" asset="trees" density="1" cell_level="18" render_cell_level="15" max_range="2500" lod_pixels="48" min_scale="0.55" max_scale="0.605">
+        <models>
+          <model>broadleaf</model>
+        </models>
+      </group>
+      <group enabled="false" name="vineyards" asset="shrubs" density="1" cell_level="18" render_cell_level="15" max_range="1200" lod_pixels="24" min_pixels="0.1" min_scale="1.5" max_scale="1.6">
+        <models>
+          <model>shrub</model>
+        </models>
+      </group>
+      <group enabled="false" name="crop_rows" asset="grass" density="1" cell_level="18" render_cell_level="15" max_range="1000" lod_pixels="12" min_pixels="0.1" min_scale="1.5" max_scale="1.6">
+        <models>
+          <model>fern</model>
+        </models>
+      </group>
+    </groups>
+  </prestige:vegetation>
+
+  <MBTilesElevation name="Prestige grading (LOCAL)" open="false">
+    <filename>D:/data/prestige/roads/grading.mbtiles</filename>
+    <format>tif</format>
+    <tile_size>513</tile_size>
+  </MBTilesElevation>
+
+  <XYZElevation name="Prestige grading (S3)">
+    <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/grading/{z}/{x}/{y}.tif</url>
+    <profile>global-geodetic</profile>
+    <min_level>15</min_level>
+    <max_level>15</max_level>
+    <tile_size>513</tile_size>
+  </XYZElevation>
+
+  <XYZFeatures name="Prestige road vectors (S3)">
+    <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/vectors/15/{x}/{y}.fgb</url>
+    <format>fgb</format>
+    <profile>global-geodetic</profile>
+    <min_level>15</min_level>
+    <max_level>15</max_level>
+  </XYZFeatures>
+
+
+  <!-- Asphalt keeps its textured PBR splatting; the FeatureImage layer below draws gutters, curbs,
+       and road markings on top in stylesheet order. -->
+  <prestige:surface_splatting name="Prestige asphalt">
+    <features>Prestige road vectors (S3)</features>
+    <filters>
+      <prestige_select attribute="material" values="asphalt" />
+    </filters>
+    <texture_period>1</texture_period>
+    <coverage_outline>false</coverage_outline>
+    <!-- Splatting angle cutoff, degrees from level; default 90 disables slope suppression. -->
+    <max_slope>90</max_slope>
+    <min_level>15</min_level>
+    <max_data_level>17</max_data_level>
+    <tile_size>512</tile_size>
+    <buffer_width>0m</buffer_width>
+    <material color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-color.png" packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-pbr.png" normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-normal.png" displacement="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-height.png" layout="orm" />
+    <cache_policy usage="no_cache" />
+  </prestige:surface_splatting>
+
+  <!-- Raster comparison uses the same source, styles, and data LODs as the vector layer above.
+       Enable one comparison layer at a time in LayersGUI to compare rendering and frame rate. -->
+  <FeatureImage name="Prestige road surfaces (raster)" mode="raster" min_level="16" max_data_level="18" buffer_width="5m" visible="true" min_range="125">
+    <features>Prestige road vectors (S3)</features>
+    <styles>
+      <style type="text/css">
+        <![CDATA[
+          gutter {
+            select: feature.properties.material === 'gutter';
+            stroke: #aaa69c;
+            stroke-width: feature.properties.width;
+            stroke-width-units: meters;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+          }
+          curb {
+            select: feature.properties.material === 'curb';
+            stroke: #cbc6b8;
+            stroke-width: feature.properties.width;
+            stroke-width-units: meters;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+          }
+          white {
+            select: feature.properties.material === 'white';
+            stroke: #f2f2ee;
+            stroke-width: feature.properties.width;
+            stroke-width-units: meters;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+          }
+          yellow {
+            select: feature.properties.material === 'yellow';
+            stroke: #e8c23a;
+            stroke-width: feature.properties.width;
+            stroke-width-units: meters;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+          }
+        ]]>
+      </style>
+    </styles>
+    <cache_policy usage="no_cache" />
+  </FeatureImage>
+
+  <!-- Curbs, gutters, and road markings as GPU strokes (build with OSGEARTH_ENABLE_SLUGHORN=ON).
+       Re-exported centerlines carry material and width (full stroke width in meters).
+       Styles below control the active materials and their cap settings.
+       Source features exist at LOD 15; vector atlases are built at LOD 17 and inherited by finer terrain. -->
+  <FeatureImage name="Prestige road surfaces (vector)" mode="vector" min_level="18" max_data_level="18" buffer_width="5m" vector_fade_start="200" vector_fade_cutoff="100">
+    <features>Prestige road vectors (S3)</features>
+    <!-- One FIL pass: selector styles reference this bindless PBR palette. -->
+    <materials>
+      <material name="concrete" color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/concrete-color.png"
+        normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/concrete-normal.png"
+        packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/concrete-pbr.png" layout="orm" />
+      <material name="paint-white" color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-white-color.png"
+        normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-white-normal.png"
+        packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-white-pbr.png" layout="orm" />
+      <material name="paint-yellow" color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-yellow-color.png"
+        normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-yellow-normal.png"
+        packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-yellow-pbr.png" layout="orm" />
+    </materials>
+    <styles>
+      <style type="text/css">
+        <![CDATA[
+          gutter {
+            stroke-material: concrete;
+            stroke-material-period: 1m;
+            select: feature.properties.material === 'gutter';
+            stroke: #aaa69c;
+            stroke-width: feature.properties.width;
+            stroke-width-units: meters;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+          }
+          curb {
+            stroke-material: concrete;
+            stroke-material-period: 1m;
+            select: feature.properties.material === 'curb';
+            stroke: #cbc6b8;
+            stroke-width: feature.properties.width;
+            stroke-width-units: meters;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+          }
+          white {
+            stroke-material: paint-white;
+            stroke-material-period: 1m;
+            select: feature.properties.material === 'white';
+            stroke: #f2f2ee;
+            stroke-width: feature.properties.width;
+            stroke-width-units: meters;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+          }
+          yellow {
+            stroke-material: paint-yellow;
+            stroke-material-period: 1m;
+            select: feature.properties.material === 'yellow';
+            stroke: #e8c23a;
+            stroke-width: feature.properties.width;
+            stroke-width-units: meters;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+          }
+        ]]>
+      </style>
+    </styles>
+    <cache_policy usage="no_cache" />
+  </FeatureImage>
+
+  <XYZFeatures name="Prestige trench footprints">
+    <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/trenches/{z}/{x}/{y}.fgb</url>
+    <format>fgb</format>
+    <profile>global-geodetic</profile>
+    <min_level>15</min_level>
+    <max_level>15</max_level>
+  </XYZFeatures>
+
+  <TerrainConstraint name="Prestige trench cut" features="Prestige trench footprints">
+    <remove_interior>true</remove_interior>
+    <min_level>15</min_level>
+  </TerrainConstraint>
+
+  <XYZFeatures name="Prestige deck landing lines">
+    <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/landings/{z}/{x}/{y}.fgb</url>
+    <format>fgb</format>
+    <profile>global-geodetic</profile>
+    <min_level>15</min_level>
+    <max_level>15</max_level>
+  </XYZFeatures>
+
+  <TerrainConstraint name="Prestige deck landings" features="Prestige deck landing lines">
+    <has_elevation>true</has_elevation>
+    <min_level>15</min_level>
+  </TerrainConstraint>
+
+  <XYZModel name="Prestige structures">
+    <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/models/{z}/{x}/{y}.glb</url>
+    <profile>global-geodetic</profile>
+    <min_level>15</min_level>
+    <max_level>15</max_level>
+    <local_tile_frame>true</local_tile_frame>
+  </XYZModel>
+
+  <XYZFeatures name="Prestige pavement edge lines">
+    <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/edges/{z}/{x}/{y}.fgb</url>
+    <format>fgb</format>
+    <profile>global-geodetic</profile>
+    <min_level>15</min_level>
+    <max_level>15</max_level>
+  </XYZFeatures>
+
+  <TerrainConstraint name="Prestige pavement edges" features="Prestige pavement edge lines">
+    <has_elevation>true</has_elevation>
+    <min_level>17</min_level>
+  </TerrainConstraint>
+
+  <viewpoints home="0" time="1">
+    <viewpoint name="Honolulu 1">
+      <heading>-65.8459</heading>
+      <pitch>-26.4342</pitch>
+      <range>566.647m</range>
+      <long>-157.8537422188461</long>
+      <lat>21.310599222999</lat>
+      <height>31.28900847584009</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+  </viewpoints>
+</map>

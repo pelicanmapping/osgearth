@@ -67,27 +67,38 @@
     <max_level>14</max_level>
     <styles>
       <style classes="country" min_level="0" max_level="5" priority="900">
-        text-size: 22; text-fill: #f5f1e8;
-        text-halo: #202832; text-halo-width: 1.5px; text-halo-softness: 0;
+        text-size: 22; 
+        text-fill: #f5f1e8;
+        text-halo: #202832;
+        text-halo-width: 1.5px;
+        text-halo-softness: 0;
         text-halo-backdrop-type: outline;
       </style>
-      <style classes="state,province" min_level="3" max_level="8" priority="800">
-        text-size: 18; text-fill: #e8e6de;
-        text-halo: #202832; text-halo-width: 1.5px; text-halo-softness: 0;
+      <style classes="state,province" min_level="4" max_level="8" priority="800">
+        text-size: 18;
+        text-fill: #e8e6deff;
+        text-halo: #202832ff;
+        text-halo-width: 1.5;
+        text-halo-softness: 0.51999998;
         text-halo-backdrop-type: outline;
       </style>
       <style classes="city" min_level="6" max_level="13" priority="700">
-        text-size: 16; text-fill: #f5f1e8;
-        text-halo: #202832; text-halo-width: 1.5px; text-halo-softness: 0;
+        text-size: 14;
+        text-fill: #e8e6deff;
+        text-halo: #202832ff;
+        text-halo-width: 1.64;
+        text-halo-softness: 0;
         text-halo-backdrop-type: outline;
       </style>
     </styles>
   </prestige:labels>
 
+
   <ThreeDTiles name="Prestige Buildings" caching="true">
     <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/tileset.json</url>
     <max_sse>15</max_sse>
   </ThreeDTiles>
+  
   <prestige:grime name="Grime">
     <opacity>0.5</opacity>
     <model>Prestige Buildings</model>
@@ -256,7 +267,7 @@
     <format>tif</format>
     <tile_size>513</tile_size>
   </MBTilesElevation>
-
+  
   <XYZElevation name="Prestige grading (S3)">
     <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/grading/{z}/{x}/{y}.tif</url>
     <profile>global-geodetic</profile>
@@ -272,7 +283,7 @@
     <min_level>15</min_level>
     <max_level>15</max_level>
   </XYZFeatures>
-
+  
 
   <!-- Asphalt keeps its textured PBR splatting; the FeatureImage layer below draws gutters, curbs,
        and road markings on top in stylesheet order. -->
@@ -295,7 +306,7 @@
 
   <!-- Raster comparison uses the same source, styles, and data LODs as the vector layer above.
        Enable one comparison layer at a time in LayersGUI to compare rendering and frame rate. -->
-  <FeatureImage name="Prestige road surfaces (raster)" mode="raster" min_level="16" max_data_level="18" buffer_width="5m" visible="true" min_range="125">
+  <FeatureImage name="Prestige road surfaces (raster)" mode="raster" min_level="16" max_data_level="18" buffer_width="5m" visible="true" min_range="125">    
     <features>Prestige road vectors (S3)</features>
     <styles>
       <style type="text/css">
@@ -438,7 +449,7 @@
     <max_level>15</max_level>
     <local_tile_frame>true</local_tile_frame>
   </XYZModel>
-
+  
   <XYZFeatures name="Prestige pavement edge lines">
     <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/edges/{z}/{x}/{y}.fgb</url>
     <format>fgb</format>

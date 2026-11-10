@@ -44,12 +44,29 @@ start at Honolulu and include a close-up viewpoint for inherited atlas detail.
 
 Use `max_data_level`, rather than `max_level`, to cap loading while allowing
 higher-resolution terrain to display inherited data. Source feature-profile
-limits are also honored. Atlases are authored in the requested source tile's
-normalized coordinates. REX's existing parent texture and scale/bias matrix
-therefore select the correct subregion at higher LODs. Pixel widths refer to
-pixels at the source tile's nominal `tile_size`, as with raster imagery; they
-are not constant screen-pixel widths while zooming. Meter widths are converted
-at the source tile latitude using the rasterizer's distance policy.
+limits are also honored. REX's existing parent texture and scale/bias matrix
+select the correct subregion at higher LODs. Pixel widths refer to pixels at
+the source tile's nominal `tile_size`, as with raster imagery; they are not
+constant screen-pixel widths while zooming.
+
+For spherical Mercator feature sources on geographic terrain tiles, vector
+geometry is evaluated in a shared Mercator plane. Both geometry axes use the
+same scale, preserving stroke widths, round caps, and joins at high latitudes.
+The CPU rebases geometry in double precision; the shader maps inherited terrain
+UVs and their derivatives into that plane without subtracting large world
+coordinates. Neighboring tiles share the projection and width policy, while
+the spatial grid accounts for each tile's projected aspect ratio. Slughorn's
+vendor atlas format is unchanged.
+
+Tiled Mercator sources use their equivalent source LOD for pixel widths,
+including the source's maximum LOD. Round strokes with linear-unit widths use
+latitude-dependent Mercator scale per fragment, so ground widths do not change
+at tile boundaries. Mercator tiles crossing the projection limit (about
+85.0511 degrees), angular-unit strokes, and non-round strokes requiring ground
+widths use the existing raster fallback. Other source/map combinations retain
+the rasterizer's existing distance policy. Source data must still include
+geometry crossing tile edges; the projection cannot repair missing source
+buffers or inconsistent source geometry.
 
 ## TileJSON sources
 

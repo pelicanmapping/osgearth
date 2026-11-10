@@ -6,6 +6,14 @@
 #pragma import_defines(OE_TERRAIN_BLEND_IMAGERY, OE_TERRAIN_CAST_SHADOWS)
 #pragma import_defines(OE_IS_PICK_CAMERA, OE_IS_SHADOW_CAMERA, OE_IS_DEPTH_CAMERA)
 
+#pragma import_defines(OE_FEATUREIMAGE_MATERIALS)
+#ifdef OE_FEATUREIMAGE_MATERIALS
+void oe_fil_material_begin();
+void oe_fil_material_paint(inout vec4 fill, vec2 paint, float coverage, float remaining);
+void oe_fil_material_coverage(float alpha);
+void oe_fil_material_finish(float alpha, bool composited);
+#endif
+
 #define SLUG_INDIRECTION_SIZE 32
 
 // Source-UV footprint at fade start/end. Layer configuration can request an earlier cutoff.
@@ -244,6 +252,26 @@ float oe_slug_stroke(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy, vec4 stroke, ve
         clamp(0.5 - (stroke.z + distance) / aa, 0.0, 1.0);
 }
 
+// Maps inherited geographic UVs into a shared, isotropic Mercator plane with a tile-local origin.
+// log(1+q) loses close-up precision; the small-q series evaluates the same delta without cancellation.
+// Returns false beyond Mercator's supported latitude range. Derivatives are transformed analytically.
+bool oe_slug_project(vec4 frame, vec4 extra, inout vec2 uv, inout vec2 dx, inout vec2 dy, out float secant)
+{
+    float delta = uv.y * frame.z;
+    if (abs(extra.y + delta) > 1.4844222297453324) return false;
+    // Some drivers lose relative accuracy in tan() for tiny tile-local angles.
+    float h = 0.5 * delta, h2 = h * h;
+    float t = abs(h) < 0.02 ? h * (1.0 + h2 * (1.0/3.0 + h2 * (2.0/15.0 + h2 * (17.0/315.0)))) : tan(h);
+    float q = 2.0 * t / (frame.y - (1.0 + frame.x) * t);
+    float psi = abs(q) < 0.02 ? q * (1.0 + q * (-0.5 + q * (1.0/3.0 + q * (-0.25 + q * 0.2)))) : log(1.0 + q);
+    secant = (1.0 + t*t) / (frame.y * (1.0 - t*t) - 2.0 * frame.x * t);
+    uv.y = psi * frame.w;
+    float derivative = frame.z * frame.w * secant;
+    dx.y *= derivative;
+    dy.y *= derivative;
+    return true;
+}
+
 // Samples the source atlas in the inherited raster texture coordinate frame, not child-tile UVs.
 // Ordinary raster fallback images are distinguished by a negative data-format sentinel.
 vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
@@ -262,37 +290,54 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
         raster.a *= visibility;
         return raster;
     }
+    vec2 gridScale = vec2(1.0);
+    float secant = 1.0;
+    if (header.z > 0.0)
+    {
+        vec4 frame = oe_slug_read(atlas, int(header.z));
+        vec4 extra = oe_slug_read(atlas, int(header.z) + 1);
+        if (!oe_slug_project(frame, extra, uv, dx, dy, secant))
+        {
+            vec4 background = oe_slug_read(atlas, 1);
+            background.a *= visibility;
+            return background;
+        }
+        gridScale.y = extra.x;
+        footprint = max(abs(dx) + abs(dy), vec2(1e-9));
+    }
+    vec2 gridUV = uv * gridScale;
+    vec2 gridFootprint = footprint * gridScale;
     vec4 meta = oe_slug_read(atlas, 2);
     vec2 pixelsPerEm = 1.0 / footprint;
     int gridSize = int(meta.y);
     int gridBase = int(meta.x);
     // Use the 16x16 index until the visibility cutoff; minification never scans all shapes.
-    if (max(footprint.x, footprint.y) > 1.0 / float(gridSize) && meta.w > 0.0)
+    if (max(gridFootprint.x, gridFootprint.y) > 1.0 / float(gridSize) && meta.w > 0.0)
     {
         gridSize = 16;
         gridBase = int(meta.w);
     }
-    ivec2 cell = clamp(ivec2(uv * float(gridSize)), ivec2(0), ivec2(gridSize - 1));
+    ivec2 cell = clamp(ivec2(gridUV * float(gridSize)), ivec2(0), ivec2(gridSize - 1));
     vec2 list = oe_slug_read(atlas, gridBase + cell.y * gridSize + cell.x).xy;
     // Preserve off-tile sampling without treating minification as a full-path search request.
-    bool outside = any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)));
+    bool outside = any(lessThan(gridUV, vec2(0.0))) || any(greaterThan(gridUV, vec2(1.0)));
     // Both source grids include a full cell of padding. Retain the original UVs for coverage,
     // and use a clamped edge cell when its padding also contains this fragment's AA footprint.
     if (outside)
     {
-        float footprintSize = max(footprint.x, footprint.y);
-        float overshoot = max(max(-uv.x, -uv.y), max(uv.x - 1.0, uv.y - 1.0));
+        float footprintSize = max(gridFootprint.x, gridFootprint.y);
+        float overshoot = max(max(-gridUV.x, -gridUV.y), max(gridUV.x - 1.0, gridUV.y - 1.0));
         if (gridSize != 16 && meta.w > 0.0 &&
             overshoot > 1.0 / float(gridSize) - footprintSize - 2e-7)
         {
             gridSize = 16;
-            cell = clamp(ivec2(uv * 16.0), ivec2(0), ivec2(15));
+            cell = clamp(ivec2(gridUV * 16.0), ivec2(0), ivec2(15));
             list = oe_slug_read(atlas, int(meta.w) + cell.y * 16 + cell.x).xy;
         }
         // Leave room for antialiasing and float rounding before trusting an edge-cell list.
         float padding = 1.0 / float(gridSize) - footprintSize - 2e-7;
-        if (padding >= 0.0 && all(greaterThanEqual(uv, vec2(-padding))) &&
-            all(lessThanEqual(uv, vec2(1.0 + padding)))) outside = false;
+        if (padding >= 0.0 && all(greaterThanEqual(gridUV, vec2(-padding))) &&
+            all(lessThanEqual(gridUV, vec2(1.0 + padding)))) outside = false;
     }
     int count = outside ? int(header.w) : int(list.y);
     vec4 result = vec4(0.0);
@@ -305,7 +350,8 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
             oe_slug_read(atlas, int(list.x) + i);
         int address = int(entry.x);
         vec4 band = oe_slug_read(atlas, address + 1);
-        vec2 origin = oe_slug_read(atlas, address + 3).xy;
+        vec4 paint = oe_slug_read(atlas, address + 3);
+        vec2 origin = paint.xy;
         vec2 coord = uv - origin;
         vec2 bandCoord = coord * band.xy + band.zw;
         vec2 margin = 0.5 * abs(footprint * band.xy);
@@ -313,10 +359,18 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
         if (any(lessThan(bandCoord, -margin)) ||
             any(greaterThan(bandCoord, vec2(float(SLUG_INDIRECTION_SIZE)) + margin))) continue;
         vec4 shape = oe_slug_read(atlas, address + 2);
-        float coverage = shape.w == 1.0 ? oe_slug_stroke(atlas, uv, dx, dy, shape, entry.yz) :
+        if (shape.w == 2.0)
+        {
+            vec4 radii = oe_slug_read(atlas, int(shape.z));
+            shape.z = max(radii.x, radii.y * secant) + max(radii.z, radii.w * secant);
+        }
+        float coverage = shape.w > 0.0 ? oe_slug_stroke(atlas, uv, dx, dy, shape, entry.yz) :
             slug_Render(coord, pixelsPerEm, bandCoord, int(shape.x), atlas);
         if (coverage == 0.0) continue;
         vec4 fill = oe_slug_read(atlas, address);
+#ifdef OE_FEATUREIMAGE_MATERIALS
+        oe_fil_material_paint(fill, paint.zw, coverage, remaining);
+#endif
         float alpha = fill.a * coverage;
         result += vec4(fill.rgb * alpha, alpha) * remaining;
         remaining *= 1.0 - alpha;
@@ -324,6 +378,9 @@ vec4 oe_slug_sample(sampler2D atlas, vec2 uv, vec2 dx, vec2 dy)
     }
     vec4 background = oe_slug_read(atlas, 1);
     result += vec4(background.rgb * background.a, background.a) * remaining;
+#ifdef OE_FEATUREIMAGE_MATERIALS
+    oe_fil_material_coverage(result.a);
+#endif
     if (result.a > 0.0) result.rgb /= result.a;
     result.a *= visibility;
     return result;
@@ -367,6 +424,9 @@ void oe_rex_imageLayer_FS(inout vec4 color)
 #ifndef OE_TERRAIN_RENDER_IMAGERY
     return;
 #endif
+#ifdef OE_FEATUREIMAGE_MATERIALS
+    oe_fil_material_begin();
+#endif
     // Vector layers inherit the source atlas/UV matrix, without imagery crossfades.
 #ifdef OE_USE_GL4
     if (oe_color_handle == 0UL) return;
@@ -378,6 +438,13 @@ void oe_rex_imageLayer_FS(inout vec4 color)
     vec4 texel = oe_slug_sample(oe_layer_tex, oe_layer_texc);
 #endif
     texel.a *= oe_layer_opacity;
+#ifdef OE_FEATUREIMAGE_MATERIALS
+#ifdef OE_TERRAIN_BLEND_IMAGERY
+    oe_fil_material_finish(texel.a, first);
+#else
+    oe_fil_material_finish(texel.a, false);
+#endif
+#endif
 #ifdef OE_TERRAIN_BLEND_IMAGERY
     if (first)
     {

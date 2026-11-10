@@ -1,0 +1,53 @@
+// osgEarth - Copyright 2026 Pelican Mapping - MIT License
+#pragma once
+#include <osgEarth/FeatureImageLayer>
+#include <osgEarth/TextureArena>
+#include <osgEarth/PBRMaterial>
+#include <mutex>
+#include <map>
+
+namespace osgEarth
+{
+    // Private bridge between FIL tile construction and REX. No Slughorn types cross this boundary.
+    class OSGEARTH_EXPORT FeatureImageLayerMaterials : public osg::Object
+    {
+    public:
+        META_Object(osgEarth, FeatureImageLayerMaterials);
+        //! Construct an empty palette; configuration is immutable after opening.
+        FeatureImageLayerMaterials() = default;
+        //! OSG cloning does not copy context resources or arena registrations.
+        FeatureImageLayerMaterials(const FeatureImageLayerMaterials& rhs, const osg::CopyOp& op) : osg::Object(rhs, op) { }
+        //! Load named materials and attach private palette/coordinate state before paging starts.
+        static Status open(FeatureImageLayer*);
+        //! Find the layer-owned palette, or null for ordinary color-only layers.
+        static FeatureImageLayerMaterials* get(const osg::Object*);
+        //! Resolve a configured name to its stable one-based slot; unknown names throw.
+        unsigned slot(const std::string&) const;
+        //! Register textures in this terrain arena and bind its slot map with a current GL context.
+        //! Serialized across contexts; caller applies the terrain TextureArena immediately afterwards.
+        void apply(TextureArena*, osg::State&);
+        //! Return a regional frame in double precision; camera-cell selection is serialized across views.
+        osg::Matrixd worldToMaterial(const osg::Vec3d& eye);
+        //! Per-draw local basis plus split regional origin. Matches the private GLSL SSBO layout.
+        struct Coordinates { osg::Vec4f u, v, low; };
+        //! Pack a camera-independent tile-to-material transform without rounding away the origin's low bits.
+        static Coordinates coordinates(const osg::Matrixd& localToMaterial);
+    private:
+        struct Entry { std::string name; osg::ref_ptr<PBRTexture> texture; unsigned flags = 0; };
+        std::vector<Entry> _entries;
+        struct Registration
+        {
+            osg::ref_ptr<TextureArena> arena;
+            std::vector<MaterialArena::Material::Ptr> materials;
+            std::vector<Texture::Ptr> textures;
+            std::vector<osg::Vec4ui> slots;
+            struct GLObjects : public BindlessShareableGLObjects { GLBuffer::Ptr buffer; };
+            osg::buffered_object<GLObjects> gl;
+        };
+        std::map<TextureArena*, std::shared_ptr<Registration>> _registrations;
+        std::mutex _mutex;
+        bool _fixed = false, _anchored = false;
+        osg::Vec2d _anchor;
+        osg::Matrixd _worldToMaterial;
+    };
+}

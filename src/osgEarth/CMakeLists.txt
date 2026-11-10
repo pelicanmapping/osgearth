@@ -64,6 +64,8 @@ SET(LIB_NAME osgEarth)
 
 set(TARGET_GLSL
     FeatureImageLayer.Slug.glsl
+    FeatureImageLayer.Materials.glsl
+    MaterialArena.glsl
     CascadeDraping.glsl
     Chonk.glsl
     Chonk.Culling.glsl
@@ -590,6 +592,7 @@ set(TARGET_SRC
     FeatureDisplayLayout.cpp
     FeatureElevationLayer.cpp
     FeatureImageLayer.cpp
+    FeatureImageLayerMaterials.cpp
     FeatureImageRTTLayer.cpp
     FeatureModelGraph.cpp
     FeatureModelLayer.cpp

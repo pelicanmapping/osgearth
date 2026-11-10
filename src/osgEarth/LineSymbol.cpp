@@ -4,6 +4,7 @@
  */
 #include <osgEarth/LineSymbol>
 #include <osgEarth/Style>
+#include <limits>
 
 using namespace osgEarth;
 
@@ -24,6 +25,9 @@ LineSymbol::LineSymbol(const Config& conf) :
 LineSymbol::LineSymbol(const LineSymbol& rhs, const osg::CopyOp& copyop) :
     Symbol(rhs, copyop),
     _stroke(rhs._stroke),
+    _material(rhs._material),
+    _outlineMaterial(rhs._outlineMaterial),
+    _materialPeriod(rhs._materialPeriod),
     _tessellation(rhs._tessellation),
     _creaseAngle(rhs._creaseAngle),
     _tessellationSize(rhs._tessellationSize),
@@ -42,6 +46,9 @@ LineSymbol::getConfig() const
     Config conf = Symbol::getConfig();
     conf.key() = "line";
     conf.set("stroke",       _stroke);
+    conf.set("material", material());
+    conf.set("outline_material", outlineMaterial());
+    conf.set("material_period", materialPeriod());
     conf.set("tessellation", _tessellation);
     conf.set("crease_angle", _creaseAngle);
     conf.set("tessellation_size", _tessellationSize );
@@ -57,6 +64,9 @@ void
 LineSymbol::mergeConfig( const Config& conf )
 {
     conf.get("stroke",       _stroke);
+    conf.get("material", material());
+    conf.get("outline_material", outlineMaterial());
+    conf.get("material_period", materialPeriod());
     conf.get("tessellation", _tessellation);
     conf.get("crease_angle", _creaseAngle);
     conf.get("tessellation_size", _tessellationSize);
@@ -152,6 +162,19 @@ LineSymbol::parseSLD(const Config& c, Style& style)
     else if (match(c.key(), "stroke-outline-width")) {
         style.getOrCreate<LineSymbol>()->stroke()->outlineWidth() = c.value();
         style.getOrCreate<LineSymbol>()->stroke()->outlineWidth()->setDefaultUnits(Units::PIXELS);
+    }
+    else if (match(c.key(), "stroke-material")) {
+        style.getOrCreate<LineSymbol>()->material() = Strings::unquote(c.value());
+    }
+    else if (match(c.key(), "stroke-outline-material")) {
+        style.getOrCreate<LineSymbol>()->outlineMaterial() = Strings::unquote(c.value());
+    }
+    else if (match(c.key(), "stroke-material-period")) {
+        float value; UnitsType units;
+        if (Units::parse(c.value(), value, units, Units::METERS) && units.canConvert(Units::METERS))
+            style.getOrCreate<LineSymbol>()->materialPeriod() = float(units.convertTo(Units::METERS, value));
+        else
+            style.getOrCreate<LineSymbol>()->materialPeriod() = std::numeric_limits<float>::quiet_NaN();
     }
     else if (match(c.key(), "stroke-double-sided")) {
         style.getOrCreate<LineSymbol>()->doubleSided() = as<bool>(c.value(), false);

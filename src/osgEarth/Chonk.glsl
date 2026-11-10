@@ -36,20 +36,7 @@ struct ChonkVisibleInstance
 layout(binding = 0, std430) readonly buffer ChonkVisibleInstances {
     ChonkVisibleInstance chonkVisibleInstances[];
 };
-struct ChonkMaterial
-{
-    uint64_t albedo;
-    uint64_t normal;
-    uint64_t pbr;
-    uint64_t material1;
-    uint64_t material2;
-    ivec2 extended;
-    uint64_t occlusion;
-    vec4 layoutAndFactors;
-};
-layout(binding = 2, std430) readonly buffer ChonkMaterialArena {
-    ChonkMaterial chonkMaterials[];
-};
+#pragma include MaterialArena.glsl
 
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;

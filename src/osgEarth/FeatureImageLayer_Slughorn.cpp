@@ -11,6 +11,8 @@
 #include <osgEarth/PointSymbol>
 #include <osgEarth/StyleSelector>
 #include <slughorn/canvas.hpp>
+#include "FeatureImageLayerMaterials"
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -137,6 +139,9 @@ namespace
             unsigned first = 0u, count = 0u;
             float radius = 0.0f;
             osg::Vec4f bounds;
+            osg::Vec4f widths;
+            unsigned material = 0u;
+            float period = 1.0f;
 
             // Creates an unpopulated centerline record; zero segments means there is nothing to draw.
             Draw() = default;
@@ -148,10 +153,50 @@ namespace
         std::vector<osg::Vec4f> segments;
         GeoExtent extent;
         unsigned tileSize;
+        GeoExtent sourceExtent;
+        bool mercator = false;
+        double gridHeight = 1.0, pixelScale = 1.0;
+        osg::Vec4f projection, projectionExtra;
+        static constexpr double earthRadius = 6378137.0;
+        static constexpr double mercatorLimit = 85.0511287798066;
 
-        // Keeps full precision in the GPU curves and chooses spatial bands for each individual shape.
-        VectorTile(const GeoExtent& e, unsigned size) : extent(e), tileSize(size)
+        FeatureImageLayerMaterials* materials = nullptr;
+
+        // Establishes the tile-local working plane and source pixel scale before choosing per-shape SDK bands.
+        // Tiles beyond the Mercator domain throw to the raster reprojection fallback.
+        VectorTile(const TileKey& key, const FeatureProfile* features, unsigned size) :
+            extent(key.getExtent()), tileSize(size), sourceExtent(key.getExtent())
         {
+            const auto mercatorSRS = SpatialReference::get("spherical-mercator");
+            mercator = sourceExtent.getSRS()->isGeographic() && features &&
+                features->getSRS()->isHorizEquivalentTo(mercatorSRS);
+            if (mercator)
+            {
+                // Mercator has no polar continuation. Let the existing raster reprojection handle those tiles.
+                if (sourceExtent.yMin() <= -mercatorLimit || sourceExtent.yMax() >= mercatorLimit)
+                    throw std::runtime_error("Mercator vector tile exceeds projection domain");
+                const double phi = osg::DegreesToRadians(sourceExtent.yMin());
+                const double latitudeSpan = osg::DegreesToRadians(sourceExtent.height());
+                const double longitudeSpan = osg::DegreesToRadians(sourceExtent.width());
+                const double width = earthRadius * longitudeSpan;
+                const double x = earthRadius * osg::DegreesToRadians(sourceExtent.xMin());
+                const double y = earthRadius * std::asinh(std::tan(phi));
+                const double north = earthRadius * std::asinh(std::tan(phi + latitudeSpan));
+                gridHeight = (north - y) / width;
+                // A square working extent gives x and y the SAME projected unit. The grid uses the real height.
+                extent = GeoExtent(mercatorSRS, x, y, x + width, y + width);
+                projection.set(float(std::sin(phi)), float(std::cos(phi)), float(latitudeSpan), float(1.0 / longitudeSpan));
+                projectionExtra.set(float(1.0 / gridHeight), float(phi), 0.0f, 0.0f);
+                // Pixel styles refer to the source profile's tile resolution, not the geographic terrain tile.
+                if (const auto profile = features->getTilingProfile())
+                {
+                    unsigned lod = profile->getEquivalentLOD(key.getProfile(), key.getLOD());
+                    if (features->getMaxLevel() >= 0) lod = std::min(lod, unsigned(features->getMaxLevel()));
+                    double w, h;
+                    profile->getTileDimensions(lod, w, h);
+                    pixelScale = w / width;
+                }
+            }
             atlas.setCurveTextureFormat(Atlas::TextureData::Format::RGBA32F);
             canvas.setTolerance(slughorn::TOLERANCE_FINE);
             canvas.setSplitStrategy([](const Atlas::Curves& curves)
@@ -211,6 +256,30 @@ namespace
             return draw;
         }
 
+        // Converts a radius contribution to (minimum projected width, ground-meter width), in atlas units.
+        // Ground radii receive latitude-dependent Mercator scale in the shader; angular units request raster fallback.
+        osg::Vec2f widthComponents(const Distance& width, double minimum, double factor) const
+        {
+            if (width.getUnits() == Units::PIXELS)
+                return osg::Vec2f(float(width.getValue() * pixelScale * factor / tileSize), 0.0f);
+            if (!width.getUnits().isLinear()) throw std::runtime_error("angular Mercator stroke width is unsupported");
+            return osg::Vec2f(float(minimum * pixelScale * factor / tileSize),
+                float(width.as(Units::METERS) * factor / extent.width()));
+        }
+
+        // Builds a round paint with a conservative bound for all supported Mercator latitudes.
+        // The fixed bound is only for lookup; actual ground width uses each fragment's latitude.
+        Draw mercatorStroke(Draw draw, const osg::Vec4f& widths, const Color& color) const
+        {
+            const float maxScale = float(std::cosh(osg::PI));
+            draw.widths = widths;
+            draw.radius = std::max(widths.x(), widths.y() * maxScale) + std::max(widths.z(), widths.w() * maxScale);
+            if (!std::isfinite(draw.radius)) throw std::runtime_error("non-finite Mercator stroke width");
+            draw.color = slugColor(color);
+            draw.bounds += osg::Vec4f(-draw.radius, -draw.radius, draw.radius, draw.radius);
+            return draw;
+        }
+
         // Creates a separate paint operation over the same segments, expanding its bounds by the stroke radius.
         Draw roundStroke(Draw draw, double width, const Color& color) const
         {
@@ -248,7 +317,7 @@ namespace
                 osg::ref_ptr<Feature> copy = new Feature(*feature);
                 // Buffered Web Mercator tiles can extend past the date line. Clip in the source CRS before
                 // projection wraps those vertices to the opposite longitude and folds polygon rings.
-                if (copy->getSRS() && extent.getSRS()->isGeographic() &&
+                if (copy->getSRS() && sourceExtent.getSRS()->isGeographic() &&
                     copy->getSRS()->isHorizEquivalentTo(SpatialReference::get("spherical-mercator")))
                 {
                     Bounds world;
@@ -298,6 +367,15 @@ namespace
             if (line)
             {
                 const Stroke& stroke = line->stroke().get();
+                const float period = line->materialPeriod().get();
+                if (!std::isfinite(period) || period <= 0.0f)
+                    throw std::runtime_error("stroke-material-period must be finite and positive");
+                if (!materials && (!line->material()->empty() || !line->outlineMaterial()->empty()))
+                    throw std::runtime_error("stroke material requires a FIL materials palette");
+                const unsigned coreSlot = materials ? materials->slot(line->material().get()) : 0u;
+                const unsigned outlineSlot = materials ? materials->slot(line->outlineMaterial().get()) : 0u;
+                // Attach application-owned paint metadata without modifying SDK geometry or band data.
+                auto paint = [&](Draw draw, unsigned slot) { draw.material = slot; draw.period = period; return draw; };
                 // Defer core layers so every outline in this style stays below every road interior.
                 std::vector<Draw> strokes;
                 if (stroke.outlineWidth().isSet()) strokes.reserve(local.size());
@@ -309,14 +387,15 @@ namespace
                 for (const auto& feature : local)
                 {
                     Distance w = stroke.width()->eval(feature.get(), context);
-                    double width = pixelWidth(w, extent, tileSize);
+                    Distance ow(0.0, Units::PIXELS);
+                    double width = mercator ? w.getValue() * pixelScale : pixelWidth(w, extent, tileSize);
                     if (w.getUnits() != Units::PIXELS)
                         width = std::max(width, double(stroke.minPixels().get()));
                     double outline = 0.0;
                     if (stroke.outlineWidth().isSet())
                     {
-                        Distance ow = stroke.outlineWidth()->eval(feature.get(), context);
-                        outline = pixelWidth(ow, extent, tileSize);
+                        ow = stroke.outlineWidth()->eval(feature.get(), context);
+                        outline = mercator ? ow.getValue() * pixelScale : pixelWidth(ow, extent, tileSize);
                         if (ow.getUnits() != Units::PIXELS)
                             outline = std::max(outline, double(stroke.minPixels().get()));
                     }
@@ -333,26 +412,39 @@ namespace
                             if (width <= 0.0 && outline <= 0.0) continue;
                             Draw path = centerline(*g);
                             if (path.count == 0u) continue;
+                            osg::Vec4f radii;
+                            if (mercator)
+                            {
+                                auto a = widthComponents(w, stroke.minPixels().get(), 0.5);
+                                auto b = widthComponents(ow, stroke.minPixels().get(), 1.0);
+                                radii.set(a.x(), a.y(), b.x(), b.y());
+                            }
                             if (outline > 0.0)
-                                append(roundStroke(path, width + 2.0 * outline, stroke.outlineColor().get()));
+                                append(paint(mercator ? mercatorStroke(path, radii, stroke.outlineColor().get()) :
+                                    roundStroke(path, width + 2.0 * outline, stroke.outlineColor().get()), outlineSlot));
                             if (width > 0.0)
                             {
-                                Draw core = roundStroke(path, width, stroke.color());
+                                Draw core = paint(mercator ?
+                                    mercatorStroke(path, osg::Vec4f(radii.x(), radii.y(), 0, 0), stroke.color()) :
+                                    roundStroke(path, width, stroke.color()), coreSlot);
                                 if (stroke.outlineWidth().isSet()) strokes.push_back(core);
                                 else append(core);
                             }
                             continue;
                         }
+                        // Variable ground width cannot be baked into a constant-width outline shape.
+                        if (mercator && (w.getUnits() != Units::PIXELS || ow.getUnits() != Units::PIXELS))
+                            throw std::runtime_error("ground-width Mercator cap/join requires raster rendering");
                         Path path;
                         contour(path, *g, extent, g->isRing());
                         // Expand the underlying stroke by the border thickness on both sides.
                         if (outline > 0.0)
-                            append(canvas.stroke(path, float((width + 2.0 * outline) / tileSize),
-                                slugColor(stroke.outlineColor().get()), 1.0f, {}, join, cap));
+                            append(paint(canvas.stroke(path, float((width + 2.0 * outline) / tileSize),
+                                slugColor(stroke.outlineColor().get()), 1.0f, {}, join, cap), outlineSlot));
                         if (width > 0.0)
                         {
-                            auto core = canvas.stroke(path, float(width / tileSize), slugColor(stroke.color()),
-                                1.0f, {}, join, cap);
+                            Draw core = paint(canvas.stroke(path, float(width / tileSize), slugColor(stroke.color()),
+                                1.0f, {}, join, cap), coreSlot);
                             if (stroke.outlineWidth().isSet()) strokes.push_back(core);
                             else append(core);
                         }
@@ -374,7 +466,7 @@ namespace
                             Path path;
                             float x = float((p.x() - extent.xMin()) / extent.width());
                             float y = float((p.y() - extent.yMin()) / extent.height());
-                            float radius = point->size().get() * 0.5f / tileSize;
+                            float radius = float(point->size().get() * pixelScale * 0.5 / tileSize);
                             if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(radius))
                                 throw std::runtime_error("non-finite point geometry");
                             if (radius <= 0.0f) continue;
@@ -399,8 +491,10 @@ namespace
             };
             std::vector<std::vector<Entry>> grid(size * size);
             // Visits cells intersecting an expanded bound; clamps before integer conversion for remote geometry.
-            auto visit = [&](const osg::Vec4f& b, unsigned address, unsigned segment, bool indexed)
+            auto visit = [&](osg::Vec4f b, unsigned address, unsigned segment, bool indexed)
             {
+                b.y() /= float(gridHeight);
+                b.w() /= float(gridHeight);
                 if (b.z() < -1.0f || b.w() < -1.0f || b.x() > 2.0f || b.y() > 2.0f) return;
                 int x0 = std::max(0, int(std::floor(std::max(-1.0f, b.x()) * size)) - 1);
                 int y0 = std::max(0, int(std::floor(std::max(-1.0f, b.y()) * size)) - 1);
@@ -480,13 +574,13 @@ namespace
                     bounds[i] = layer.bounds;
                     data[address + 1u] = osg::Vec4f(32.0f / std::max(layer.bounds.z() - layer.bounds.x(), 1e-9f),
                         32.0f / std::max(layer.bounds.w() - layer.bounds.y(), 1e-9f), 0, 0);
-                    data[address + 3u] = osg::Vec4f(layer.bounds.x(), layer.bounds.y(), 0, 0);
+                    data[address + 3u] = osg::Vec4f(layer.bounds.x(), layer.bounds.y(), float(layer.material), layer.period);
                     continue;
                 }
                 const auto shape = atlas.getShape(layer.key);
                 data[address + 1u] = osg::Vec4f(shape->bandScaleX, shape->bandScaleY,
                     shape->bandOffsetX, shape->bandOffsetY);
-                data[address + 3u] = osg::Vec4f(layer.transform.x, layer.transform.y, 0, 0);
+                data[address + 3u] = osg::Vec4f(layer.transform.x, layer.transform.y, float(layer.material), layer.period);
                 float xmin = shape->bearingX + layer.transform.x;
                 float ymin = shape->bearingY - shape->height + layer.transform.y;
                 float xmax = xmin + shape->width, ymax = ymin + shape->height;
@@ -512,6 +606,12 @@ namespace
                 {
                     data[3u + i * 4u + 2u] = osg::Vec4f(float(segmentBase + layer.first),
                         float(layer.count), layer.radius, 1.0f);
+                    if (layer.widths.y() > 0.0f || layer.widths.w() > 0.0f)
+                    {
+                        data[3u + i * 4u + 2u].z() = float(data.size());
+                        data[3u + i * 4u + 2u].w() = 2.0f;
+                        data.push_back(layer.widths);
+                    }
                     continue;
                 }
                 const auto shape = atlas.getShape(layer.key);
@@ -519,13 +619,22 @@ namespace
                     shape->bandMaxY + 1u, shape->bandMaxX + 1u, unsigned(curveBase), unsigned(curveCount));
                 data[3u + i * 4u + 2u] = osg::Vec4f(float(base), 0, 0, 0);
             }
+            // Application metadata only: the SDK curves and band data above retain their vendor layout.
+            // Header.z points to the optional geographic-to-Mercator frame; zero selects legacy tile UVs.
+            unsigned projectionBase = 0u;
+            if (mercator)
+            {
+                projectionBase = unsigned(data.size());
+                data.push_back(projection);
+                data.push_back(projectionExtra);
+            }
             std::size_t count = data.size();
             unsigned height = unsigned((count + atlasWidth - 1u) / atlasWidth);
             unsigned maxSize = unsigned(Registry::capabilities().getMaxTextureSize());
             if (count >= (1u << 24u) || height > maxSize || atlasWidth > maxSize)
                 throw std::runtime_error("Slug tile exceeds GPU atlas capacity");
             data.resize(std::size_t(height) * atlasWidth);
-            data[0] = osg::Vec4f(atlasMagic, float(curveBase), 0.0f, float(layers.size()));
+            data[0] = osg::Vec4f(atlasMagic, float(curveBase), float(projectionBase), float(layers.size()));
             data[1] = osg::Vec4f(background.r(), background.g(), background.b(), background.a());
             data[2] = osg::Vec4f(float(gridBase), float(gridSize), 1.0f, float(coarseBase));
             osg::ref_ptr<osg::Image> image = new osg::Image();
@@ -550,7 +659,8 @@ FeatureImageLayer::createTexture(const TileKey& key, ProgressCallback* progress)
         return {};
     try
     {
-        VectorTile tile(key.getExtent(), getTileSize());
+        VectorTile tile(key, local._session->getFeatureSource()->getFeatureProfile(), getTileSize());
+        tile.materials = FeatureImageLayerMaterials::get(this);
         FilterContext context(local._session.get(), key.getExtent());
         FeatureStyleSorter sorter;
         sorter.sort(key, options().bufferWidth().get(), local._session.get(), local._filterChain, nullptr,

@@ -44,12 +44,29 @@ start at Honolulu and include a close-up viewpoint for inherited atlas detail.
 
 Use `max_data_level`, rather than `max_level`, to cap loading while allowing
 higher-resolution terrain to display inherited data. Source feature-profile
-limits are also honored. Atlases are authored in the requested source tile's
-normalized coordinates. REX's existing parent texture and scale/bias matrix
-therefore select the correct subregion at higher LODs. Pixel widths refer to
-pixels at the source tile's nominal `tile_size`, as with raster imagery; they
-are not constant screen-pixel widths while zooming. Meter widths are converted
-at the source tile latitude using the rasterizer's distance policy.
+limits are also honored. REX's existing parent texture and scale/bias matrix
+select the correct subregion at higher LODs. Pixel widths refer to pixels at
+the source tile's nominal `tile_size`, as with raster imagery; they are not
+constant screen-pixel widths while zooming.
+
+For spherical Mercator feature sources on geographic terrain tiles, vector
+geometry is evaluated in a shared Mercator plane. Both geometry axes use the
+same scale, preserving stroke widths, round caps, and joins at high latitudes.
+The CPU rebases geometry in double precision; the shader maps inherited terrain
+UVs and their derivatives into that plane without subtracting large world
+coordinates. Neighboring tiles share the projection and width policy, while
+the spatial grid accounts for each tile's projected aspect ratio. Slughorn's
+vendor atlas format is unchanged.
+
+Tiled Mercator sources use their equivalent source LOD for pixel widths,
+including the source's maximum LOD. Round strokes with linear-unit widths use
+latitude-dependent Mercator scale per fragment, so ground widths do not change
+at tile boundaries. Mercator tiles crossing the projection limit (about
+85.0511 degrees), angular-unit strokes, and non-round strokes requiring ground
+widths use the existing raster fallback. Other source/map combinations retain
+the rasterizer's existing distance policy. Source data must still include
+geometry crossing tile edges; the projection cannot repair missing source
+buffers or inconsistent source geometry.
 
 ## TileJSON sources
 
@@ -189,3 +206,81 @@ intercepting BLContext operations, and targets a newer Blend2D API than this
 project's current vcpkg build. This implementation uses Slughorn's native Canvas
 path API. A future shared Blend2D path producer could reduce duplicated style
 conversion without exposing C++20 SDK types in osgEarth headers.
+
+## PBR stroke materials
+
+Vector FILs support multiple PBR stroke materials in a single terrain pass. This
+path requires the NVGL renderer (`--nvgl`) and `GL_NV_gpu_shader5` for material
+selection that varies between fragments. A configured material palette fails to
+open on the non-NVGL renderer. Ordinary colored vector layers keep their GL3 path.
+
+Define named materials directly on the FIL and reference them from selector styles:
+
+```xml
+<FeatureImage name="Road details" mode="vector">
+    <features>roads</features>
+    <materials>
+        <material name="paint" color="paint-color.png" normal="paint-normal.png"
+                  packed="paint-orm.png" layout="orm" />
+        <material name="concrete" color="concrete-color.png"
+                  roughness_factor="0.9" metallic_factor="0" />
+    </materials>
+    <styles>
+        <style type="text/css"><![CDATA[
+            markings {
+                select: feature.properties.material === 'white';
+                stroke: #ffffff;
+                stroke-width: [width_m];
+                stroke-width-units: meters;
+                stroke-material: paint;
+                stroke-material-period: 0.5m;
+            }
+            curbs {
+                select: feature.properties.material === 'curb';
+                stroke: #ffffff;
+                stroke-width: [width_m];
+                stroke-width-units: meters;
+                stroke-material: concrete;
+                stroke-material-period: 1m;
+            }
+        ]]></style>
+    </styles>
+</FeatureImage>
+```
+
+`stroke-outline-material` independently assigns an outline's material. An omitted
+name keeps solid color. `stroke-material-period` applies to both core and outline,
+defaults to one meter, and must be finite and positive. Stroke/outline colors tint
+the albedo; their opacity multiplies material alpha and analytic coverage. Existing
+style ordering and the outline-first pass within each style are preserved.
+
+Material definitions use `PBRMaterial`'s albedo, normal, packed PBR, optional AO,
+channel layouts and factors. They share the terrain `TextureArena`/`MaterialArena`;
+textures are sampled only after a paint operation contributes coverage. A missing
+or pending GPU map uses safe defaults. Texture reads add GPU cost, but additional
+materials do not create additional FIL terrain passes. With no palette configured,
+the shader excludes material evaluation entirely.
+
+Coordinates are world-aligned meters on a regional tangent plane, derived from the
+morphed tile-local terrain vertices and elevation. Tile-to-material transforms are
+computed in double precision on the CPU. The shader keeps the local coordinates
+small and carries the regional origin separately, preserving its low bits when
+computing texture phase. Camera-space positions are used only for the normal-map
+frame; zooming does not perturb material coordinates. As with Prestige surface splatting,
+the default frame follows
+the camera in one-degree cells with hysteresis; changing regions can shift texture
+phase. Set `<material_anchor>longitude,latitude,height</material_anchor>` (WGS84,
+height in meters) to fix the frame for a regional scene. Materials currently require
+a geocentric map. They do not follow stroke direction, displace geometry or perform
+parallax occlusion mapping.
+
+osgEarth stores a stable material slot and period in unused components of its own
+paint records. The vendor curve/band atlas data is unchanged. Parent atlas and UV
+matrix inheritance carries the same paint assignments above `max_data_level`.
+The runtime palette resolves those slots to reference-counted arena IDs and handles;
+runtime handles are never serialized into an atlas. Material parameters and normals
+are coverage-blended at overlaps; this approximates separately lighting translucent
+surfaces. Raster fallback tiles retain flat stroke colors rather than PBR materials.
+
+`slughorn_materials.earth` demonstrates multiple selector materials and an outline
+material using the bundled textures. Run it with `--nvgl --prestige-sky` for lighting.

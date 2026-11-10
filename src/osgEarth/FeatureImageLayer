@@ -43,9 +43,13 @@ namespace osgEarth
         void setFeatureSource(FeatureSource* source);
         inline FeatureSource* getFeatureSource() const;
 
-        //! Style sheet to use to render feature data
+        //! Style sheet to use to render feature data; replacing it invalidates rendered tiles.
         void setStyleSheet(StyleSheet* styles);
         inline StyleSheet* getStyleSheet() const;
+
+        //! Refreshes source geometry, data extents, and rendered tiles after in-place edits.
+        //! Disable persistent caching before opening an editable layer, and synchronize edits with paging.
+        virtual void dirty() override;
 
     public: // ImageLayer
 

@@ -1,9 +1,6 @@
 <map name="Prestige Demo"
     xmlns:prestige="osgEarthPrestige">
-  <TMSImage name="Worldwide High Resolution Imagery" texture_compression="auto">
-    <url>http://vr-theworld.com/vr-theworld/tiles/1.0.0/142/</url>
-  </TMSImage>
-  <xi:include href="readymap_imagery.xml" texture_compression="auto" open="false"/>
+  <xi:include href="readymap_imagery.xml" texture_compression="auto" open="true"/>
   <xi:include href="readymap_elevation.xml"/>
   <!-- OpenFreeMap / OpenMapTiles / OpenStreetMap contributors.
        Vector strokes and Prestige labels require OSGEARTH_ENABLE_SLUGHORN=ON. -->

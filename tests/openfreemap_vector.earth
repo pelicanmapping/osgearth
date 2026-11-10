@@ -2,7 +2,8 @@
      The source resolves the current tile URL, zoom limits, and attribution from TileJSON when opened.
      Requires MVT/Protobuf support and OSGEARTH_ENABLE_SLUGHORN=ON for GPU vector rendering.
      XYZ uses top-origin {y}. Source levels 0-14; closer views inherit the level-14 vector atlas.
-     This is a geometry-only basemap: text/icons would trigger FeatureImage raster fallback. -->
+     This is a geometry-only basemap: text/icons would trigger FeatureImage raster fallback.
+     See openfreemap_labels.earth for the companion Prestige place-label demo. -->
 <map name="OpenFreeMap - FeatureImage vector mode">
     <XYZFeatures name="openfreemap-data">
         <url>https://tiles.openfreemap.org/planet/latest</url>

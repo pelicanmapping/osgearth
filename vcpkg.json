@@ -21,6 +21,8 @@
       ]
     },
     "geos",
+    "freetype",
+    { "name": "harfbuzz", "default-features": false },
     "libwebp",
     "libzip",
     "opengl",

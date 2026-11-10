@@ -1,0 +1,144 @@
+/* osgEarth - Copyright 2026 Pelican Mapping - MIT License */
+#pragma once
+#include <osgEarthPrestige/Export>
+#include <osgEarth/VisibleLayer>
+#include <osgEarth/FeatureSource>
+#include <osgEarth/LayerReference>
+#include <osg/Vec4f>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace osgEarthPrestige
+{
+    using osgEarth::LayerReference;
+    namespace Labeling { class SceneSource; }
+    class LabelNode;
+    /** Batched point, road, and callout labels from an optional feature source and LabelNodes on a geocentric map.
+     * Configure options before open/addToMap; use setStyle for live text styling. Other reconfiguration requires close.
+     * Lifecycle changes require stopped traversal. A named source must precede this layer in the map.
+     * Up to eight primary cameras have independent placements, history and fades; auxiliary cameras are ignored.
+     * Rendering requires OSGEARTH_ENABLE_SLUGHORN and GL 3.3; open reports ServiceUnavailable without the backend.
+     * Source features need stable IDs. Unsupported glyph runs are skipped; font fallback and picking are not provided.
+     */
+    class OSGEARTHPRESTIGE_EXPORT LabelLayer : public osgEarth::VisibleLayer
+    {
+    public:
+        //! Constant text appearance in logical pixels; font selection and rule selectors are configured separately.
+        struct OSGEARTHPRESTIGE_EXPORT StyleValues
+        {
+            float size = 18.0f;
+            osg::Vec4f fill { 1, 1, 1, 1 }, halo { 0, 0, 0, 1 };
+            float haloWidth = 1.0f, haloSoftness = 0.0f;
+
+            //! Overlays these controls on a CSS/structured style, preserving other properties and its referrer.
+            //! Serialization does not validate; setStyle validates before accepting the result.
+            osgEarth::Config getConfig(const osgEarth::Config& base = osgEarth::Config()) const;
+        };
+
+        /** First matching class/level rule wins. Text styling accepts CSS or structured symbols.
+         * Keep the original Config to preserve Prestige's text-halo-width/text-halo-softness extensions.
+         * Standard osgEarth::Style values can be supplied using Style::getConfig().
+         */
+        struct OSGEARTHPRESTIGE_EXPORT StyleRule
+        {
+            std::vector<std::string> classes;
+            unsigned minLevel = 0, maxLevel = 16;
+            double priority = 0.0;
+            std::string placement = "point"; // point, line, or callout; validated on open.
+            osgEarth::Config style;
+
+            //! Reads selectors and retains CSS/symbol data; invalid rules are reported when the layer opens.
+            explicit StyleRule(const osgEarth::Config& conf = osgEarth::Config());
+            //! Serializes current selectors and the retained text style, including extension properties/referrers.
+            osgEarth::Config getConfig() const;
+        };
+
+        class OSGEARTHPRESTIGE_EXPORT Options : public osgEarth::VisibleLayer::Options
+        {
+        public:
+            META_LayerOptions(osgEarthPrestige, Options, osgEarth::VisibleLayer::Options);
+            //! Direct, named, or embedded source; source IDs must remain stable across tile queries.
+            OE_OPTION_LAYER(osgEarth::FeatureSource, featureSource);
+            //! Local font filename; empty selects an available platform font. Relative paths use the config referrer.
+            OE_OPTION(std::string, font, "");
+            //! Multiplier for the camera's device-pixel ratio; must be positive and finite.
+            OE_OPTION(float, pixelScale, 1.0f);
+            //! Extra collision margin per side in logical pixels for tiled labels and LabelNodes; finite and nonnegative.
+            //! Initial value; use setDeclutterPadding for live edits. Each camera applies its effective pixel ratio.
+            OE_OPTION(double, declutterPadding, 2.0);
+            //! Preferred feature attribute for label text, with a fallback when empty or absent.
+            OE_OPTION(std::string, textAttribute, "name:en");
+            OE_OPTION(std::string, fallbackTextAttribute, "name");
+            //! Source rank is subtracted from rule priority; smaller source ranks win.
+            OE_OPTION(std::string, rankAttribute, "rank");
+            //! Feature attribute matched against each rule's class list.
+            OE_OPTION(std::string, classAttribute, "class");
+            //! Maximum source tile level, from 0 to 16 (also limited by the source profile).
+            OE_OPTION(unsigned, maxLevel, 14u);
+            //! Positive finite target projected tile size, in logical pixels.
+            OE_OPTION(double, tilePixels, 512.0);
+            //! Use smooth GPU road following when GL 4.3 is available; false forces worker fitting.
+            OE_OPTION(bool, gpuPaths, true);
+            //! Ordered class/level rules; at least one is required when using a feature source. Text values must be constant.
+            OE_OPTION_VECTOR(StyleRule, styles);
+
+            //! Serializes typed controls and ordered rules using the existing prestige:labels earth-file schema.
+            osgEarth::Config getConfig() const override;
+            //! Reads controls and replaces styles only when a styles block is supplied.
+            void fromConfig(const osgEarth::Config& conf);
+        };
+
+        META_Layer(osgEarthPrestige, LabelLayer, Options, osgEarth::VisibleLayer, prestige:labels);
+
+        //! Copies current ordered rules under the style lock; safe for editor reads alongside setStyle.
+        std::vector<StyleRule> getStyles() const;
+        //! Resolves supported constant appearance without font/GL work; failure leaves output unchanged.
+        static osgEarth::Status resolveStyle(const osgEarth::Config& style, StyleValues& output);
+        /** Replaces one existing rule's text appearance, preserving its selectors, priority and placement mode.
+         * Call on the update/control thread, serialized with layer lifecycle; never from cull/draw.
+         * Validates synchronously; failure leaves configuration and rendering unchanged. Success queues latest-only
+         * background preparation, reusing shaped text/atlases without source queries or resetting camera history/fades.
+         * Node-local LabelNode styles are independent. Font, rule count, class selectors and placement stay fixed.
+         */
+        osgEarth::Status setStyle(unsigned rule, const osgEarth::Config& style);
+        //! Atomically accepts appearance and inclusive source-tile levels (0 <= min <= max <= 16).
+        //! Same threading/failure contract as setStyle; changed eligibility lazily reloads affected tile levels.
+        //! Existing coverage remains until replacements are ready; camera registrations/history/fades are retained.
+        osgEarth::Status setStyle(unsigned rule, const osgEarth::Config& style, unsigned minLevel, unsigned maxLevel);
+        //! Returns the accepted layer-wide collision margin in logical pixels per side; synchronized for UI reads.
+        double getDeclutterPadding() const;
+        //! Updates the shared tile/LabelNode margin without source reload or camera reset; finite nonnegative pixels.
+        //! Call on update/control, serialized with lifecycle. Invalid values leave configuration/rendering unchanged.
+        osgEarth::Status setDeclutterPadding(double padding);
+
+        //! Retains an explicit source, replacing any named/embedded reference; configure before opening.
+        void setFeatureSource(osgEarth::FeatureSource* source);
+        //! Returns the retained/resolved source, or null before named-source resolution.
+        osgEarth::FeatureSource* getFeatureSource() const;
+        //! Returns the stable attachment group; it owns camera routing while attached to a map.
+        osg::Node* getNode() const override;
+        //! Resolves the source and starts workers; invalid source/profile/configuration sets layer error status.
+        void addedToMap(const osgEarth::Map* map) override;
+        //! Retires camera state and joins workers before releasing the source's map attachment.
+        void removedFromMap(const osgEarth::Map* map) override;
+
+    protected:
+        //! Creates private state and the stable attachment group without starting workers or issuing GL calls.
+        void init() override;
+        //! Validates options, resolves the font and opens the source; failure returns a descriptive status.
+        osgEarth::Status openImplementation() override;
+        //! Stops workers and releases resolved sources; explicitly supplied sources remain configured for reopening.
+        osgEarth::Status closeImplementation() override;
+        //! Releases private state after traversal has stopped; renderer/font implementation stays private.
+        ~LabelLayer() override;
+
+    private:
+        friend class LabelNode;
+        std::shared_ptr<Labeling::SceneSource> _scene;
+        struct Impl;
+        std::shared_ptr<Impl> _impl;
+    };
+}
+
+OSGEARTH_SPECIALIZE_CONFIG(osgEarthPrestige::LabelLayer::Options);

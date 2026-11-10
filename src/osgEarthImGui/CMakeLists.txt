@@ -46,6 +46,7 @@ set(STOCK_PANELS
     VegetationLayerGUI
 
     # osgEarthPrestige
+    PrestigeLabelLayerGUI
     PrestigeVegetationLayerGUI
     PrestigeGrimeLayerGUI
     PrestigeAssetsGUI

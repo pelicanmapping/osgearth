@@ -16,6 +16,8 @@ find_package(geos QUIET)
 find_package(blend2d QUIET)
 find_package(spdlog QUIET)
 find_package(meshoptimizer QUIET)
+# Publish backend availability through BuildConfig, including after an ON-to-OFF reconfigure.
+set(OSGEARTH_HAVE_SLUGHORN ${OSGEARTH_ENABLE_SLUGHORN})
 if(OSGEARTH_ENABLE_SLUGHORN)
     find_package(Slughorn REQUIRED)
 endif()
@@ -876,7 +878,6 @@ add_osgearth_library(
 # Slughorn stays private: only this implementation file and the SDK use C++20.
 if(OSGEARTH_ENABLE_SLUGHORN)
     target_sources(${LIB_NAME} PRIVATE FeatureImageLayer_Slughorn.cpp)
-    target_compile_definitions(${LIB_NAME} PRIVATE OSGEARTH_HAVE_SLUGHORN)
     target_link_libraries(${LIB_NAME} PRIVATE Slughorn::Slughorn)
     if(MSVC)
         set_source_files_properties(FeatureImageLayer_Slughorn.cpp PROPERTIES COMPILE_OPTIONS "/std:c++20")

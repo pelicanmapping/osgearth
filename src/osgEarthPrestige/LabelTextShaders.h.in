@@ -1,0 +1,9 @@
+// Generated private shader sources; no runtime shader search path is required.
+#pragma once
+namespace osgEarthPrestige { namespace Labeling {
+static const char* textVertexShader = R"oeLabel(@LABEL_TEXT_VERTEX@)oeLabel";
+static const char* textFragmentShader = R"oeLabel(@LABEL_TEXT_FRAGMENT@)oeLabel";
+static const char* pathComputeShader = R"oeLabel(@LABEL_PATH_COMPUTE@)oeLabel";
+static const char* leaderVertexShader = R"oeLabel(@LABEL_LEADER_VERTEX@)oeLabel";
+static const char* leaderFragmentShader = R"oeLabel(@LABEL_LEADER_FRAGMENT@)oeLabel";
+} }

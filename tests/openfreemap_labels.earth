@@ -1,0 +1,259 @@
+<!-- Run: osgearth_imgui openfreemap_labels.earth
+     Requires Prestige, MVT/Protobuf, and OSGEARTH_ENABLE_SLUGHORN=ON; internet access loads live OpenFreeMap tiles.
+     Place labels use the new Prestige engine: background decluttering, camera-local history/fades,
+     Crowded city/town/neighborhood labels try eight alternatives with batched 1px leaders (12px gap).
+     Slughorn analytic fills, and cached distance-field halos. Geometry stays in FeatureImage vector mode.
+     Fonts resolve locally (Segoe UI / DejaVu Sans / Liberation Sans / Arial); set <font> to override.
+     Unsupported glyph runs are skipped, not rendered with a legacy text fallback. Road names follow paths; no POI icons yet.
+     Attribution: OpenFreeMap, OpenMapTiles, and OpenStreetMap contributors (also supplied by TileJSON).
+     Place schema: https://openmaptiles.org/docs/schema/#place -->
+<map name="OpenFreeMap - Prestige labels" xmlns:prestige="osgEarthPrestige">
+    <XYZFeatures name="openfreemap-data">
+        <url>https://tiles.openfreemap.org/planet/latest</url>
+        <layers>landcover,landuse,park,water,waterway,building,transportation,boundary</layers>
+    </XYZFeatures>
+
+    <!-- Styles paint in document order, with roads above buildings and water.
+         Pixel widths are measured at the source tile resolution and scale when overzooming. -->
+    <FeatureImage name="OpenFreeMap vectors" mode="vector">
+        <features>openfreemap-data</features>
+        <background_color>#f2efe9</background_color>
+        <styles>
+            <style type="text/css"><![CDATA[
+                landcover {
+                    select: feature.properties.mvt_layer === 'landcover';
+                    fill: #dce7cb;
+                }
+                woodland {
+                    select: feature.properties.mvt_layer === 'landcover' && feature.properties['class'] === 'wood';
+                    fill: #b8d3a7;
+                }
+                sand {
+                    select: feature.properties.mvt_layer === 'landcover' && feature.properties['class'] === 'sand';
+                    fill: #eee1b7;
+                }
+                ice {
+                    select: feature.properties.mvt_layer === 'landcover' && feature.properties['class'] === 'ice';
+                    fill: #f4faff;
+                }
+                landuse {
+                    select: feature.properties.mvt_layer === 'landuse';
+                    fill: #e5e0d8;
+                }
+                parks {
+                    select: feature.properties.mvt_layer === 'park';
+                    fill: #c4dfb2;
+                }
+                water {
+                    select: feature.properties.mvt_layer === 'water';
+                    fill: #a9cee2;
+                }
+                waterways {
+                    select: feature.properties.mvt_layer === 'waterway';
+                    stroke: #91bdd5;
+                    stroke-width: 1px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                buildings {
+                    select: feature.properties.mvt_layer === 'building';
+                    fill: #d5c5b7;
+                    stroke: #b8a596;
+                    stroke-width: 0.4px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                paths {
+                    select: feature.properties.mvt_layer === 'transportation' &&
+                        ['path', 'track', 'pedestrian'].indexOf(feature.properties['class']) >= 0;
+                    stroke: #c6ac8e;
+                    stroke-width: 0.8px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                minor_roads {
+                    select: feature.properties.mvt_layer === 'transportation' &&
+                        ['minor', 'service', 'tertiary'].indexOf(feature.properties['class']) >= 0;
+                    stroke: #ffffff;
+                    stroke-width: 1.5px;
+                    stroke-outline: #c7c1b7;
+                    stroke-outline-width: 0.4px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                major_roads {
+                    select: feature.properties.mvt_layer === 'transportation' &&
+                        feature.tile_level >= 8 &&
+                        ['primary', 'secondary'].indexOf(feature.properties['class']) >= 0;
+                    stroke: #ffe3a3;
+                    stroke-width: 2px;
+                    stroke-outline: #c5a86d;
+                    stroke-outline-width: 0.4px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                highways {
+                    select: feature.properties.mvt_layer === 'transportation' &&
+                        feature.tile_level >= 7 &&
+                        ['motorway', 'trunk'].indexOf(feature.properties['class']) >= 0;
+                    stroke: #efba86;
+                    stroke-width: 2.5px;
+                    stroke-outline: #bd946d;
+                    stroke-outline-width: 0.5px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                railways {
+                    select: feature.properties.mvt_layer === 'transportation' &&
+                        ['rail', 'transit'].indexOf(feature.properties['class']) >= 0;
+                    stroke: #8e8b86;
+                    stroke-width: 0.7px;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                local_boundaries {
+                    select: feature.properties.mvt_layer === 'boundary' &&
+                        feature.tile_level >= 10 && feature.properties.maritime != 1 &&
+                        feature.properties.admin_level >= 7 && feature.properties.admin_level <= 10;
+                    stroke: #b996bd;
+                    stroke-width: 0.5px;
+                    stroke-opacity: 0.55;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                district_boundaries {
+                    select: feature.properties.mvt_layer === 'boundary' &&
+                        feature.tile_level >= 7 && feature.properties.maritime != 1 &&
+                        feature.properties.admin_level >= 5 && feature.properties.admin_level <= 6;
+                    stroke: #b08ab5;
+                    stroke-width: 0.65px;
+                    stroke-opacity: 0.65;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                regional_boundaries {
+                    select: feature.properties.mvt_layer === 'boundary' &&
+                        feature.tile_level >= 4 && feature.properties.maritime != 1 &&
+                        feature.properties.admin_level >= 3 && feature.properties.admin_level <= 4;
+                    stroke: #9b7aa3;
+                    stroke-width: 0.8px;
+                    stroke-opacity: 0.75;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+                boundaries {
+                    select: feature.properties.mvt_layer === 'boundary' &&
+                        feature.properties.admin_level == 2 && feature.properties.maritime != 1;
+                    stroke: #ad91b1;
+                    stroke-width: 1px;
+                    stroke-opacity: 0.7;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                }
+            ]]></style>
+        </styles>
+    </FeatureImage>
+
+    <!-- A separate source lets label paging request place and road-name data, independently of terrain paging.
+         Source feature IDs identify labels; clipped road fragments are not stitched. No legacy text rasterization. -->
+    <XYZFeatures name="openfreemap-labels">
+        <url>https://tiles.openfreemap.org/planet/latest</url>
+        <layers>place,transportation_name</layers>
+        <l2_cache_size>32</l2_cache_size>
+    </XYZFeatures>
+
+    <prestige:labels name="Place and road names">
+        <features>openfreemap-labels</features>
+        <!-- Extra collision margin on each side of a label, in logical pixels. -->
+        <declutter_padding>2</declutter_padding>
+        <text_attribute>name</text_attribute>
+        <fallback_text_attribute>name</fallback_text_attribute>
+        <rank_attribute>rank</rank_attribute>
+        <max_level>14</max_level>
+        <!-- Smooth GPU road fitting is automatic on OpenGL 4.3+. Set gpu_paths=false to force CPU fitting. -->
+        <tile_pixels>512</tile_pixels>
+        <!-- TextSymbol CSS plus Prestige text-halo-width in logical pixels; explicit width overrides normalized offset.
+             text-halo-softness is Prestige-only: 0 = crisp; 1 = feather across the whole halo radius.
+             Pure-white halos are 2 logical pixels wide so they separate labels from the pale basemap.
+             Roads use 0.5 softness; places keep crisp halos. pixel_scale applies each camera's device-pixel ratio.
+             First matching class/level rule wins. Priority = class priority minus rank (lower rank is better).
+             Level limits refer to the label source's Web Mercator tile level; level 14 remains usable when zoomed in. -->
+        <styles>
+            <style classes="continent" max_level="2" priority="1000">
+                text-size: 25; text-fill: #435269;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="country" max_level="6" priority="900">
+                text-size: 23; text-fill: #435269;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="state,province" min_level="3" max_level="8" priority="800">
+                text-size: 19; text-fill: #64748b;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="city" priority="700">
+                text-size: 22; text-fill: #25364a;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="town" min_level="6" priority="600">
+                text-size: 19; text-fill: #304157;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="village" min_level="9" priority="500">
+                text-size: 17; text-fill: #415066;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="borough,suburb" min_level="10" priority="400">
+                text-size: 17; text-fill: #4d5870;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="quarter,neighbourhood,hamlet,isolated_dwelling" min_level="11"
+                   priority="300">
+                text-size: 15; text-fill: #576177;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="motorway,trunk" placement="line" min_level="10" priority="150">
+                text-halo-softness: 0.5;
+                text-size: 15; text-fill: #55515a;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="primary,secondary" placement="line" min_level="12" priority="140">
+                text-halo-softness: 0.5;
+                text-size: 14; text-fill: #55515a;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="tertiary,minor,service,track" placement="line" min_level="14" priority="120">
+                text-halo-softness: 0.5;
+                text-size: 13; text-fill: #66616a;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+            <style classes="island" min_level="6" priority="200">
+                text-size: 17; text-fill: #50685a;
+                text-halo: #ffffff; text-halo-width: 2px;
+                text-halo-backdrop-type: outline;
+            </style>
+        </styles>
+    </prestige:labels>
+
+    <options>
+        <terrain color="#f2efe9"/>
+    </options>
+    <viewpoints home="0" time="0">
+        <viewpoint name="London" long="-0.12" lat="51.505" height="0" heading="0" pitch="-90" range="45000m"/>
+        <viewpoint name="Europe" long="8" lat="49" height="0" heading="0" pitch="-90" range="4500000m"/>
+        <viewpoint name="World" long="10" lat="20" height="0" heading="0" pitch="-90" range="22000000m"/>
+        <viewpoint name="Manhattan" long="-73.985" lat="40.748" height="0" heading="0" pitch="-90" range="35000m"/>
+        <viewpoint name="Neighborhood detail" long="-0.12" lat="51.505" height="0" heading="0" pitch="-90" range="2500m"/>
+    </viewpoints>
+</map>

@@ -13,6 +13,7 @@ target_include_directories(Slughorn PUBLIC
 
 install(TARGETS Slughorn EXPORT SlughornTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 install(FILES "${SLUGHORN_SOURCE_DIR}/slughorn/slughorn.hpp" "${SLUGHORN_SOURCE_DIR}/slughorn/canvas.hpp"
+    "${SLUGHORN_SOURCE_DIR}/slughorn/freetype.hpp"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/slughorn")
 install(EXPORT SlughornTargets FILE SlughornConfig.cmake NAMESPACE Slughorn::
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/Slughorn")

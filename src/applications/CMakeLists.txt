@@ -4,6 +4,11 @@ if(NOT OSGEARTH_BUILD_PLATFORM_IPHONE)
         add_definitions(-DOSGEARTH_LIBRARY_STATIC)
     endif()
 
+    if(OSGEARTH_BUILD_PRESTIGE_NODEKIT AND OSGEARTH_ENABLE_SLUGHORN AND
+       (OSGEARTH_BUILD_TOOLS OR OSGEARTH_BUILD_EXAMPLES))
+        add_subdirectory(osgearth_labels)
+    endif()
+
     # Tools:
     if(OSGEARTH_BUILD_TOOLS)
         set(TARGET_DEFAULT_LABEL_PREFIX "Tool")

@@ -23,7 +23,7 @@ set(OSGEARTH_PATCH_VERSION 1)
 set(OSGEARTH_VERSION ${OSGEARTH_MAJOR_VERSION}.${OSGEARTH_MINOR_VERSION}.${OSGEARTH_PATCH_VERSION})
 
 # Increment this each time the ABI changes
-set(OSGEARTH_SOVERSION 209)
+set(OSGEARTH_SOVERSION 214)
 
 # Use C++17 by default and honor newer standards requested by a parent project.
 if(NOT CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD MATCHES "^(98|11|14)$")
@@ -85,7 +85,7 @@ option(OSGEARTH_BUILD_CESIUM_NODEKIT "Build the Cesium nodekit (osgEarthCesium)"
 option(OSGEARTH_BUILD_TRITON_NODEKIT "Build support for SunDog Triton SDK" OFF)
 option(OSGEARTH_BUILD_SILVERLINING_NODEKIT "Build support for SunDog SilverLining SDK" OFF)
 option(OSGEARTH_ENABLE_SLUGHORN
-    "Enable GPU vector FeatureImageLayer rendering (private C++20 implementation)" OFF)
+    "Enable Slughorn GPU vectors and Prestige LabelLayer rendering (private C++20 bridges)" OFF)
 
 option(OSGEARTH_ENABLE_GEOCODER "Enable the geocoder (GDAL/OGR must be built with geocoder support)" OFF)
 

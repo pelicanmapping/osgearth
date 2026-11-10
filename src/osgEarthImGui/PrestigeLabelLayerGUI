@@ -1,0 +1,238 @@
+/* osgEarth - Copyright 2026 Pelican Mapping - MIT License */
+#pragma once
+#include <osgEarthImGui/ImGuiPanel>
+#include <osgEarthPrestige/LabelLayer>
+#include <osgEarth/Utils>
+#include <osgEarth/XmlUtils>
+#include <osgViewer/ViewerBase>
+#include <algorithm>
+#include <atomic>
+#include <sstream>
+
+namespace osgEarthPrestige
+{
+    //! Small rule-appearance editor; scene mutations run on update, never during GUI draw.
+    class LabelLayerGUI : public osgEarth::ImGuiPanel
+    {
+        struct Editor
+        {
+            LabelLayer::StyleRule loaded, applied;
+            LabelLayer::StyleValues draft;
+            int minLevel = 0, maxLevel = 16;
+            bool dirty = false;
+        };
+        struct Result
+        {
+            std::atomic<bool> ready { false };
+            osgEarth::Status status;
+            osgEarth::Config submitted;
+            unsigned rule = 0, minLevel = 0, maxLevel = 16;
+            bool style = false, padding = false;
+            double paddingValue = 2.0;
+        };
+        osg::observer_ptr<LabelLayer> _layer;
+        std::vector<Editor> _editors;
+        std::shared_ptr<Result> _pending;
+        int _selected = 0;
+        bool _preview = true, _paddingDirty = false;
+        float _padding = 2.0f, _loadedPadding = 2.0f;
+        double _nextApply = 0;
+        std::string _message;
+
+        //! Captures a new map/layer or explicitly refreshes external edits, discarding this panel's drafts.
+        void select(LabelLayer* layer)
+        {
+            _layer = layer; _editors.clear(); _pending.reset(); _selected = 0; _message.clear();
+            _paddingDirty = false;
+            if (!layer) return;
+            _loadedPadding = _padding = float(layer->getDeclutterPadding());
+            for (const auto& rule : layer->getStyles())
+            {
+                Editor editor; editor.loaded = editor.applied = rule;
+                editor.minLevel = int(rule.minLevel); editor.maxLevel = int(rule.maxLevel);
+                const auto status = LabelLayer::resolveStyle(rule.style, editor.draft);
+                if (status.isError()) _message = status.toString();
+                _editors.push_back(std::move(editor));
+            }
+        }
+
+        //! Adopts only the queued submission, leaving newer slider drafts available for the next update.
+        void collect()
+        {
+            if (!_pending || !_pending->ready.load(std::memory_order_acquire)) return;
+            if (_pending->status.isOK())
+            {
+                if (_pending->style && _pending->rule < _editors.size())
+                {
+                    auto& applied = _editors[_pending->rule].applied;
+                    applied.style = _pending->submitted;
+                    applied.minLevel = _pending->minLevel; applied.maxLevel = _pending->maxLevel;
+                }
+                _message = "Style accepted; labels update in the background.";
+            }
+            else _message = _pending->status.toString();
+            _pending.reset();
+        }
+
+        //! Queues one immutable draft; subsequent changes coalesce at 150 ms intervals instead of flooding the worker.
+        void apply(unsigned rule, osg::RenderInfo& ri)
+        {
+            auto target = view(ri);
+            osg::ref_ptr<LabelLayer> retained;
+            if (_pending || !_layer.lock(retained) || !target || !target->getViewerBase()) return;
+            auto result = std::make_shared<Result>();
+            result->rule = rule;
+            if (rule < _editors.size() && _editors[rule].dirty)
+            {
+                auto& editor = _editors[rule];
+                result->style = true; result->submitted = editor.draft.getConfig(editor.applied.style);
+                result->minLevel = unsigned(editor.minLevel); result->maxLevel = unsigned(editor.maxLevel);
+                editor.dirty = false;
+            }
+            result->padding = _paddingDirty; result->paddingValue = _padding; _paddingDirty = false;
+            if (!result->style && !result->padding) return;
+            _pending = result; _nextApply = ImGui::GetTime() + 0.15;
+            target->getViewerBase()->addUpdateOperation(new osgEarth::OneTimer([retained, result]()
+            {
+                result->status = osgEarth::Status::OK();
+                if (result->style)
+                    result->status = retained->setStyle(result->rule, result->submitted, result->minLevel, result->maxLevel);
+                if (result->status.isOK() && result->padding)
+                    result->status = retained->setDeclutterPadding(result->paddingValue);
+                result->ready.store(true, std::memory_order_release);
+            }));
+        }
+
+        //! Copies accepted layer styles, including all rule selectors, as a pasteable styles XML block.
+        void copyStyles(LabelLayer* layer)
+        {
+            osgEarth::Config styles("styles");
+            for (const auto& rule : layer->getStyles()) styles.add(rule.getConfig());
+            osg::ref_ptr<osgEarth::Util::XmlDocument> document = new osgEarth::Util::XmlDocument(styles);
+            std::ostringstream xml; document->store(xml);
+            ImGui::SetClipboardText(xml.str().c_str());
+            _message = "Copied applied styles XML. Unapplied drafts are excluded.";
+        }
+
+    public:
+        //! Registers an initially closed editor with a stable window/settings name.
+        LabelLayerGUI() : ImGuiPanel("Prestige label styles") { }
+        //! Places the editor under the Prestige menu with a concise label.
+        const char* menuLabel() const override { return "Label styles"; }
+        //! Offers this editor only when a public LabelLayer exists in the current map.
+        bool isAvailable(osg::RenderInfo& ri) const override
+        {
+            auto* node = findNode<osgEarth::MapNode>(ri);
+            return node && node->getMap()->getLayer<LabelLayer>() != nullptr;
+        }
+        //! Retires completed submissions even while the window is closed; map replacement releases stale drafts.
+        void update(osg::RenderInfo& ri) override
+        {
+            collect();
+            if (!isAvailable(ri)) select(nullptr);
+        }
+        //! Draws layer/rule selection and bounded appearance controls; no font/source/render work occurs here.
+        void draw(osg::RenderInfo& ri) override
+        {
+            if (!isVisible()) return;
+            ImGui::SetNextWindowSize(ImVec2(480, 430), ImGuiCond_FirstUseEver);
+            if (!ImGui::Begin(name(), visible())) { ImGui::End(); return; }
+            std::vector<osg::ref_ptr<LabelLayer>> layers;
+            auto* node = findNode<osgEarth::MapNode>(ri);
+            if (node) node->getMap()->getLayers(layers);
+            if (layers.empty())
+            {
+                select(nullptr); ImGui::TextUnformatted("No Prestige label layer in this map.");
+                ImGui::End(); return;
+            }
+            osg::ref_ptr<LabelLayer> layer;
+            if (!_layer.lock(layer) || std::find(layers.begin(), layers.end(), layer) == layers.end())
+            { select(layers.front()); layer = layers.front(); }
+            if (ImGuiLTable::Begin("Label style properties"))
+            {
+                if (ImGuiLTable::BeginCombo("Layer", layer->getName().c_str()))
+                {
+                    for (unsigned i = 0; i < layers.size(); ++i)
+                    {
+                        ImGui::PushID(int(i));
+                        if (ImGui::Selectable(layers[i]->getName().c_str(), layers[i] == layer))
+                        { select(layers[i]); layer = layers[i]; }
+                        ImGui::PopID();
+                    }
+                    ImGuiLTable::EndCombo();
+                }
+                _paddingDirty = ImGuiLTable::SliderFloat("Declutter padding (px)", &_padding, 0, 64, "%.1f", 0) ||
+                    _paddingDirty;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Layer-wide extra collision margin per side, in logical pixels.");
+                if (!_editors.empty())
+                {
+                    //! Builds a readable class list for the rule selector without touching prepared labels.
+                    auto label = [](const LabelLayer::StyleRule& rule)
+                    {
+                        std::string result;
+                        for (const auto& value : rule.classes) { if (!result.empty()) result += ", "; result += value; }
+                        return result + " (" + std::to_string(rule.minLevel) + "-" + std::to_string(rule.maxLevel) + ")";
+                    };
+                    if (ImGuiLTable::BeginCombo("Rule", label(_editors[_selected].applied).c_str()))
+                    {
+                        for (unsigned i = 0; i < _editors.size(); ++i)
+                        {
+                            ImGui::PushID(int(i));
+                            if (ImGui::Selectable(label(_editors[i].applied).c_str(), int(i) == _selected)) _selected = int(i);
+                            ImGui::PopID();
+                        }
+                        ImGuiLTable::EndCombo();
+                    }
+                    auto& editor = _editors[_selected];
+                    auto& values = editor.draft;
+                    bool changed = ImGuiLTable::SliderInt("Min level", &editor.minLevel, 0, 16);
+                    if (changed) editor.maxLevel = std::max(editor.minLevel, editor.maxLevel);
+                    if (ImGuiLTable::SliderInt("Max level", &editor.maxLevel, 0, 16))
+                    { editor.minLevel = std::min(editor.minLevel, editor.maxLevel); changed = true; }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Inclusive source-tile levels; the source/layer maximum still applies.");
+                    changed = ImGuiLTable::SliderFloat("Text size (px)", &values.size, 4, 256, "%.1f", 0) || changed;
+                    changed = ImGuiLTable::ColorEdit4("Fill", values.fill.ptr(), ImGuiColorEditFlags_NoLabel) || changed;
+                    changed = ImGuiLTable::ColorEdit4("Halo", values.halo.ptr(), ImGuiColorEditFlags_NoLabel) || changed;
+                    changed = ImGuiLTable::SliderFloat("Halo width (px)", &values.haloWidth, 0, 2, "%.2f", 0) || changed;
+                    changed = ImGuiLTable::SliderFloat("Halo softness", &values.haloSoftness, 0, 1, "%.2f", 0) || changed;
+                    editor.dirty = editor.dirty || changed;
+                }
+                ImGuiLTable::Checkbox("Live preview", &_preview);
+                ImGuiLTable::End();
+            }
+            if (_editors.empty())
+                ImGui::TextWrapped("This layer has no feature style rules. LabelNodes use their own styles.");
+            if (ImGui::Button("Apply") && !_pending) apply(unsigned(_selected), ri);
+            ImGui::SameLine();
+            if (ImGui::Button("Revert"))
+            {
+                _padding = _loadedPadding; _paddingDirty = true;
+                if (!_editors.empty())
+                {
+                    auto& editor = _editors[_selected];
+                    LabelLayer::resolveStyle(editor.loaded.style, editor.draft);
+                    editor.minLevel = int(editor.loaded.minLevel); editor.maxLevel = int(editor.loaded.maxLevel);
+                    editor.dirty = true;
+                }
+            }
+            if (_preview && !_pending && ImGui::GetTime() >= _nextApply)
+            {
+                unsigned dirtyRule = 0;
+                while (dirtyRule < _editors.size() && !_editors[dirtyRule].dirty) ++dirtyRule;
+                if (_paddingDirty || dirtyRule < _editors.size()) apply(dirtyRule, ri);
+            }
+            ImGui::Separator();
+            if (ImGui::Button("Copy styles XML")) copyStyles(layer);
+            ImGui::SameLine();
+            if (ImGui::Button("Reload from layer") && !_pending) select(layer);
+            if (_pending) ImGui::TextUnformatted("Applying...");
+            if (!_message.empty()) ImGui::TextWrapped("%s", _message.c_str());
+            if (_pending || (_preview && (_paddingDirty || std::any_of(_editors.begin(), _editors.end(),
+                [](const Editor& editor) { return editor.dirty; }))))
+                if (auto target = view(ri)) target->requestRedraw();
+            ImGui::End();
+        }
+    };
+}

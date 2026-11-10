@@ -78,18 +78,18 @@ if "%AUTO_YES%"=="1" (
     if ERRORLEVEL 2 goto :usage
 )
 
-set MANIFEST_DIR="%SOURCE_DIR%"
+set "MANIFEST_DIR=%SOURCE_DIR%"
 
 if not exist "%MANIFEST_DIR%\vcpkg.json" (
     set ERROR_MSG=No vcpkg.json manifest found. Run this script from the root folder of the git repository
-    goto usage
+    goto :usage
 )
 
 :: Run CMAKE
-mkdir %BUILD_DIR%
-
-if exist %BUILD_DIR%\CMakeCache.txt (
-    del %BUILD_DIR%\CMakeCache.txt
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+if not exist "%BUILD_DIR%" (
+    set ERROR_MSG=Cannot create build directory: %BUILD_DIR%
+    goto :usage
 )
 
 cmake ^
@@ -107,7 +107,7 @@ cmake ^
     -DVCPKG_OVERLAY_TRIPLETS="%SOURCE_DIR%\cmake\triplets" ^
     -DVCPKG_TARGET_TRIPLET=x64-windows-release
 
-goto end
+exit /B %ERRORLEVEL%
 
 :usage
   if not "%ERROR_MSG%" == "" (
@@ -118,9 +118,7 @@ goto end
   echo Example:
   echo    vcpkg-bootstrap.bat -S . -B ..\build -I ..\install -G "Visual Studio 17 2022" -A x64
 
-:end
-  endlocal
-  exit /B
+  exit /B 1
 
 
 :: Converts a relative path to an absolute path

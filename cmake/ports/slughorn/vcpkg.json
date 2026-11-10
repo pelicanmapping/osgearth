@@ -1,6 +1,7 @@
 {
   "name": "slughorn",
   "version-string": "0.0.3-1b203c1",
+  "port-version": 1,
   "description": "Slughorn core library for GPU vector rendering",
   "homepage": "https://github.com/AlphaPixel/slughorn",
   "license": "MIT",

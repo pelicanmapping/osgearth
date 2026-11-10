@@ -31,6 +31,7 @@
 #include <osgEarthImGui/DecalsGUI>
 
 #ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+#include <osgEarthImGui/PrestigeLabelLayerGUI>
 #include <osgEarthImGui/PrestigeVegetationLayerGUI>
 #include <osgEarthImGui/PrestigeGrimeLayerGUI>
 #include <osgEarthImGui/PrestigeAssetsGUI>
@@ -274,6 +275,7 @@ main(int argc, char** argv)
         ui->add("Tools", new LiveCamerasGUI());
 
 #ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
+        ui->add("Prestige", new osgEarthPrestige::LabelLayerGUI());
         ui->add("Prestige", new osgEarthPrestige::VegetationLayerGUI());
         ui->add("Prestige", new EnvironmentGUI("Sky & Clouds", true));
         ui->add("Prestige", new osgEarthPrestige::GrimeLayerGUI());

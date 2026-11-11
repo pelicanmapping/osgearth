@@ -9,6 +9,7 @@
 #include <osg/Matrixd>
 #include <osg/Vec2d>
 #include <osg/Vec3d>
+#include <osg/Vec4d>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -21,6 +22,25 @@ namespace osgUtil { class CullVisitor; }
 
 namespace osgEarthPrestige { namespace Labeling
 {
+    //! Computes WGS84 unit-sphere eye coordinates and horizon distance squared in double precision.
+    //! Shared by worker eligibility and current-frame GPU uniforms; camera-relative deltas preserve precision.
+    inline osg::Vec4d ellipsoidEye(const osg::Vec3d& eye)
+    {
+        const osg::Vec3d scaled(eye.x() / 6378137.0, eye.y() / 6378137.0, eye.z() / 6356752.314245);
+        return osg::Vec4d(scaled.x(), scaled.y(), scaled.z(), scaled.length2() - 1.0);
+    }
+
+    //! Tests the eye-to-anchor segment against WGS84, including elevated anchors beyond the surface horizon.
+    //! Below-ellipsoid cameras conservatively retain labels; terrain/scene occlusion is a separate policy.
+    inline bool visibleOverEllipsoid(const osg::Vec4d& eye, const osg::Vec3d& relative)
+    {
+        const osg::Vec3d delta(relative.x() / 6378137.0, relative.y() / 6378137.0,
+            relative.z() / 6356752.314245);
+        const double towardCenter = -(delta.x() * eye.x() + delta.y() * eye.y() + delta.z() * eye.z());
+        return eye.w() < 0.0 || towardCenter <= eye.w() ||
+            towardCenter * towardCenter <= eye.w() * delta.length2();
+    }
+
     struct OSGEARTHPRESTIGE_EXPORT LabelKey
     {
         std::uint64_t source = 0;

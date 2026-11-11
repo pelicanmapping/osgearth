@@ -165,6 +165,22 @@ A standalone compile of the backend-disabled implementation verifies the unavail
 header matches the source, and generated VS filters were checked for every label source/header/shader.
 Transient checks and logs are in `build/label-public`; temporary build hooks are removed afterward.
 
+## Terrain anchoring
+
+Tiled place and road labels sample the map's `ElevationPool` on their tile-preparation worker. Prepared
+anchors use terrain height plus a 10-metre offset; roads sample each retained path vertex. Elevation queries
+are batched at a resolution of approximately one label-source tile width / 256, with an eight-tile working
+set. The immutable results live in the existing bounded label-tile cache and are shared across cameras.
+Cull and draw perform no elevation queries; camera movement and paint-only edits reuse prepared anchors.
+Missing elevation retains the 10-metre ellipsoid fallback, and canceled requests do not publish partial data.
+
+Worker eligibility and glyph/leader/path shaders use the same height-aware WGS84 segment test. Elevated
+anchors can remain visible beyond the surface horizon. This does not implement terrain/scene occlusion:
+labels remain screen overlays and can show through intervening mountains or buildings. Runtime elevation
+changes do not yet invalidate prepared label tiles; reopen the layer to refresh already cached anchors.
+`LabelNode` positions still come from their scene-graph transforms; use a terrain-clamping `GeoTransform`
+when those nodes need ground-relative positioning.
+
 ## Scene-graph LabelNode
 
 Include `<osgEarthPrestige/LabelNode>` and bind each node explicitly to the `LabelLayer` whose tiled

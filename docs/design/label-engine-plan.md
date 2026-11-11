@@ -776,3 +776,18 @@ accepted configuration intact. Level edits reload affected tile levels lazily, r
 through I/O and retry failures. Revert covers appearance, levels and padding; styles XML includes rule
 levels, while padding remains a layer option. Public ABI is 213. Validation and frame measurements are
 recorded in the performance report.
+
+
+### Terrain anchoring follow-up (2026-11-11)
+
+The original fixed 10-metre ellipsoid anchors caused tiled labels to slide against elevated terrain in
+oblique views. LabelLayer now supplies its map elevation pool to the tile worker, which batches height
+samples for admitted points and retained road vertices before publication. Prepared anchors remain cached
+and shared across cameras; independent collision history and fades are unchanged. Sampling resolution
+tracks the label-source tile size, and missing data retains the prior ellipsoid fallback.
+
+The CPU and GPU horizon tests now handle raised anchors consistently instead of treating every anchor as
+an ellipsoid surface point. Terrain/scene occlusion and invalidation after runtime elevation edits remain
+separate work. LabelNodes continue to inherit parent transforms and GeoTransform clamping.
+
+Transient validation and frame measurements are under `build/label-terrain/`; see the performance notes.

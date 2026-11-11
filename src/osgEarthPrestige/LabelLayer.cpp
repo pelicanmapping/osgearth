@@ -514,7 +514,12 @@ void LabelLayer::addedToMap(const Map* map)
     try
     {
         std::shared_ptr<TileSource> tiles;
-        if (source) tiles = std::make_shared<TileSource>(source, _impl->font, _impl->styles, _impl->tileOptions);
+        if (source)
+        {
+            auto options = _impl->tileOptions;
+            options.elevationPool = map->getElevationPool();
+            tiles = std::make_shared<TileSource>(source, _impl->font, _impl->styles, options);
+        }
         _impl->root->removeChildren(0, _impl->root->getNumChildren());
         _scene->open(_impl->font, (std::uint64_t(1) << 63) | std::uint64_t(getUID()));
         _impl->root->addChild(new LabelCameras(tiles, _scene, _impl->density, _impl->declutterPadding));

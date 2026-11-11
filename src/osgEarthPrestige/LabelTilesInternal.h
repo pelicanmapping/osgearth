@@ -2,6 +2,7 @@
 #pragma once
 #include "LabelRendererInternal.h"
 #include <osgEarth/FeatureSource>
+#include <osgEarth/ElevationPool>
 #include <osgEarth/TileKey>
 #include <chrono>
 
@@ -26,6 +27,8 @@ namespace osgEarthPrestige { namespace Labeling
         unsigned maxLevel = 8, tilesPerView = 24, recordsPerTile = 256, residentTiles = 128;
         std::size_t residentBytes = 32 * 1024 * 1024;
         double tilePixels = 512;
+        // Optional map elevation service. Only the tile worker samples it; published anchors are immutable.
+        osg::ref_ptr<osgEarth::ElevationPool> elevationPool;
         bool repairLegacyControls = false; // Opt-in repair for the repository's older Natural Earth sample.
     };
 

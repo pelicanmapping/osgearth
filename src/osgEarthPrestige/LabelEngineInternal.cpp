@@ -132,6 +132,7 @@ std::vector<Placement> osgEarthPrestige::Labeling::project(const Request& reques
     output.reserve(count);
     const auto matrix = request.camera.worldToView * request.camera.projection;
     const auto eye = osg::Matrixd::inverse(request.camera.worldToView).getTrans();
+    const auto horizon = ellipsoidEye(eye);
     for (std::size_t b = 0; b < request.batches.size(); ++b)
     {
         const auto& records = request.batches[b]->records();
@@ -149,13 +150,8 @@ std::vector<Placement> osgEarthPrestige::Labeling::project(const Request& reques
                 if (placePath(record, request.camera, placement)) output.push_back(std::move(placement));
                 continue;
             }
-            if (request.camera.geocentric)
-            {
-                const auto& anchor = record.worldAnchor;
-                const osg::Vec3d normal(anchor.x(), anchor.y(), anchor.z() * 1.006739496742);
-                if (normal * (eye - anchor) <= 0.0)
-                    continue;
-            }
+            if (request.camera.geocentric && !visibleOverEllipsoid(horizon, record.worldAnchor - eye))
+                continue;
             const osg::Vec4d clip = osg::Vec4d(record.worldAnchor, 1.0) * matrix;
             if (!std::isfinite(clip.x()) || !std::isfinite(clip.y()) || !std::isfinite(clip.z()) ||
                 !std::isfinite(clip.w()) || clip.w() <= 0.0 || std::abs(clip.x()) > clip.w() ||

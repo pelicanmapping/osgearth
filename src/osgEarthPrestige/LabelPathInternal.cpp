@@ -13,14 +13,15 @@ bool osgEarthPrestige::Labeling::placePath(const Record& record, const CameraSna
     const auto& path = *record.path;
     const auto matrix = camera.worldToView * camera.projection;
     const auto eye = osg::Matrixd::inverse(camera.worldToView).getTrans();
+    const auto horizon = ellipsoidEye(eye);
     struct Vertex { osg::Vec3d world; osg::Vec2d pixel; double w; };
     std::vector<Vertex> vertices;
     vertices.reserve(path.world.size());
     for (const auto& world : path.world)
     {
         const auto clip = osg::Vec4d(world, 1) * matrix;
-        const osg::Vec3d normal(world.x(), world.y(), world.z() * 1.006739496742);
-        if (clip.w() <= 0 || !std::isfinite(clip.w()) || (camera.geocentric && normal * (eye - world) <= 0))
+        if (clip.w() <= 0 || !std::isfinite(clip.w()) ||
+            (camera.geocentric && !visibleOverEllipsoid(horizon, world - eye)))
             return false;
         osg::Vec2d pixel(camera.x + (clip.x() / clip.w() + 1) * camera.width * 0.5,
             camera.y + (clip.y() / clip.w() + 1) * camera.height * 0.5);

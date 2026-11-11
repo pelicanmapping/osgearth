@@ -782,6 +782,7 @@ void ViewNode::traverse(osg::NodeVisitor& visitor)
                     state->addUniform(new osg::Uniform("cameraLinearProjection", osg::Matrixf()));
                     state->addUniform(new osg::Uniform("eyeHigh", osg::Vec3f()));
                     state->addUniform(new osg::Uniform("eyeLow", osg::Vec3f()));
+                    state->addUniform(new osg::Uniform("horizonEye", osg::Vec4f()));
                     state->addUniform(new osg::Uniform("viewportDensity", osg::Vec3f()));
                     state->addUniform(new osg::Uniform("frameTime", 0.0f));
                     state->addUniform(new osg::Uniform("adoptionTime", 0.0f));
@@ -792,7 +793,9 @@ void ViewNode::traverse(osg::NodeVisitor& visitor)
             }
             free->pin = _displayed;
             osg::Vec3f high, low;
-            split(osg::Matrixd::inverse(camera.worldToView).getTrans(), high, low);
+            const auto eye = osg::Matrixd::inverse(camera.worldToView).getTrans();
+            split(eye, high, low);
+            const osg::Vec4f horizon(ellipsoidEye(eye));
             auto linear = camera.worldToView;
             linear.setTrans(0, 0, 0);
             for (std::size_t i = 0; i < free->meshes.size(); ++i)
@@ -803,6 +806,7 @@ void ViewNode::traverse(osg::NodeVisitor& visitor)
                 state->getUniform("cameraLinearProjection")->set(osg::Matrixf(linear * camera.projection));
                 state->getUniform("eyeHigh")->set(high);
                 state->getUniform("eyeLow")->set(low);
+                state->getUniform("horizonEye")->set(horizon);
                 state->getUniform("viewportDensity")->set(osg::Vec3f(camera.width, camera.height, _density));
                 state->getUniform("frameTime")->set(float(camera.time - timeOrigin));
                 state->getUniform("adoptionTime")->set(float(_adoptedTime - timeOrigin));

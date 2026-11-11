@@ -230,6 +230,7 @@ struct TileSource::State
     std::string font;
     std::vector<TextStyle> styles;
     TileOptions options;
+    osgEarth::ElevationPool::WorkingSet elevations { 8u };
     struct StyleUpdate
     {
         std::vector<TextStyle> styles;
@@ -248,6 +249,60 @@ struct TileSource::State
     //! Captures control-thread configuration; source I/O and font objects are confined to run().
     State(osgEarth::FeatureSource* s, std::string f, std::vector<TextStyle> st, TileOptions op) :
         source(s), font(std::move(f)), styles(std::move(st)), options(std::move(op)) { }
+
+    //! Samples only admitted anchors/road vertices on the tile worker, once per cached tile generation.
+    //! Missing heights retain the ellipsoid fallback. Cancellation discards the unpublished batch.
+    void clampToTerrain(std::vector<Record>& records, const TileKey& key, osgEarth::ProgressCallback* progress)
+    {
+        auto* pool = options.elevationPool.get();
+        osg::ref_ptr<const osgEarth::SpatialReference> srs = pool ? pool->getMapSRS() : nullptr;
+        if (!srs || records.empty()) return;
+        std::vector<osg::Vec3d> coordinates;
+        std::vector<osg::Vec3d*> anchors;
+        std::vector<std::shared_ptr<LabelPath>> paths(records.size());
+        //! Converts one retained anchor to map coordinates; invalid transforms preserve the existing anchor.
+        auto append = [&](osg::Vec3d& world)
+        {
+            osgEarth::GeoPoint point;
+            if (point.fromWorld(srs, world))
+            {
+                coordinates.push_back(point.vec3d());
+                anchors.push_back(&world);
+            }
+        };
+        for (std::size_t i = 0; i < records.size(); ++i)
+        {
+            if (progress->isCanceled()) return;
+            if (records[i].path)
+            {
+                paths[i] = std::make_shared<LabelPath>(*records[i].path);
+                for (auto& world : paths[i]->world) append(world);
+            }
+            else append(records[i].worldAnchor);
+        }
+        if (coordinates.empty()) return;
+        // Match sampling resolution to the label tile, instead of fetching full-resolution global terrain.
+        const auto extent = key.getExtent().transform(srs);
+        if (!extent.isValid()) return;
+        const osgEarth::Distance resolution(extent.width() / 256.0, srs->getUnits());
+        const int sampled = pool->sampleMapCoords(coordinates.begin(), coordinates.end(), resolution,
+            &elevations, progress, NO_DATA_VALUE);
+        if (sampled < 0 || progress->isCanceled()) return;
+        for (std::size_t i = 0; i < coordinates.size(); ++i)
+        {
+            auto point = coordinates[i];
+            if (!std::isfinite(point.z()) || point.z() == NO_DATA_VALUE) continue;
+            point.z() += 10.0;
+            osg::Vec3d world;
+            if (osgEarth::GeoPoint(srs, point).toWorld(world)) *anchors[i] = world;
+        }
+        for (std::size_t i = 0; i < records.size(); ++i)
+        {
+            if (!paths[i]) continue;
+            records[i].worldAnchor = paths[i]->world[paths[i]->world.size() / 2];
+            records[i].path = std::move(paths[i]);
+        }
+    }
 
     //! Restyles paint/bounds without queries; changed level eligibility marks cached tiles for lazy worker reload.
     //! Existing record identities/revisions preserve each view's placement preferences and fade progress.
@@ -451,6 +506,8 @@ struct TileSource::State
             counters.skipped += skipped;
             counters.truncated += eligible - admitted;
         }
+        clampToTerrain(records, key, progress);
+        if (progress->isCanceled()) return {};
         return std::make_shared<const Batch>(std::move(records), std::move(payload));
     }
 

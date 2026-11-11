@@ -6,6 +6,7 @@ uniform sampler2D pathHeaders, pathVertices, pathOffsets;
 uniform mat4 cameraLinearProjection;
 uniform vec3 eyeHigh, eyeLow, viewportDensity;
 uniform bool geocentric;
+uniform vec4 horizonEye;
 shared vec2 points[256];
 shared float lengths[256];
 shared vec4 fitted[256];
@@ -50,9 +51,15 @@ void main()
         vec3 low = texelFetch(pathVertices, address((vertexStart + i) * 2u + 1u), 0).xyz;
         vec3 relative = (high - eyeHigh) + (low - eyeLow);
         vec4 clip = cameraLinearProjection * vec4(relative, 1.0);
-        vec3 normal = high * vec3(1.0, 1.0, 1.006739496742);
         bool visible = clip.w > 0.0 && !(any(isnan(clip)) || any(isinf(clip)));
-        if (geocentric && dot(normal, -relative) <= 0.0) visible = false;
+        // Height-aware WGS84 segment occlusion, matching worker eligibility.
+        if (geocentric && horizonEye.w >= 0.0)
+        {
+            vec3 delta = relative / vec3(6378137.0, 6378137.0, 6356752.314245);
+            float towardCenter = -dot(delta, horizonEye.xyz);
+            if (towardCenter > horizonEye.w && towardCenter * towardCenter > horizonEye.w * dot(delta, delta))
+                visible = false;
+        }
         points[i] = visible ? (clip.xy / clip.w + 1.0) * viewportDensity.xy * 0.5 : vec2(0.0);
         if (!visible) atomicOr(invalid, 1u);
     }

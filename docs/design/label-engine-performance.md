@@ -763,3 +763,29 @@ glyphs remained present. Level/padding correctness was exercised separately, not
 first-matching fallback rules, unaffected-LOD query counts, retained coverage on failed reload, range
 validation and Config serialization. Backend-disabled linkage also passed. Artifacts are under
 `build/label-controls`; test/benchmark build hooks are removed from tracked CMake files.
+
+
+## Terrain anchoring and elevated horizon checks (2026-11-11)
+
+Tiled label anchors now sample map elevation on the tile worker. Heights are batched for admitted points
+and road vertices at approximately label-tile width / 256 resolution, with an eight-tile elevation working
+set. Immutable prepared anchors are cached across cameras and paint updates. Missing data retains the
+ellipsoid fallback; no sampling enters cull or draw. CPU/GPU horizon checks now support elevated anchors.
+
+Transient synthetic terrain tests verify point and road heights, missing-data fallback, worker-only sampling,
+cache reuse across cameras/style edits, subpixel anchor alignment in three tilted views, the public layer's
+map-to-renderer wiring, and raised-anchor horizon visibility. The full focused suite passed 55 tests with
+1,102 assertions, plus the backend-disabled API check. No permanent test or benchmark source was added.
+
+Single-camera completed-frame measurement uses the existing PublicNodeFrame/0 workload: 1,024 tiled labels,
+5,120 glyphs, 1920x1080, real OpenGL drawing and glFinish, three repetitions of at least 0.5 seconds. Both
+runs verify the same submitted glyph population. Medians on the RTX 5080:
+
+| Measurement | Before | Terrain anchoring / elevated horizon |
+| --- | ---: | ---: |
+| Completed frame | 101.72 us | 98.41 us |
+| GPU draw | 46.86 us | 46.84 us |
+
+These figures show no material warmed-frame regression, not a claimed speedup. They exclude cold terrain
+I/O and do not establish end-to-end map frame rate. Source, build/test logs, and before/after JSON are under
+`build/label-terrain/`. Terrain/scene occlusion and live elevation-edit invalidation remain separate work.

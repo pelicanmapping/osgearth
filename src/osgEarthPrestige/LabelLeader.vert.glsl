@@ -9,6 +9,7 @@ uniform float frameTime, adoptionTime;
 uniform mat4 cameraLinearProjection;
 uniform vec3 eyeHigh, eyeLow, viewportDensity;
 uniform bool geocentric;
+uniform vec4 horizonEye;
 out vec2 v_local;
 flat out vec4 v_color;
 flat out float v_length, v_halfWidth, v_opacity;
@@ -19,8 +20,14 @@ void main()
     vec3 relative = (anchorHigh - eyeHigh) + (anchorLow - eyeLow);
     vec4 clip = cameraLinearProjection * vec4(relative, 1.0);
     bool visible = clip.w > 0.0 && abs(clip.x) <= clip.w && abs(clip.y) <= clip.w;
-    vec3 normal = anchorHigh * vec3(1.0, 1.0, 1.006739496742);
-    if (geocentric && dot(normal, -relative) <= 0.0) visible = false;
+    // Height-aware WGS84 segment occlusion, matching worker eligibility.
+    if (geocentric && horizonEye.w >= 0.0)
+    {
+        vec3 delta = relative / vec3(6378137.0, 6378137.0, 6356752.314245);
+        float towardCenter = -dot(delta, horizonEye.xyz);
+        if (towardCenter > horizonEye.w && towardCenter * towardCenter > horizonEye.w * dot(delta, delta))
+            visible = false;
+    }
     vec2 start = endpoints.xy * viewportDensity.z;
     vec2 delta = (endpoints.zw - endpoints.xy) * viewportDensity.z;
     v_length = length(delta);

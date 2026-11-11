@@ -17,6 +17,7 @@ uniform mat4 cameraLinearProjection;
 uniform vec3 eyeHigh, eyeLow;
 uniform vec3 viewportDensity;
 uniform bool geocentric;
+uniform vec4 horizonEye;
 uniform bool gpuPaths = false;
 uniform sampler2D pathGlyphs;
 out vec2 v_emCoord;
@@ -33,9 +34,14 @@ void main()
     vec3 relative = (anchorHigh - eyeHigh) + (anchorLow - eyeLow);
     vec4 clip = cameraLinearProjection * vec4(relative, 1.0);
     bool visible = clip.w > 0.0 && abs(clip.x) <= clip.w && abs(clip.y) <= clip.w;
-    // Surface-anchor WGS84 horizon approximation; elevated-anchor occlusion is deferred.
-    vec3 normal = anchorHigh * vec3(1.0, 1.0, 1.006739496742);
-    if (geocentric && dot(normal, -relative) <= 0.0) visible = false;
+    // Height-aware WGS84 segment occlusion, matching worker eligibility.
+    if (geocentric && horizonEye.w >= 0.0)
+    {
+        vec3 delta = relative / vec3(6378137.0, 6378137.0, 6356752.314245);
+        float towardCenter = -dot(delta, horizonEye.xyz);
+        if (towardCenter > horizonEye.w && towardCenter * towardCenter > horizonEye.w * dot(delta, delta))
+            visible = false;
+    }
     vec2 offset = mix(pixelBounds.xy, pixelBounds.zw, corner) * viewportDensity.z;
     float angle = parameters.y;
     vec2 direction = vec2(cos(angle), sin(angle));

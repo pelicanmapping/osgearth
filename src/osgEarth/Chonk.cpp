@@ -47,6 +47,10 @@ static_assert(offsetof(Chonk::VertexGPU, material_index) == 30, "Material ID occ
 // note: this MUST match the local_size product in Chonk.Culling.glsl
 #define GPU_CULLING_LOCAL_WG_SIZE 32
 
+#ifndef GL_PARAMETER_BUFFER
+#define GL_PARAMETER_BUFFER 0x80EE
+#endif
+
 // Uncomment this to reset all buffer base index bindings after rendering.
 // It's unlikely this is necessary, but it's here just we find otherwise.
 //#define RESET_BUFFER_BASE_BINDINGS
@@ -2528,6 +2532,16 @@ ChonkDrawable::GLObjects::update(
 
     if (_gpucull)
     {
+        if (_glMultiDrawElementsIndirectBindlessCountNV)
+        {
+            for (auto& count : _cutoutCounts)
+            {
+                if (count) continue;
+                count = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+                count->bind();
+                count->uploadData(sizeof(GLuint), nullptr);
+            }
+        }
         if (!_chonkBuf)
         {
             GLsizei sizeHint = _chonk_lods.size() * sizeof(ChonkLOD);
@@ -2593,6 +2607,12 @@ ChonkDrawable::GLObjects::reset(osg::State& state)
     _ext->glUniform4ui(location("oe_chonk_views"),0,0,0,0);
     _ext->glUniform1ui(location("oe_chonk_list_stride"), GLuint(_commands.size()));
     _ext->glUniform1i(location("oe_chonk_pass"), RESET);
+    _ext->glUniform1i(location("oe_chonk_count_cutouts"), _cutoutCounts[0] != nullptr);
+    if (_cutoutCounts[0])
+    {
+        _cutoutCounts[0]->bindBufferBase(27);
+        _cutoutCounts[1]->bindBufferBase(22);
+    }
     _commandBuf->bindBufferBase(29);
     _ext->glDispatchCompute(GLuint((NUM_LISTS*_commands.size() + GPU_CULLING_LOCAL_WG_SIZE-1) /
         GPU_CULLING_LOCAL_WG_SIZE), 1, 1);
@@ -2618,6 +2638,9 @@ ChonkDrawable::GLObjects::cull(osg::State& state, int pass, const OcclusionFrame
     ext->glUniform4ui(location("oe_chonk_views"),0,0,0,0);
     ext->glUniform1ui(location("oe_chonk_list_stride"), GLuint(_commands.size()));
     ext->glUniform1ui(location("oe_chonk_max_lods"), GLuint(_maxNumLODs));
+    const auto& cutoutCount = _cutoutCounts[pass == LATE ? 1 : 0];
+    ext->glUniform1i(location("oe_chonk_count_cutouts"), cutoutCount != nullptr);
+    if (cutoutCount) cutoutCount->bindBufferBase(27);
 
     _instanceOutputBuf->bindBufferBase(0);
     _commandBuf->bindBufferBase(29);
@@ -2832,8 +2855,7 @@ void ChonkDrawable::GLObjects::drawViews(osg::State& state, const ChonkRenderPas
     state.applyModelViewAndProjectionUniformsIfRequired();
     batch.visible->bindBufferBase(0);
     _instanceInputBuf->bindBufferBase(31);
-    constexpr GLenum parameterBuffer = 0x80EE; // GL_PARAMETER_BUFFER, core in OpenGL 4.6.
-    batch.counts->bind(parameterBuffer);
+    batch.counts->bind(GL_PARAMETER_BUFFER);
     const GLenum type = sizeof(Chonk::element_t) == sizeof(GLushort) ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
     if (!pass.getBatch()->parameters.coreDraws && _glMultiDrawElementsIndirectBindlessCountNV)
     {
@@ -2842,7 +2864,7 @@ void ChonkDrawable::GLObjects::drawViews(osg::State& state, const ChonkRenderPas
         // Keep the NV parameter at offset zero. Some drivers validate nonzero byte offsets as draw counts.
         // The four-byte GPU copy avoids that validation bug without a CPU readback or oversized command lists.
         batch.counts->copyBufferSubData(batch.parameter,pass.getIndex()*sizeof(GLuint),0,sizeof(GLuint));
-        batch.parameter->bind(parameterBuffer);
+        batch.parameter->bind(GL_PARAMETER_BUFFER);
         _glMultiDrawElementsIndirectBindlessCountNV(GL_TRIANGLES,type,
             reinterpret_cast<const GLvoid*>(pass.getIndex()*_commands.size()*sizeof(Chonk::DrawCommand)),
             0,GLsizei(_commands.size()),sizeof(Chonk::DrawCommand),1);
@@ -2862,7 +2884,7 @@ void ChonkDrawable::GLObjects::drawViews(osg::State& state, const ChonkRenderPas
                 group.count,5*sizeof(GLuint));
         }
     }
-    _ext->glBindBuffer(parameterBuffer,0);
+    _ext->glBindBuffer(GL_PARAMETER_BUFFER,0);
 }
 
 void
@@ -2893,13 +2915,19 @@ ChonkDrawable::GLObjects::draw(osg::State& state, int list)
         GL_UNSIGNED_INT;
 
     const std::size_t first = _gpucull ? std::size_t(list) * _commands.size() : 0u;
-    _glMultiDrawElementsIndirectBindlessNV(
-        GL_TRIANGLES,
-        elementType,
-        (const GLvoid*)(first * sizeof(Chonk::DrawCommand)),
-        _commands.size(),
-        sizeof(Chonk::DrawCommand),
-        1);
+    const auto offset = reinterpret_cast<const GLvoid*>(first * sizeof(Chonk::DrawCommand));
+    if (_gpucull && _cutoutCounts[0] && (list == EARLY_CUTOUT || list == LATE_CUTOUT))
+    {
+        _cutoutCounts[list == LATE_CUTOUT ? 1 : 0]->bind(GL_PARAMETER_BUFFER);
+        _glMultiDrawElementsIndirectBindlessCountNV(
+            GL_TRIANGLES, elementType, offset, 0, GLsizei(_commands.size()), sizeof(Chonk::DrawCommand), 1);
+        _ext->glBindBuffer(GL_PARAMETER_BUFFER, 0);
+    }
+    else
+    {
+        _glMultiDrawElementsIndirectBindlessNV(
+            GL_TRIANGLES, elementType, offset, GLsizei(_commands.size()), sizeof(Chonk::DrawCommand), 1);
+    }
 }
 
 void
@@ -2912,6 +2940,7 @@ ChonkDrawable::GLObjects::release()
     _instanceOutputBuf = nullptr;
     _chonkBuf = nullptr;
     _auxiliaryBuf = nullptr;
+    for (auto& count : _cutoutCounts) count = nullptr;
     _templateBuf = nullptr;
     _groupBuf = nullptr;
     _coreVAO = nullptr;
@@ -3587,7 +3616,9 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
 #ifdef RESET_BUFFER_BASE_BINDINGS
         auto& gl = ChonkDrawable::GLObjects::get(drawable->_globjects, state);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER,  0, 0);
+        gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 22, 0);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 23, 0);
+        gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 27, 0);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 29, 0);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 30, 0);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 31, 0);

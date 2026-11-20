@@ -578,6 +578,7 @@ namespace osgEarth
             };
             std::vector<DrawGroup> _drawGroups;
             GLBuffer::Ptr _templateBuf, _groupBuf;
+            GLBuffer::Ptr _cutoutCounts[2]; // separate offset-zero NV draw parameters for early and late cutouts
             GLVAO::Ptr _coreVAO;
             unsigned _outputCapacity = 0;
             std::uint64_t _dataRevision = 0;

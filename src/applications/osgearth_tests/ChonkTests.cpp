@@ -201,6 +201,17 @@ namespace
                 result.visible.data());
             readBuffer(*objects._commandBuf, result.commands.size() * sizeof(Chonk::DrawCommand),
                 result.commands.data());
+            // Compare the actual indirect draw limit with all GPU command slots, including empty interior slots.
+            for (unsigned phase = 0; _gpucull && phase < 2; ++phase)
+            {
+                if (!objects._cutoutCounts[phase]) continue;
+                unsigned expected = 0, actual = 0;
+                const auto first = (phase == 0 ? EARLY_CUTOUT : LATE_CUTOUT) * result.stride;
+                for (unsigned i = 0; i < result.stride; ++i)
+                    if (result.commands[first + i].cmd.instanceCount != 0u) expected = i + 1;
+                readBuffer(*objects._cutoutCounts[phase], sizeof(actual), &actual);
+                CHECK(actual == expected);
+            }
             result.sourceUnchanged = std::memcmp(result.sources.data(), objects._all_instances.data(),
                 result.sources.size() * sizeof(Instance)) == 0;
             return result;
@@ -900,7 +911,20 @@ TEST_CASE("Chonk occlusion follows the active depth convention", "[chonk][gpu][c
     osg::ref_ptr<InspectableDrawable> targets = new InspectableDrawable();
     targets->setBirthday(-10.0);
     targets->add(model, osg::Matrixf::translate(-20,0,0));
-    targets->add(model, osg::Matrixf::translate(20,0,0));
+    bool mixed = false;
+    SECTION("Opaque targets")
+    {
+        targets->add(model, osg::Matrixf::translate(20,0,0));
+    }
+    SECTION("Mixed opaque and cutout targets")
+    {
+        mixed = true;
+        auto geometry = ChonkTest::mesh();
+        static_cast<osg::Vec4Array*>(geometry->getColorArray())->front().a() = 0.9f;
+        auto cutout = renderer.factory->getOrCreateChonk(geometry, 0.0f);
+        REQUIRE(cutout);
+        targets->add(cutout, osg::Matrixf::translate(20,0,0));
+    }
 
     auto red = ChonkTest::mesh();
     static_cast<osg::Vec4Array*>(red->getColorArray())->front().set(1,0,0,1);
@@ -960,7 +984,19 @@ TEST_CASE("Chonk occlusion follows the active depth convention", "[chonk][gpu][c
         {
             INFO("Occluder present " << hidden);
             occluder->setNodeMask(hidden ? ~0u : 0u);
-            for (unsigned frame = 0; frame < 4; ++frame) renderer.frame();
+            renderer.frame();
+            if (!hidden)
+            {
+                // The newly revealed target must already render on the first late draw.
+                const auto revealed = targets->snapshot(*renderer.context->getState());
+                const auto first = (mixed ? 3u : 2u) * revealed.stride; // late cutout or late opaque
+                unsigned lateInstances = 0;
+                for (unsigned i = 0; i < revealed.stride; ++i)
+                    lateInstances += revealed.commands[first + i].cmd.instanceCount;
+                CHECK(lateInstances == 1u);
+                CHECK(renderer.pixels()->data(190,128)[2] > 200);
+            }
+            for (unsigned frame = 1; frame < 4; ++frame) renderer.frame();
             auto snapshot = targets->snapshot(*renderer.context->getState());
             unsigned drawn = 0;
             for (const auto& command : snapshot.commands) drawn += command.cmd.instanceCount;

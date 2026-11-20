@@ -22,6 +22,7 @@ namespace osgEarth { namespace Util
         _sources[Chonk] = @Chonk.glsl@;
 
         // Chonk GPU Culling
+        _sources["Chonk.Binning.glsl"] = @Chonk.Binning.glsl@;
         ChonkCulling = "Chonk.Culling.glsl";
         _sources[ChonkCulling] = @Chonk.Culling.glsl@;
 

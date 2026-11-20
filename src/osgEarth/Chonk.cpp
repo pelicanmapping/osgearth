@@ -2075,7 +2075,7 @@ ChonkDrawable::update_and_cull_batches(osg::State& state, int pass, const Occlus
 }
 
 void
-ChonkDrawable::draw_batches(osg::State& state, int list) const
+ChonkDrawable::draw_batches(osg::State& state, int list, osg::Program* binning) const
 {
     auto& globjects = GLObjects::get(_globjects, state);
     // ChonkBin flattens StateGraphs, so draw-local data must bind here, not through an inherited StateSet.
@@ -2089,7 +2089,7 @@ ChonkDrawable::draw_batches(osg::State& state, int list) const
     else
     {
         state.bindVertexArrayObject(globjects._vao->name());
-        globjects.draw(state, list);
+        globjects.draw(state, list, binning);
     }
 }
 
@@ -2290,6 +2290,11 @@ ChonkDrawable::GLObjects::initialize(const osg::Object* host, osg::State& state)
     if (!osg::isGLExtensionSupported(state.getContextID(),"GL_NV_bindless_multi_draw_indirect_count"))
         _glMultiDrawElementsIndirectBindlessCountNV = nullptr;
     osg::setGLExtensionFuncPtr(_glMultiDrawElementsIndirectBindlessNV,"glMultiDrawElementsIndirectBindlessNV");
+    osg::setGLExtensionFuncPtr(_bindBuffersBase, "glBindBuffersBase");
+    GLint blocks = 0;
+    glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &blocks);
+    if (blocks >= 13 && _bindBuffersBase && _glMultiDrawElementsIndirectBindlessCountNV)
+        glGetIntegerv(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &_maxBandBytes);
     _vao = createVAO(host,state,true);
     _coreVAO = createVAO(host,state,false);
 }
@@ -2498,6 +2503,14 @@ ChonkDrawable::GLObjects::update(
     const auto paddedSize = NEXT_MULTIPLE(_all_instances.size(), GPU_CULLING_LOCAL_WG_SIZE);
     _all_instances.resize(paddedSize);
 
+    _bands.reset();
+    // Bypass lists smaller than the quantile sample or larger than a portable one-dimensional dispatch.
+    _canBin = _gpucull && _maxBandBytes > 0 && outputOffset >= 256 && _commands.size() <= 65535 &&
+        _commands.size() <= std::size_t(_maxBandBytes) / (8 * sizeof(Chonk::DrawCommand)) &&
+        outputOffset <= std::size_t(_maxBandBytes) / sizeof(VisibleInstance) &&
+        _all_instances.size() <= std::size_t(_maxBandBytes) / sizeof(osg::Vec4f) &&
+        std::any_of(_chonk_lods.begin(), _chonk_lods.end(),
+            [](const ChonkLOD& lod) { return (lod.flags & FLAG_ALPHA_TESTED) == 0u; });
     _outputCapacity = outputOffset;
     if (!_templateBuf) _templateBuf = GLBuffer::create(GL_SHADER_STORAGE_BUFFER,state);
     _templateBuf->bind();
@@ -2887,8 +2900,94 @@ void ChonkDrawable::GLObjects::drawViews(osg::State& state, const ChonkRenderPas
     _ext->glBindBuffer(GL_PARAMETER_BUFFER,0);
 }
 
+bool
+ChonkDrawable::GLObjects::drawBanded(osg::State& state, osg::Program& program, GLenum elementType)
+{
+    auto* graphics = state.getLastAppliedProgramObject();
+    if (!graphics || !_canBin) return false;
+
+    // An application shader can own indexed SSBO bindings through the OSG state graph.
+    // Keep its bindings intact and submit the ordinary opaque list in that case.
+    const auto& attributes = state.getAttributeMap();
+    const auto storage = osg::StateAttribute::SHADERSTORAGEBUFFERBINDING;
+    for (auto it = attributes.lower_bound({storage, 14u}); it != attributes.end() && it->first.first == storage; ++it)
+    {
+        const auto slot = it->first.second;
+        if (slot > 28) break;
+        if ((slot <= 21 || slot >= 24) && it->second.last_applied_attribute) return false;
+    }
+    auto* compute = program.getPCP(state);
+    if (compute->needsLink()) program.compileGLObjects(state);
+    if (!compute->isLinked()) return false;
+
+    static_assert(sizeof(Chonk::DrawCommand) == 18 * sizeof(GLuint), "Chonk.Binning.glsl command stride");
+    static_assert(offsetof(Chonk::DrawCommand, cmd) == 0 &&
+        offsetof(DrawElementsIndirectCommand, instanceCount) == sizeof(GLuint) &&
+        offsetof(DrawElementsIndirectCommand, baseInstance) == 4 * sizeof(GLuint), "Chonk.Binning.glsl command fields");
+    static_assert(sizeof(VisibleInstance) == 4 * sizeof(GLuint), "Chonk.Binning.glsl visibility stride");
+    if (!_bands)
+    {
+        _bands = std::make_shared<DepthBands>();
+        std::vector<osg::Vec4f> centers(_all_instances.size());
+        for (std::size_t i = 0; i < centers.size(); ++i)
+        {
+            const auto& instance = _all_instances[i];
+            if (instance.first_lod_cmd_index < 0) continue;
+            auto p = osg::Vec3d(_chonk_lods[instance.first_lod_cmd_index].center) * osg::Matrixd(instance.xform);
+            centers[i].set(p.x(), p.y(), p.z(), 1.0f);
+        }
+        // Allocate only when this context first draws the eligible opaque color list.
+        auto allocate = [&](GLsizei bytes, const void* data = nullptr)
+        {
+            auto buffer = GLBuffer::create(GL_SHADER_STORAGE_BUFFER, state);
+            buffer->bind();
+            buffer->uploadData(bytes, data, data ? GL_STATIC_DRAW : GL_DYNAMIC_DRAW);
+            return buffer;
+        };
+        _bands->centers = allocate(GLsizei(centers.size() * sizeof(osg::Vec4f)), centers.data());
+        _bands->visible = allocate(GLsizei(_outputCapacity * sizeof(VisibleInstance)));
+        _bands->commands = allocate(GLsizei(8 * _commands.size() * sizeof(Chonk::DrawCommand)));
+        for (auto& parameter : _bands->parameters) parameter = allocate(2 * sizeof(GLuint));
+    }
+
+    auto& bands = *_bands;
+    GLuint parameters[8];
+    for (unsigned b = 0; b < 8; ++b) parameters[b] = bands.parameters[b]->name();
+    const GLuint data[] = { _commandBuf->name(), _instanceOutputBuf->name(), bands.centers->name(),
+        bands.visible->name(), bands.commands->name() };
+    _bindBuffersBase(GL_SHADER_STORAGE_BUFFER, 14, 8, parameters);
+    _bindBuffersBase(GL_SHADER_STORAGE_BUFFER, 24, 5, data);
+    const auto& m = state.getModelViewMatrix();
+    _ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    _ext->glUseProgram(compute->getHandle());
+    _ext->glUniform4f(0, -m(0,2), -m(1,2), -m(2,2), -m(3,2));
+    _ext->glUniform1ui(1, GLuint(_commands.size()));
+    _ext->glUniform1ui(2, _outputCapacity);
+    _ext->glUniform1i(3, bands.drawNumber++ % 8 == 0 ? 1 : 0);
+    _ext->glDispatchCompute(1, 1, 1);
+    _ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    _ext->glUniform1i(3, 2);
+    _ext->glDispatchCompute(GLuint(_commands.size()), 1, 1);
+    _ext->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
+    _ext->glUseProgram(graphics->getHandle());
+
+    bands.visible->bindBufferBase(0);
+    bands.commands->bind(GL_DRAW_INDIRECT_BUFFER);
+    for (unsigned b = 0; b < 8; ++b)
+    {
+        bands.parameters[b]->bind(GL_PARAMETER_BUFFER);
+        const auto offset = reinterpret_cast<const void*>(b * _commands.size() * sizeof(Chonk::DrawCommand));
+        _glMultiDrawElementsIndirectBindlessCountNV(GL_TRIANGLES, elementType, offset, 0,
+            GLsizei(_commands.size()), sizeof(Chonk::DrawCommand), 1);
+    }
+    _ext->glBindBuffer(GL_PARAMETER_BUFFER, 0);
+    _commandBuf->bind(GL_DRAW_INDIRECT_BUFFER);
+    _instanceOutputBuf->bindBufferBase(0);
+    return true;
+}
+
 void
-ChonkDrawable::GLObjects::draw(osg::State& state, int list)
+ChonkDrawable::GLObjects::draw(osg::State& state, int list, osg::Program* binning)
 {
     OE_GL_ZONE_NAMED("draw");
 
@@ -2914,6 +3013,9 @@ ChonkDrawable::GLObjects::draw(osg::State& state, int list)
         GL_UNSIGNED_SHORT :
         GL_UNSIGNED_INT;
 
+    if (binning && list == EARLY_OPAQUE && drawBanded(state, *binning, elementType))
+        return;
+
     const std::size_t first = _gpucull ? std::size_t(list) * _commands.size() : 0u;
     const auto offset = reinterpret_cast<const GLvoid*>(first * sizeof(Chonk::DrawCommand));
     if (_gpucull && _cutoutCounts[0] && (list == EARLY_CUTOUT || list == LATE_CUTOUT))
@@ -2933,6 +3035,8 @@ ChonkDrawable::GLObjects::draw(osg::State& state, int list)
 void
 ChonkDrawable::GLObjects::release()
 {
+    _bands.reset();
+    _maxBandBytes = 0;
     _ext = nullptr;
     _vao = nullptr;
     _commandBuf = nullptr;
@@ -2985,6 +3089,8 @@ namespace
         static std::atomic<bool> flag{true};
         return flag;
     }
+
+    std::atomic<bool> depthBinning{true};
 
     std::atomic<bool>& frontToBackFlag()
     {
@@ -3451,11 +3557,24 @@ ChonkRenderBin::ChonkRenderBin() :
     setName("ChonkBin");
 }
 
+void
+ChonkRenderBin::setDepthBinning(bool value)
+{
+    depthBinning = value;
+}
+
+bool
+ChonkRenderBin::getDepthBinning()
+{
+    return depthBinning;
+}
+
 ChonkRenderBin::ChonkRenderBin(const ChonkRenderBin& rhs, const osg::CopyOp& op) :
     osgUtil::RenderBin(rhs, op),
     _cullSS(rhs._cullSS),
     _hizSS(rhs._hizSS),
-    _opaqueSS(rhs._opaqueSS)
+    _opaqueSS(rhs._opaqueSS),
+    _bandProgram(rhs._bandProgram)
 {
     if (!_cullSS.valid())
     {
@@ -3485,6 +3604,11 @@ ChonkRenderBin::ChonkRenderBin(const ChonkRenderBin& rhs, const osg::CopyOp& op)
             hiz->addShader(new osg::Shader(osg::Shader::COMPUTE, ShaderLoader::load(pkg.ChonkHiZ, pkg)));
             proto->_hizSS->setAttribute(hiz);
 
+            proto->_bandProgram = new osg::Program();
+            proto->_bandProgram->setName("Chonk opaque depth bands");
+            proto->_bandProgram->addShader(new osg::Shader(osg::Shader::COMPUTE,
+                ShaderLoader::load("Chonk.Binning.glsl", pkg)));
+
             // Opaque lists hold only instances that cannot fail the alpha test.
             proto->_opaqueSS = new osg::StateSet();
             proto->_opaqueSS->setDefine("OE_CHONK_OPAQUE");
@@ -3492,6 +3616,7 @@ ChonkRenderBin::ChonkRenderBin(const ChonkRenderBin& rhs, const osg::CopyOp& op)
         _cullSS = proto->_cullSS;
         _hizSS = proto->_hizSS;
         _opaqueSS = proto->_opaqueSS;
+        _bandProgram = proto->_bandProgram;
     }
 
     // for each render bin instance, create the StateGraphs that we
@@ -3574,14 +3699,18 @@ ChonkRenderBin::CullLeaf::draw(osg::State& state)
     d->update_and_cull_batches(state, _pass, _frame.get());
 }
 
-ChonkRenderBin::DrawLeaf::DrawLeaf(osgUtil::RenderLeaf* leaf, int list, bool first, bool last, bool publish) :
+ChonkRenderBin::DrawLeaf::DrawLeaf(osgUtil::RenderLeaf* leaf, int list, bool first, bool last, bool publish,
+    osg::Program* binning) :
     CustomRenderLeaf(leaf),
+    _binning(binning),
     _list(list),
     _first(first),
     _last(last),
     _publish(publish)
 {
     _coverage = leafCoverage(leaf);
+    // The culler sends every partially covered instance to the cutout list.
+    if (_coverage.x() > 0.0f || _coverage.y() < 1.0f) _binning = nullptr;
     _sseAdjustment = leafSSEAdjustment(leaf);
 }
 
@@ -3606,7 +3735,7 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
 
     applyCoverage(state,_coverage);
     applySSEAdjustment(state,_sseAdjustment);
-    drawable->draw_batches(state, _list);
+    drawable->draw_batches(state, _list, _binning);
 
     if (_last)
     {
@@ -3616,6 +3745,11 @@ ChonkRenderBin::DrawLeaf::draw(osg::State& state)
 #ifdef RESET_BUFFER_BASE_BINDINGS
         auto& gl = ChonkDrawable::GLObjects::get(drawable->_globjects, state);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER,  0, 0);
+        if (gl._bands)
+        {
+            gl._bindBuffersBase(GL_SHADER_STORAGE_BUFFER, 14, 8, nullptr);
+            gl._bindBuffersBase(GL_SHADER_STORAGE_BUFFER, 24, 5, nullptr);
+        }
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 22, 0);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 23, 0);
         gl._ext->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 27, 0);
@@ -3718,8 +3852,9 @@ ChonkRenderBin::drawImplementation(
     // One draw leaf per drawable for a list; the first publishes culling results when asked.
     auto drawPass = [&](osgUtil::StateGraph* sg, int list, bool publish)
     {
+        auto* binning = color && list == ChonkDrawable::EARLY_OPAQUE && getDepthBinning() ? _bandProgram.get() : nullptr;
         for (unsigned i = 0; i < count; ++i)
-            sg->addLeaf(new DrawLeaf(_renderLeafList[i], list, false, false, publish && i == 0));
+            sg->addLeaf(new DrawLeaf(_renderLeafList[i], list, false, false, publish && i == 0, binning));
     };
     // Installs a draw graph; its first leaf binds a VAO and its last unbinds it.
     auto finish = [&](osgUtil::StateGraph* sg)
@@ -3764,6 +3899,8 @@ ChonkRenderBin::releaseSharedGLObjects(osg::State* state)
     auto proto = static_cast<ChonkRenderBin*>(osgUtil::RenderBin::getRenderBinPrototype("ChonkBin"));
     if (proto->_cullSS.valid())
         proto->_cullSS->releaseGLObjects(state);
+    if (proto->_bandProgram.valid())
+        proto->_bandProgram->releaseGLObjects(state);
     if (proto->_hizSS.valid())
         proto->_hizSS->releaseGLObjects(state);
     releaseHiZ(state);

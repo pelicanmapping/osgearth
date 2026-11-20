@@ -579,6 +579,16 @@ namespace osgEarth
             std::vector<DrawGroup> _drawGroups;
             GLBuffer::Ptr _templateBuf, _groupBuf;
             GLBuffer::Ptr _cutoutCounts[2]; // separate offset-zero NV draw parameters for early and late cutouts
+            struct DepthBands
+            {
+                GLBuffer::Ptr centers, visible, commands;
+                GLBuffer::Ptr parameters[8]; // NV indirect counts require offset zero on some drivers
+                unsigned drawNumber = 0;
+            };
+            std::shared_ptr<DepthBands> _bands;
+            bool _canBin = false;
+            GLint _maxBandBytes = 0;
+            void (GL_APIENTRY* _bindBuffersBase)(GLenum, GLuint, GLsizei, const GLuint*) = nullptr;
             GLVAO::Ptr _coreVAO;
             unsigned _outputCapacity = 0;
             std::uint64_t _dataRevision = 0;
@@ -616,7 +626,9 @@ namespace osgEarth
             void cull(osg::State& state, int pass, const OcclusionFrame* frame);
             //! Draws one List with the currently applied program; unculled drawables draw
             //! everything as EARLY_CUTOUT.
-            void draw(osg::State& state, int list);
+            void draw(osg::State& state, int list, osg::Program* binning = nullptr);
+            //! Partitions the early opaque list and draws occupied mesh/band commands; false selects the original list.
+            bool drawBanded(osg::State&, osg::Program&, GLenum elementType);
             //! Finds or creates the camera's visibility bits, initially all visible, pruning
             //! entries for dead or long-unused cameras.
             GLBuffer::Ptr visibility(osg::State& state, const OcclusionFrame& frame);
@@ -637,7 +649,7 @@ namespace osgEarth
         void update_and_cull_batches(osg::State& state, int pass, const OcclusionFrame* frame) const;
 
         //! Draws one List; multi-view passes draw everything as EARLY_CUTOUT.
-        void draw_batches(osg::State& state, int list) const;
+        void draw_batches(osg::State& state, int list, osg::Program* binning) const;
 
         void dirtyGLObjects();
 
@@ -707,9 +719,16 @@ namespace osgEarth
         //! Whether Chonk drawables draw nearest first.
         static bool getFrontToBack();
 
+        //! Enables eight eye-depth bands within each eligible opaque drawable. Thread-safe, default on.
+        static void setDepthBinning(bool value);
+
+        //! Whether single-view color draws can use instance depth bands.
+        static bool getDepthBinning();
+
     private:
         osg::ref_ptr<osg::StateSet> _cullSS, _hizSS, _opaqueSS;
 
+        osg::ref_ptr<osg::Program> _bandProgram;
         friend class ChonkDrawable;
 
         // One graph per pass position, in draw order; several share a state set.
@@ -728,8 +747,9 @@ namespace osgEarth
         };
         struct DrawLeaf : public Util::CustomRenderLeaf {
             //! publish: this leaf issues the barrier that exposes the preceding culling results.
-            DrawLeaf(osgUtil::RenderLeaf*, int list, bool first, bool last, bool publish);
+            DrawLeaf(osgUtil::RenderLeaf*, int list, bool first, bool last, bool publish, osg::Program* binning);
             void draw(osg::State&) override;
+            osg::Program* _binning; // owned by this leaf's render bin
             int _list;
             bool _first, _last, _publish;
             osg::Vec2f _coverage{0.0f,1.0f}; // immutable per-leaf snapshot, independent of flattened bin state

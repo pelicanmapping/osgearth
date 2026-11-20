@@ -370,7 +370,7 @@ namespace osgEarth
                 if (_overdraw)
                 {
                     ImGui::Indent();
-                    ImGui::TextUnformatted("1 lime   2 yellow   3 orange   4+ red");
+                    ImGui::TextUnformatted("1 lime   2 yellow   3 cyan   4 magenta   5+ red");
                     if (ImGui::Checkbox("Count occluded surfaces", &_countOccluded))
                         _overdraw->countOccluded.store(_countOccluded);
                     ImGui::Unindent();

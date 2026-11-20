@@ -1,6 +1,4 @@
-find_package(basisu CONFIG QUIET)
-
-if(basisu_FOUND)
+if(OSGEARTH_HAVE_BASISU)
     # .basis reader
     add_osgearth_plugin(
         TARGET osgdb_basis

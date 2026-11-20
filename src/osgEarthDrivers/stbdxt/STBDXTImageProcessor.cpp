@@ -8,6 +8,12 @@
 #include <string.h>
 #include "stb_dxt.h"
 
+#include <osgEarth/BuildConfig>
+#ifdef OSGEARTH_HAVE_BASISU_BC_ENCODERS
+#include "../basis/BasisTranscoder.h"
+#include <basisu/transcoder/basisu_transcoder_uastc.h>
+#endif
+
 #include <osg/Texture>
 #include <osgDB/Registry>
 #include <osgEarth/Notify>
@@ -123,24 +129,30 @@ namespace
             image->getPixelFormat(), image->getDataType(), scaled->data(), osg::Image::USE_NEW_DELETE);
     }
 
-    // Compress a full image using stb_dxt block-by-block.
-    // Returns the number of bytes written to 'out'.
-    int compressImageSTB(
+    // Encode one padded mip level into GPU blocks and return the byte count.
+    int compressBlocks(
         const unsigned char* in,
         unsigned char* out,
         int width,
         int height,
         int format,
-        int quality)
+        osgDB::ImageProcessor::CompressionQuality quality)
     {
         int blockSize;
-        int mode = (quality > 0) ? STB_DXT_HIGHQUAL : STB_DXT_NORMAL;
+        using Processor = osgDB::ImageProcessor;
+        int mode = quality == Processor::PRODUCTION || quality == Processor::HIGHEST ? STB_DXT_HIGHQUAL : STB_DXT_NORMAL;
 
         // DXT1 = 8 bytes per 4x4 block, DXT5/BC5 = 16 bytes per 4x4 block
         bool isDXT1 = (format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT);
         bool isDXT5 = (format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT);
         bool isBC5 = (format == (int)GL_COMPRESSED_RED_GREEN_RGTC2_EXT);
         bool isBC4 = (format == (int)GL_COMPRESSED_RED_RGTC1_EXT);
+
+#ifdef OSGEARTH_HAVE_BASISU_BC_ENCODERS
+        const bool useBasis = quality == Processor::FASTEST && (isDXT1 || isDXT5);
+        if (useBasis)
+            initializeBasisTranscoder();
+#endif
 
         if (isDXT1 || isBC4) blockSize = 8;
         else blockSize = 16;
@@ -168,7 +180,7 @@ namespace
                 else
                 {
                     // Extract 4x4 block of RGBA data
-                    unsigned char block[64]; // 4x4 pixels * 4 channels
+                    alignas(16) unsigned char block[64]; // 4x4 pixels * 4 channels
                     for (int by = 0; by < 4; ++by)
                     {
                         const unsigned char* row = in + (y + by) * srcStride + x * 4;
@@ -180,6 +192,15 @@ namespace
                         for (unsigned i = 0; i < 16; ++i) red[i] = block[i * 4];
                         stb_compress_bc4_block(dst, red);
                     }
+#ifdef OSGEARTH_HAVE_BASISU_BC_ENCODERS
+                    else if (useBasis)
+                    {
+                        // BC3 stores an eight-byte alpha block followed by opaque BC1 color.
+                        if (isDXT5)
+                            basist::encode_bc4(dst, block + 3, 4);
+                        basist::encode_bc1(isDXT5 ? dst + 8 : dst, block, 0);
+                    }
+#endif
                     else
                         stb_compress_dxt_block(dst, block, isDXT5 ? 1 : 0, mode);
                 }
@@ -218,7 +239,6 @@ public:
 
         GLenum compressedPixelFormat;
         int minLevelSize;
-        int highQuality = (quality == ImageProcessor::PRODUCTION || quality == ImageProcessor::HIGHEST) ? 1 : 0;
 
         switch (compressedFormat)
         {
@@ -312,13 +332,13 @@ public:
                     mipOffsets.push_back(totalCompressedBytes);
                 }
 
-                int outputBytes = compressImageSTB(
+                int outputBytes = compressBlocks(
                     in,
                     compressedLevelDataPtr,
                     level_s,
                     level_t,
                     compressedPixelFormat,
-                    highQuality);
+                    quality);
 
                 mipLevelBytes.push_back(outputBytes);
                 totalCompressedBytes += outputBytes;
@@ -355,13 +375,13 @@ public:
             unsigned char* out = new unsigned char[maxOutputBytes];
             memset(out, 0, maxOutputBytes);
 
-            int outputBytes = compressImageSTB(
+            int outputBytes = compressBlocks(
                 sourceImage->data(),
                 out,
                 sourceImage->s(),
                 sourceImage->t(),
                 compressedPixelFormat,
-                highQuality);
+                quality);
 
             unsigned char* data = new unsigned char[outputBytes];
             memcpy(data, out, outputBytes);

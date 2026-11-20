@@ -8,13 +8,12 @@
 #include <osgDB/FileNameUtils>
 #include <osgDB/FileUtils>
 
-#include <basisu/transcoder/basisu_transcoder.h>
+#include "BasisTranscoder.h"
 
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 class ReaderWriterBasis : public osgDB::ReaderWriter
@@ -46,8 +45,7 @@ public:
         // Initialize on first read, after the plugin's static objects exist.
         // Initializing from REGISTER_OSGPLUGIN's constructor can precede the
         // construction of Basis's ASTC tables and leave them uninitialized.
-        static std::once_flag initialized;
-        std::call_once(initialized, []() { basist::basisu_transcoder_init(); });
+        initializeBasisTranscoder();
 
         // Read from the current position, including streams that cannot seek.
         // Basis uses 32-bit file sizes; never silently truncate a larger input.

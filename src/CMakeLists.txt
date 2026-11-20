@@ -56,7 +56,17 @@ if(OSGEARTH_BUILD_LEGACY_SPLAT_NODEKIT)
 endif()
 
 # plugins:
+find_package(basisu CONFIG QUIET)
+if(TARGET basisu::basisu_encoder)
+    set(OSGEARTH_HAVE_BASISU ON)
+endif()
 add_subdirectory(osgEarthDrivers)
+if(TARGET osgdb_stbdxt)
+    set(OSGEARTH_HAVE_STBDXT ON)
+    if(OSGEARTH_HAVE_BASISU AND OSGEARTH_BASISU_HAS_BC_ENCODERS)
+        set(OSGEARTH_HAVE_BASISU_BC_ENCODERS ON)
+    endif()
+endif()
 
 # apps and tools:
 if(OSGEARTH_BUILD_TOOLS OR OSGEARTH_BUILD_EXAMPLES)

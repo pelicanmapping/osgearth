@@ -68,6 +68,7 @@ set(TARGET_GLSL
     MaterialArena.glsl
     CascadeDraping.glsl
     Chonk.glsl
+    Chonk.Binning.glsl
     Chonk.Culling.glsl
     Chonk.ScreenSize.glsl
     Chonk.HiZ.glsl

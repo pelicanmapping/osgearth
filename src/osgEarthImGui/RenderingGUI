@@ -434,6 +434,10 @@ namespace osgEarth
                     bool frontToBack = ChonkRenderBin::getFrontToBack();
                     if (ImGui::Checkbox("Chonk front-to-back order", &frontToBack))
                         ChonkRenderBin::setFrontToBack(frontToBack);
+
+                    bool depthBinning = ChonkRenderBin::getDepthBinning();
+                    if (ImGui::Checkbox("Chonk 8-band instance binning", &depthBinning))
+                        ChonkRenderBin::setDepthBinning(depthBinning);
                 }
 
                 ImGui::Separator();

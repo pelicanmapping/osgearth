@@ -133,6 +133,10 @@ uniform uvec4 oe_chonk_views; // view count, active mask, mesh/LOD commands, vis
 #define CHONK_PASS_EARLY 2 // like CULL, but only instances visible last frame
 #define CHONK_PASS_LATE  3 // test against this frame's depth pyramid, emit the rest late
 uniform int oe_chonk_pass;
+uniform bool oe_chonk_count_cutouts;
+// Reset binds both phase counters. Each cull binds only its own counter to DrawCounts.
+layout(binding = 22, std430) writeonly buffer LateCutoutCount { uint late_cutout_count; };
+layout(binding = 27, std430) buffer DrawCounts { uint draw_counts[]; };
 uniform uint oe_chonk_list_stride;
 uniform uint oe_chonk_max_lods;   // visibility records per source instance
 uniform vec4 oe_chonk_hiz_params; // viewport width and height, levels, +1 forward / -1 reverse / 0 invalid
@@ -153,7 +157,6 @@ uniform bool oe_chonk_retain_outside_lod_view;
 layout(binding = 24, std430) readonly buffer ViewGroups { uvec2 view_groups[]; };
 layout(binding = 25, std430) writeonly buffer CoreCommands { DrawElementsIndirectCommand core_commands[]; };
 layout(binding = 26) writeonly buffer CompactCommands { DrawElementsIndirectBindlessCommandNV compact_commands[]; };
-layout(binding = 27, std430) buffer DrawCounts { uint draw_counts[]; };
 layout(binding = 28) readonly buffer Templates { DrawElementsIndirectBindlessCommandNV templates[]; };
 
 // Returns independent lists; merged instances share one mesh/LOD command across all active views.
@@ -292,6 +295,11 @@ bool occludedByHiZ(vec4 center_view, float r, mat4 proj, vec4 LL, vec4 UR)
 void resetCommands()
 {
     uint i = gl_GlobalInvocationID.x;
+    if (i == 0u && oe_chonk_count_cutouts)
+    {
+        draw_counts[0] = 0u;
+        late_cutout_count = 0u;
+    }
     if (i < 4u*oe_chonk_list_stride)
         commands[i].cmd.instanceCount = 0u;
 }
@@ -578,6 +586,10 @@ void cullAndCompact()
     }
     uint command = list*oe_chonk_list_stride + v;
     uint index = atomicAdd(commands[command].cmd.instanceCount, 1);
+    // Count a command only once, retaining mesh order and any empty interior slots.
+    // No surviving cutouts leaves this pass's indirect draw count at zero.
+    if (oe_chonk_count_cutouts && (list & 1u) != 0u && index == 0u)
+        atomicMax(draw_counts[0], v + 1u);
     output_instances[commands[command].cmd.baseInstance + index] = result;
 }
 

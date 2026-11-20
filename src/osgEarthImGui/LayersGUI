@@ -528,6 +528,7 @@ namespace osgEarth
             "Other"
         };
 
+        bool _categoryExpanded[NUM_CATS];
         std::vector<osg::ref_ptr<Layer>> _layersByCat[NUM_CATS];
 
         detail::AddWMSDialog _addWMSDialog;
@@ -558,6 +559,9 @@ namespace osgEarth
 
         LayersGUI() : ImGuiPanel("Map")
         {
+            for (auto& expanded : _categoryExpanded)
+                expanded = true;
+
             _showVisibleLayers = [this](const Layer* layer)
                 {
                     return
@@ -610,6 +614,8 @@ namespace osgEarth
             conf.get("View:Sort", _viewOptions[VIEW_SORT]);
             conf.get("View:Data", _viewOptions[VIEW_DATA]);
             conf.get("View:Closed", _viewOptions[VIEW_CLOSED]);
+            for (int cat = 0; cat < NUM_CATS; ++cat)
+                conf.get("Category:Expanded:" + _layerCatName[cat], _categoryExpanded[cat]);
         }
 
         void save(Config& conf) override
@@ -617,6 +623,8 @@ namespace osgEarth
             conf.set("View:Sort", _viewOptions[VIEW_SORT]);
             conf.set("View:Data", _viewOptions[VIEW_DATA]);
             conf.set("View:Closed", _viewOptions[VIEW_CLOSED]);
+            for (int cat = 0; cat < NUM_CATS; ++cat)
+                conf.set("Category:Expanded:" + _layerCatName[cat], _categoryExpanded[cat]);
         }
 
         void draw(osg::RenderInfo& ri) override
@@ -666,7 +674,15 @@ namespace osgEarth
                         if (cat == CAT_DATA && !_viewOptions[VIEW_DATA])
                             continue;                    
 
-                        if (ImGui::TreeNode(std::string(_layerCatName[cat]).c_str()))
+                        // Keep the persisted panel state authoritative, including after settings are reloaded.
+                        ImGui::SetNextItemOpen(_categoryExpanded[cat], ImGuiCond_Always);
+                        const bool expanded = ImGui::TreeNode(_layerCatName[cat].c_str());
+                        if (expanded != _categoryExpanded[cat])
+                        {
+                            _categoryExpanded[cat] = expanded;
+                            dirtySettings();
+                        }
+                        if (expanded)
                         {
                             drawLayers(layers, ri);
                             ImGui::TreePop();

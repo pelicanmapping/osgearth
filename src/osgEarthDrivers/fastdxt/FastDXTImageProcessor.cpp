@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include "libdxt.h"
 #include <string.h>
+#include <algorithm>
 
 
 using namespace osgEarth;
@@ -145,6 +146,11 @@ public:
 
         // Not already compressed?
         if (input.isCompressed())
+            return;
+
+        // This encoder reads complete 4x4 blocks. A supplied mip chain may extend down to 1x1.
+        const int blocksOnShortSide = std::min(input.s(), input.t()) / 4;
+        if (generateMipMap && input.getNumMipmapLevels() > osg::Image::computeNumberOfMipmapLevels(blocksOnShortSide, 1))
             return;
 
         //Resize the image to the nearest power of two

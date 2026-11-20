@@ -45,7 +45,7 @@ using namespace osgEarth::Util;
 namespace
 {
     //! Borrow a registered CPU compressor, or return null so the caller can use its existing fallback.
-    osgDB::ImageProcessor* compressionProcessor(const std::string& method, const osg::Image& image)
+    osgDB::ImageProcessor* compressionProcessor(const std::string& method)
     {
         auto* registry = osgDB::Registry::instance();
         if (method != "cpu" && method != "auto" && method.compare(0, 3, "dxt") != 0)
@@ -56,12 +56,10 @@ namespace
             return processor;
 #endif
 #ifdef OSGEARTH_HAVE_FASTDXT
-        // FastDXT requires at least 16x16 input and reads complete 4x4 blocks from supplied mip levels.
-        const int shortSide = std::min(image.s(), image.t());
-        if (shortSide >= 16 && image.getNumMipmapLevels() <= osg::Image::computeNumberOfMipmapLevels(shortSide / 4, 1))
-            return registry->getImageProcessorForExtension("fastdxt");
-#endif
+        return registry->getImageProcessorForExtension("fastdxt");
+#else
         return nullptr;
+#endif
     }
 
     int
@@ -913,7 +911,7 @@ ImageUtils::compressImage(const osg::Image* input, const std::string& method)
     // return the input if nothing works
     osg::Image* output = const_cast<osg::Image*>(input);
 
-    if (auto* ip = compressionProcessor(method, *input))
+    if (auto* ip = compressionProcessor(method))
     {
         output = osg::clone(input, osg::CopyOp::DEEP_COPY_ALL);
 
@@ -974,7 +972,7 @@ ImageUtils::compressImageInPlace(osg::Image* input, const std::string& method)
     }
     else
     {
-        if (auto* ip = compressionProcessor(method, *input))
+        if (auto* ip = compressionProcessor(method))
         {
             ip->compress(
                 *input,         // image to compress

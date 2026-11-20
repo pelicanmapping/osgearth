@@ -12,6 +12,7 @@
 using namespace osgEarth;
 namespace
 {
+    constexpr char materialCategory[] = "FeatureImageLayer materials";
     const char* paletteName = "osgEarth.FeatureImageMaterials";
 }
 
@@ -111,6 +112,9 @@ void FeatureImageLayerMaterials::apply(TextureArena* arena, osg::State& state)
             {
                 if (!images[i]) continue;
                 auto texture = Texture::create(images[i]);
+                static constexpr const char* channels[] = { "albedo", "normal", "pbr", "occlusion" };
+                texture->category() = materialCategory;
+                texture->name() = entry.name + ":" + channels[i];
                 texture->compress() = false; // Already prepared using the semantic material pipeline.
                 texture->ownerRevision() = std::numeric_limits<int>::max();
                 int index = arena->add(texture);
@@ -129,6 +133,7 @@ void FeatureImageLayerMaterials::apply(TextureArena* arena, osg::State& state)
         gl.buffer = GLBuffer::create_shared(GL_SHADER_STORAGE_BUFFER, state);
         // glGenBuffers reserves a name; bind once before the named-buffer upload path can use it.
         gl.buffer->bind();
+        gl.buffer->debugLabel(materialCategory, "Material slots");
         gl.buffer->uploadData(registration->slots);
         gl.buffer->unbind();
     }

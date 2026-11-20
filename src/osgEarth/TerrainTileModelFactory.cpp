@@ -5,6 +5,7 @@
 #include "TerrainTileModelFactory"
 #include "Map"
 #include "Registry"
+#include "FeatureImageLayer"
 #include "LandCoverLayer"
 #include "TerrainConstraintLayer"
 #include "Metrics"
@@ -23,6 +24,7 @@
 using namespace osgEarth;
 
 #define LABEL_IMAGERY "Terrain images"
+#define LABEL_FEATURE_IMAGES "FeatureImageLayer tiles"
 #define LABEL_NORMALMAP "Terrain normals"
 #define LABEL_ELEVATION "Terrain elevation"
 #define LABEL_COVERAGE "Terrain coverage"
@@ -288,7 +290,7 @@ TerrainTileModelFactory::addImageLayer(
 
     if (tex)
     {
-        tex->category() = LABEL_IMAGERY;
+        tex->category() = dynamic_cast<FeatureImageLayer*>(imageLayer) ? LABEL_FEATURE_IMAGES : LABEL_IMAGERY;
 
         tex->name() =
             model->key.str() + ":" +

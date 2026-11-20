@@ -62,6 +62,7 @@ set(LIB_HEADERS
     ImGuiEventHandler
     ImGuiApp
     ImGuiPanel
+    OverdrawOverlay
     ScreenSpaceErrorControls )
     
 set(LIB_SOURCES 

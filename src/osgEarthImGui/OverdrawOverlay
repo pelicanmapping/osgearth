@@ -1,0 +1,293 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osg/BlendColor>
+#include <osg/BlendEquation>
+#include <osg/BlendFunc>
+#include <osg/Geometry>
+#include <osg/Multisample>
+#include <osg/PolygonMode>
+#include <osg/Program>
+#include <osg/Texture2D>
+#include <osgUtil/CullVisitor>
+#include <algorithm>
+#include <atomic>
+#include <limits>
+#include <map>
+#include <memory>
+#include <vector>
+
+#ifndef GL_DEPTH32F_STENCIL8
+#define GL_DEPTH32F_STENCIL8 0x8CAD
+#endif
+
+namespace osgEarth { namespace ImGuiDetail
+{
+    // Installed only on the selected camera while the overdraw radio button is active.
+    class OverdrawOverlay : public osg::NodeCallback
+    {
+    public:
+        std::atomic<bool> countOccluded{ false };
+        std::atomic<float> blend{ 1.0f };
+
+        // Capture the completed color-stage submissions before OSG sorts them or draws any bins.
+        void operator()(osg::Node* node, osg::NodeVisitor* nv) override
+        {
+            traverse(node, nv);
+            auto* cv = nv->asCullVisitor();
+            if (!cv || cv->getCurrentCamera() != node)
+                return;
+
+            auto* vp = cv->getViewport();
+            if (!vp || vp->width() <= 0 || vp->height() <= 0)
+                return;
+
+            // OSG alternates visitors when cull and draw overlap. Each owns its in-flight pass.
+            auto& pass = _passes[cv];
+            if (!pass)
+                pass = std::make_unique<Pass>();
+            pass->schedule(*cv, countOccluded.load(), blend.load());
+        }
+
+    private:
+        // The draw queue owns the stage. Keep the camera and submitted leaves alive even when a
+        // custom bin replaces its state graph during draw, or the GUI detaches the callback.
+        struct ReplayStage : osgUtil::RenderStage
+        {
+            osg::ref_ptr<osg::Camera> target = new osg::Camera();
+            std::vector<osg::ref_ptr<osgUtil::RenderLeaf>> submissions;
+        };
+
+        struct Pass
+        {
+            osg::ref_ptr<ReplayStage> stage = new ReplayStage();
+            osg::ref_ptr<osgUtil::CullVisitor> bins = new osgUtil::CullVisitor();
+            osg::ref_ptr<osg::Texture2D> weight = new osg::Texture2D();
+            osg::ref_ptr<osg::StateSet> count = new osg::StateSet();
+            osg::ref_ptr<osg::Geometry> composite = new osg::Geometry();
+            osg::ref_ptr<osg::Uniform> strength = new osg::Uniform("strength", 1.0f);
+            std::vector<const osg::StateSet*> path;
+            unsigned attachmentRevision = 0;
+
+            // Keep material shaders (including discard and fragment depth) intact. Fixed-function
+            // blending encodes N surviving color writes as 2^-N regardless of their source color.
+            Pass()
+            {
+                const auto force = osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED;
+                auto& camera = stage->target;
+                camera->setName("Overdraw replay");
+                camera->setRenderTargetImplementation(osg::Camera::FRAME_BUFFER_OBJECT);
+                camera->setImplicitBufferAttachmentMask(0, 0);
+                weight->setInternalFormat(GL_R16F);
+                weight->setSourceFormat(GL_RED);
+                weight->setSourceType(GL_FLOAT);
+                weight->setFilter(osg::Texture::MIN_FILTER, osg::Texture::NEAREST);
+                weight->setFilter(osg::Texture::MAG_FILTER, osg::Texture::NEAREST);
+                weight->setResizeNonPowerOfTwoHint(false);
+                stage->setCamera(camera.get());
+                stage->setClearColor(osg::Vec4(1, 1, 1, 1));
+                stage->setClearMask(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+                stage->setStateGraph(new osgUtil::StateGraph());
+
+                count->setAttributeAndModes(new osg::BlendFunc(GL_ZERO, GL_CONSTANT_COLOR), force);
+                count->setAttribute(new osg::BlendColor(osg::Vec4(0.5f, 0.5f, 0.5f, 0.5f)), force);
+                count->setAttribute(new osg::BlendEquation(osg::BlendEquation::FUNC_ADD), force);
+
+                osg::ref_ptr<osg::Program> program = new osg::Program();
+                program->setName("Overdraw composite");
+                program->addShader(new osg::Shader(osg::Shader::VERTEX, R"(#version 330
+// Cover the viewport with one triangle, independent of scene matrices.
+void main() {
+    vec2 corner = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+)"));
+                program->addShader(new osg::Shader(osg::Shader::FRAGMENT, R"(#version 330
+uniform sampler2D weight;
+uniform float strength;
+out vec4 color;
+// Each hit halves the weight. Midpoints separate adjacent bands at multisampled edges.
+void main() {
+    float w = texelFetch(weight, ivec2(gl_FragCoord.xy), 0).r;
+    if (w == 1.0) discard;
+    vec3 band = vec3(1.0, 0.0, 0.0);           // 4+ hits
+    if (w > (0.5 + 0.25) * 0.5)
+        band = vec3(0.0, 1.0, 0.0);            // 1 hit
+    else if (w > (0.25 + 0.125) * 0.5)
+        band = vec3(1.0, 1.0, 0.0);            // 2 hits
+    else if (w > (0.125 + 0.0625) * 0.5)
+        band = vec3(1.0, 128.0 / 255.0, 0.0);  // 3 hits
+    color = vec4(band, strength);
+}
+)"));
+                composite->setUseDisplayList(false);
+                composite->setUseVertexBufferObjects(true);
+                composite->setVertexArray(new osg::Vec3Array(3));
+                composite->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLES, 0, 3));
+                auto* ss = composite->getOrCreateStateSet();
+                ss->setAttributeAndModes(program.get(), force);
+                ss->setTextureAttribute(0, weight.get(), force);
+                ss->addUniform(new osg::Uniform("weight", 0), force);
+                ss->addUniform(strength.get(), force);
+                ss->setAttributeAndModes(new osg::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE), force);
+                ss->setAttribute(new osg::BlendEquation(osg::BlendEquation::FUNC_ADD), force);
+                ss->setAttribute(new osg::PolygonMode(osg::PolygonMode::FRONT_AND_BACK, osg::PolygonMode::FILL), force);
+                const auto off = osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED;
+                ss->setMode(GL_DEPTH_TEST, off);
+                ss->setMode(GL_STENCIL_TEST, off);
+                ss->setMode(GL_CULL_FACE, off);
+                ss->setMode(GL_SAMPLE_ALPHA_TO_COVERAGE_ARB, off);
+                ss->setRenderBinDetails(std::numeric_limits<int>::max(), "RenderBin",
+                    osg::StateSet::PROTECTED_RENDERBIN_DETAILS);
+                ss->setNestRenderBins(false);
+            }
+
+            // Match the host's depth precision and multisampling so coplanar terrain and cutouts
+            // receive the same tests. Allocate independent storage for all depth/stencil attachments.
+            void configureTarget(const osg::Camera& host, int width, int height)
+            {
+                if (width == weight->getTextureWidth() && height == weight->getTextureHeight() &&
+                    attachmentRevision == host.getAttachmentMapModifiedCount())
+                    return;
+
+                attachmentRevision = host.getAttachmentMapModifiedCount();
+                auto& camera = stage->target;
+                camera->getBufferAttachmentMap().clear();
+                weight->setTextureSize(width, height);
+                weight->dirtyTextureObject();
+                unsigned samples = 0;
+                if (host.getRenderTargetImplementation() == osg::Camera::FRAME_BUFFER_OBJECT)
+                {
+                    const auto depthStencil = osg::Camera::IMPLICIT_DEPTH_BUFFER_ATTACHMENT |
+                        osg::Camera::IMPLICIT_STENCIL_BUFFER_ATTACHMENT;
+                    auto implicit = host.getImplicitBufferAttachmentRenderMask(true) & depthStencil;
+                    camera->setImplicitBufferAttachmentMask(implicit, 0);
+                    for (const auto& [component, attachment] : host.getBufferAttachmentMap())
+                    {
+                        samples = std::max(samples, attachment._multisampleSamples);
+                        if (component >= osg::Camera::COLOR_BUFFER)
+                            continue;
+                        GLenum format = attachment._internalFormat;
+                        if (attachment._texture)
+                            format = attachment._texture->getInternalFormat();
+                        else if (attachment._image)
+                            format = attachment._image->getInternalTextureFormat();
+                        if (format != GL_NONE)
+                            camera->attach(component, format);
+                    }
+                }
+                else
+                {
+                    const auto* gc = host.getGraphicsContext();
+                    const auto* traits = gc ? gc->getTraits() : nullptr;
+                    unsigned depth = traits ? traits->depth : 24u;
+                    unsigned stencil = traits ? traits->stencil : 0u;
+                    samples = traits ? traits->samples : 0u;
+                    if (depth && stencil)
+                        camera->attach(osg::Camera::PACKED_DEPTH_STENCIL_BUFFER,
+                            depth > 24 ? GL_DEPTH32F_STENCIL8 : GL_DEPTH24_STENCIL8_EXT);
+                    else if (depth)
+                        camera->attach(osg::Camera::DEPTH_BUFFER, depth <= 16 ? GL_DEPTH_COMPONENT16 :
+                            depth <= 24 ? GL_DEPTH_COMPONENT24 : GL_DEPTH_COMPONENT32);
+                    else if (stencil)
+                        camera->attach(osg::Camera::STENCIL_BUFFER, GL_STENCIL_INDEX8_EXT);
+                }
+                camera->attach(osg::Camera::COLOR_BUFFER0, weight.get(), 0, 0, false, samples, samples);
+                camera->dirtyAttachmentMap();
+            }
+
+            // Build a private state graph and bins from this camera's already-culled leaves. Sharing
+            // drawables and matrix references preserves LOD, animation and the final clamped projection.
+            void schedule(osgUtil::CullVisitor& cv, bool occluded, float opacity)
+            {
+                auto& camera = stage->target;
+                auto* source = cv.getCurrentRenderStage();
+                auto* vp = cv.getViewport();
+                auto* host = cv.getCurrentCamera();
+                int width = static_cast<int>(vp->x() + vp->width());
+                int height = static_cast<int>(vp->y() + vp->height());
+                if (width <= 0 || height <= 0)
+                    return;
+
+                configureTarget(*host, width, height);
+                camera->setViewport(vp);
+                camera->setView(host->getView());
+                camera->setViewMatrix(host->getViewMatrix());
+                camera->setProjectionMatrix(host->getProjectionMatrix());
+                if (occluded)
+                    count->setMode(GL_DEPTH_TEST, osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
+                else
+                    count->removeMode(GL_DEPTH_TEST);
+
+                stage->reset();
+                stage->submissions.clear();
+                stage->getStateGraph()->clean();
+                stage->setViewport(vp);
+                stage->setInitialViewMatrix(source->getInitialViewMatrix());
+                stage->setClearDepth(source->getClearDepth());
+                stage->setClearStencil(source->getClearStencil());
+                stage->setInheritedPositionalStateContainer(source->getPositionalStateContainer());
+                bins->setRenderStage(stage.get());
+                bins->setStateGraph(stage->getStateGraph());
+                copyBin(*source);
+                stage->getStateGraph()->prune();
+                source->addPreRenderStage(stage.get(), std::numeric_limits<int>::max());
+
+                strength->set(opacity);
+                cv.pushStateSet(composite->getStateSet());
+                cv.addDrawableAndDepth(composite.get(), cv.getModelViewMatrix(), 0.0f);
+                cv.popStateSet();
+            }
+
+            // Reconstruct OSG's bin selection from the original state path, including custom
+            // terrain and Chonk bins. Never replay another camera's pre/post stages or callbacks.
+            void copyBin(osgUtil::RenderBin& source)
+            {
+                for (auto* graph : source.getStateGraphList())
+                    if (!graph->_leaves.empty())
+                        copyLeaves(*graph, nullptr);
+                for (auto* leaf : source.getRenderLeafList())
+                    copyLeaves(*leaf->_parent, leaf);
+                for (auto& child : source.getRenderBinList())
+                    copyBin(*child.second);
+            }
+
+            // Copy one drawable group (or an individually binned leaf) under diagnostic-only
+            // blend state. Private leaves allow custom render bins to reorder or replace them.
+            void copyLeaves(osgUtil::StateGraph& graph, osgUtil::RenderLeaf* single)
+            {
+                path.clear();
+                for (auto* p = &graph; p; p = p->_parent)
+                    if (p->getStateSet())
+                        path.push_back(p->getStateSet());
+                for (auto i = path.rbegin(); i != path.rend(); ++i)
+                    bins->pushStateSet(*i);
+                bins->pushStateSet(count.get());
+                auto* target = bins->getCurrentStateGraph();
+                if (target->leaves_empty())
+                    bins->getCurrentRenderBin()->addStateGraph(target);
+
+                // Preserve the traversal-order key used by OSG's sort callbacks.
+                auto copy = [&](osgUtil::RenderLeaf& leaf) {
+                    auto* submission = new osgUtil::RenderLeaf(leaf._drawable.get(), leaf._projection.get(),
+                        leaf._modelview.get(), leaf._depth, leaf._traversalOrderNumber);
+                    stage->submissions.emplace_back(submission);
+                    target->addLeaf(submission);
+                };
+                if (single)
+                    copy(*single);
+                else
+                    for (auto& leaf : graph._leaves)
+                        copy(*leaf);
+                bins->popStateSet();
+                for (size_t i = 0; i < path.size(); ++i)
+                    bins->popStateSet();
+            }
+        };
+
+        std::map<osgUtil::CullVisitor*, std::unique_ptr<Pass>> _passes;
+    };
+} }

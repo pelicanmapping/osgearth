@@ -6,6 +6,7 @@
 
 #include <osgEarthImGui/ImGuiPanel>
 #include <osgEarthImGui/ScreenSpaceErrorControls>
+#include <osgEarthImGui/OverdrawOverlay>
 #include <osgEarth/Threading>
 #include <osgEarth/MemoryUtils>
 #include <osgEarth/GLUtils>
@@ -235,16 +236,55 @@ namespace osgEarth
         int _frameCounter;
         int _fps;
         std::string _renderMode;
-        bool _renderViewNormals;
-        bool _renderModelNormals;
-        bool _renderWinding;
-        bool _renderOutlines;
+        int _renderSelection = 0;
+        float _blend = 1.0f;
+        bool _countOccluded = false;
+        osg::ref_ptr<ImGuiDetail::OverdrawOverlay> _overdraw;
+        osg::observer_ptr<osg::Camera> _overdrawCamera;
+        // The viewer may be stack-owned. Its reference-counted update queue can be locked during panel teardown.
+        osg::observer_ptr<osg::OperationQueue> _overdrawUpdates;
+
+        // Queue camera graph edits on the update traversal, including teardown when the panel goes away.
+        void stopOverdraw()
+        {
+            if (!_overdraw)
+                return;
+            osg::ref_ptr<osg::OperationQueue> updates;
+            if (_overdrawUpdates.lock(updates))
+            {
+                updates->add(new OneTimer([camera = _overdrawCamera, overlay = _overdraw]() {
+                    osg::ref_ptr<osg::Camera> host;
+                    if (camera.lock(host))
+                        host->removeCullCallback(overlay.get());
+                }));
+            }
+            _overdraw = nullptr;
+        }
+
+        // Allocate the pass on demand. The host has no overdraw callback or render state while off.
+        void startOverdraw(osg::RenderInfo& ri)
+        {
+            if (_overdraw && _overdrawCamera.get() == camera(ri))
+                return;
+            setRenderMode("", ri);
+            _overdraw = new ImGuiDetail::OverdrawOverlay();
+            _overdraw->countOccluded.store(_countOccluded);
+            _overdraw->blend.store(_blend);
+            _overdrawCamera = camera(ri);
+            auto* viewer = view(ri)->getViewerBase();
+            viewer->addUpdateOperation(new OneTimer([camera = _overdrawCamera, overlay = _overdraw]() {
+                osg::ref_ptr<osg::Camera> host;
+                if (camera.lock(host))
+                    host->addCullCallback(overlay.get());
+            }));
+            _overdrawUpdates = viewer->getUpdateOperations();
+        }
 
     public:
-        RenderingGUI() : ImGuiPanel("Rendering"),
-            _frameCounter(0), _time_accum(0),
-            _renderViewNormals(false), _renderModelNormals(false),
-            _renderWinding(false), _renderOutlines(false) { }
+        RenderingGUI() : ImGuiPanel("Rendering"), _frameCounter(0), _time_accum(0) { }
+
+        // Release the camera hook even if the active overlay outlives its window.
+        ~RenderingGUI() override { stopOverdraw(); }
 
         void load(const Config& conf) override
         {
@@ -256,12 +296,20 @@ namespace osgEarth
 
         void setRenderMode(const std::string& mode, osg::RenderInfo& ri)
         {
+            stopOverdraw();
+            if (_renderMode.empty() && mode.empty())
+                return;
             auto* vp = VirtualProgram::getOrCreate(stateset(ri));
             if (!_renderMode.empty())
                 ShaderLoader::unload(vp, _renderMode);
             _renderMode = mode;
             if (!_renderMode.empty())
+            {
                 ShaderLoader::load(vp, _renderMode);
+                auto* ss = stateset(ri);
+                if (_blend != 1.0f || ss->getUniform("oe_render_blend"))
+                    ss->getOrCreateUniform("oe_render_blend", osg::Uniform::FLOAT)->set(_blend);
+            }
         }
 
         void draw(osg::RenderInfo& ri) override
@@ -310,47 +358,57 @@ namespace osgEarth
                 ImGui::Separator();
 
                 ImGui::TextColored(ImVec4(1, 1, 0, 1), "Overlays");
-                static int s_renderMode = 0;
-                static float s_renderBlend = 1.0f;
                 int m = 0;
 
-                if (ImGui::RadioButton("Off", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Off", &_renderSelection, m++)) {
                     setRenderMode("", ri);
                 }
-                if (ImGui::RadioButton("Wireframe overlay", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Overdraw", &_renderSelection, m++))
+                    startOverdraw(ri);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Show fragment counts. Set Blend to 1 for pure diagnostic colors.");
+                if (_overdraw)
+                {
+                    ImGui::Indent();
+                    ImGui::TextUnformatted("1 lime   2 yellow   3 orange   4+ red");
+                    if (ImGui::Checkbox("Count occluded surfaces", &_countOccluded))
+                        _overdraw->countOccluded.store(_countOccluded);
+                    ImGui::Unindent();
+                }
+                if (ImGui::RadioButton("Wireframe overlay", &_renderSelection, m++)) {
                     setRenderMode(render_outlines, ri);
                 }
-                if (ImGui::RadioButton("Front/backfacing triangles", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Front/backfacing triangles", &_renderSelection, m++)) {
                     setRenderMode(render_winding, ri);
                 }
-                if (ImGui::RadioButton("Normals (front/back)", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Normals (front/back)", &_renderSelection, m++)) {
                     setRenderMode(render_fb_normals, ri);
                 }
-                if (ImGui::RadioButton("Normals (view space)", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Normals (view space)", &_renderSelection, m++)) {
                     setRenderMode(render_view_normals, ri);
                 }
-                if (ImGui::RadioButton("Normals (model space)", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Normals (model space)", &_renderSelection, m++)) {
                     setRenderMode(render_model_normals, ri);
                 }
-                if (ImGui::RadioButton("Terrain LOD", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Terrain LOD", &_renderSelection, m++)) {
                     setRenderMode(render_lod, ri);
                 }
-                if (ImGui::RadioButton("Metal (PBR)", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Metal (PBR)", &_renderSelection, m++)) {
                     setRenderMode(render_metal, ri);
                 }
-                if (ImGui::RadioButton("Roughness (PBR)", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Roughness (PBR)", &_renderSelection, m++)) {
                     setRenderMode(render_roughness, ri);
                 }
-                if (ImGui::RadioButton("AO (PBR)", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("AO (PBR)", &_renderSelection, m++)) {
                     setRenderMode(render_ao, ri);
                 }
-                if (ImGui::RadioButton("Displacement (PBR)", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Displacement (PBR)", &_renderSelection, m++)) {
                     setRenderMode(render_displacement, ri);
                 }
-                if (ImGui::RadioButton("Draw ID", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Draw ID", &_renderSelection, m++)) {
                     setRenderMode(render_draw_id, ri);
                 }
-                if (ImGui::RadioButton("Elevation markers", &s_renderMode, m++)) {
+                if (ImGui::RadioButton("Elevation markers", &_renderSelection, m++)) {
                     setRenderMode(render_elevation_marker, ri);
                 }
 
@@ -380,8 +438,11 @@ namespace osgEarth
 
                 ImGui::Separator();
 
-                if (ImGui::SliderFloat("Blend", &s_renderBlend, 0.0f, 1.0f)) {
-                    stateset(ri)->getOrCreateUniform("oe_render_blend", osg::Uniform::FLOAT)->set(s_renderBlend);
+                if (ImGui::SliderFloat("Blend", &_blend, 0.0f, 1.0f)) {
+                    if (_overdraw)
+                        _overdraw->blend.store(_blend);
+                    else if (!_renderMode.empty())
+                        stateset(ri)->getOrCreateUniform("oe_render_blend", osg::Uniform::FLOAT)->set(_blend);
                 }
 
                 ImGui::Separator();

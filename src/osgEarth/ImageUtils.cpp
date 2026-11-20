@@ -4,6 +4,7 @@
  */
 
 #include <osgEarth/ImageUtils>
+#include <osgEarth/BuildConfig>
 #include <osgEarth/Registry>
 #include <osgEarth/Capabilities>
 #include <osgEarth/Metrics>
@@ -43,6 +44,26 @@ using namespace osgEarth::Util;
 
 namespace
 {
+    //! Borrow a registered CPU compressor, or return null so the caller can use its existing fallback.
+    osgDB::ImageProcessor* compressionProcessor(const std::string& method, const osg::Image& image)
+    {
+        auto* registry = osgDB::Registry::instance();
+        if (method != "cpu" && method != "auto" && method.compare(0, 3, "dxt") != 0)
+            return registry->getImageProcessorForExtension(method);
+
+#ifdef OSGEARTH_HAVE_STBDXT
+        if (auto* processor = registry->getImageProcessorForExtension("stbdxt"))
+            return processor;
+#endif
+#ifdef OSGEARTH_HAVE_FASTDXT
+        // FastDXT requires at least 16x16 input and reads complete 4x4 blocks from supplied mip levels.
+        const int shortSide = std::min(image.s(), image.t());
+        if (shortSide >= 16 && image.getNumMipmapLevels() <= osg::Image::computeNumberOfMipmapLevels(shortSide / 4, 1))
+            return registry->getImageProcessorForExtension("fastdxt");
+#endif
+        return nullptr;
+    }
+
     int
     mipmapDimension(int size, int level)
     {
@@ -892,20 +913,7 @@ ImageUtils::compressImage(const osg::Image* input, const std::string& method)
     // return the input if nothing works
     osg::Image* output = const_cast<osg::Image*>(input);
 
-    osgDB::ImageProcessor* ip = nullptr;
-
-    std::string driver(method);
-
-    if (driver == "cpu" ||
-        driver == "auto" ||
-        (driver.length() >=3 && driver.substr(0,3)=="dxt"))
-    {
-        driver = "stbdxt";
-    }
-
-    ip = osgDB::Registry::instance()->getImageProcessorForExtension(driver);
-
-    if (ip)
+    if (auto* ip = compressionProcessor(method, *input))
     {
         output = osg::clone(input, osg::CopyOp::DEEP_COPY_ALL);
 
@@ -966,21 +974,7 @@ ImageUtils::compressImageInPlace(osg::Image* input, const std::string& method)
     }
     else
     {
-        // return the input if nothing works
-        osgDB::ImageProcessor* ip = nullptr;
-
-        std::string driver(method);
-
-        if (driver == "cpu" ||
-            driver == "auto" ||
-            (driver.length() >=3 && driver.substr(0,3)=="dxt"))
-        {
-            driver = "stbdxt";
-        }
-
-        ip = osgDB::Registry::instance()->getImageProcessorForExtension(driver);
-
-        if (ip)
+        if (auto* ip = compressionProcessor(method, *input))
         {
             ip->compress(
                 *input,         // image to compress

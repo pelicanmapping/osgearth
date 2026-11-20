@@ -346,6 +346,7 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         // Whether _tile names content, and its geometric error; cached because the cull reads them for every
         // tile every frame and each is several pointer hops into the parsed tile record.
         bool _hasContent = false;
+        bool _scaleRefinement = false;
         double _geometricError = 0.0;
 
         // The content when it's an external tileset (owned by _content), so the cull needn't dynamic_cast it.
@@ -375,13 +376,16 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         //! Returns the model to publish, or null to fail the load. Never receives a tileset hierarchy.
         using ContentProcessor = std::function<osg::ref_ptr<osg::Node>(osg::Node*)>;
 
-        //! Constructs the tileset and loads its root, optionally converting models with processContent.
+        //! Loads the root, optionally converting models. A nonempty filename suffix enables per-parent SSE scaling.
         ThreeDTilesetNode(Tileset* tileset, const std::string& authorizationHeader,
             SceneGraphCallbacks* sceneGraphCallbacks, osgDB::Options* options,
-            const ContentProcessor& processContent = ContentProcessor());
+            const ContentProcessor& processContent = ContentProcessor(), const std::string& refinementSuffix = {});
 
         float getMaximumScreenSpaceError() const;
         void setMaximumScreenSpaceError(float maximumScreenSpaceError);
+
+        //! Publishes a positive, finite SSE multiplier to cull visitors for parents matching the configured suffix.
+        void setRefinementScale(float scale);
 
         double getSSEDenominator() const;
 
@@ -466,7 +470,9 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         const ContentProcessor _processContent;
         osg::ref_ptr<Tileset> _tileset;
         osg::ref_ptr<osgDB::Options> _options;
-        float _maximumScreenSpaceError;
+        std::atomic<float> _maximumScreenSpaceError;
+        const std::string _refinementSuffix;
+        std::atomic<float> _refinementScale{ 1.0f };
 
         mutable std::mutex _mutex;
         ThreeDTileNode::TileTracker _tracker;

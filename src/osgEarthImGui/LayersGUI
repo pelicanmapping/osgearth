@@ -975,9 +975,21 @@ namespace osgEarth
                         {
                             float sse = threedTiles->getMaximumScreenSpaceError();
                             ImGui::PushID("sse");
-                            ImGuiLTable::SliderFloat("SSE", &sse, 0.0f, 50.0f);
-                            threedTiles->setMaximumScreenSpaceError(sse);
+                            if (ImGuiLTable::SliderFloat("SSE", &sse, 0.0f, 50.0f))
+                                threedTiles->setMaximumScreenSpaceError(sse);
                             ImGui::PopID();
+
+                            const auto& suffix = *threedTiles->options().refinementSuffix();
+                            if (!suffix.empty())
+                            {
+                                float scale = *threedTiles->options().refinementScale();
+                                if (ImGuiLTable::SliderFloat("Refinement scale", &scale, 0.5f, 4.0f,
+                                    "%.2fx", ImGuiSliderFlags_AlwaysClamp))
+                                    threedTiles->setRefinementScale(scale);
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("Parents matching *%s refine at %.1f px SSE. Higher refines closer.",
+                                        suffix.c_str(), sse * scale);
+                            }
 
 #ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES
                             ImGui::PushID("debugVolumes");

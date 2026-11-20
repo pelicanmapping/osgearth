@@ -8,10 +8,11 @@
        "prestige.py tileset <folder>" for an existing dataset). -->
     <ThreeDTiles name="Prestige Buildings">
         <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/tileset.json</url>
-        <!-- The tileset's geometric errors put the switches at LOD1 within 5000m and
-         LOD0 within 250m for max_sse 15 in a 1080-pixel-high view. Raise this to
-         switch closer, lower it to switch further away. -->
+        <!-- At SSE 15, LOD0 starts around 250m in a 1080-pixel-high view. The 2x scale
+             delays refinement of LOD2 parents until 30px while keeping LOD0 at its original range. -->
         <max_sse>15</max_sse>
+        <refinement_suffix>_lod2.glb</refinement_suffix>
+        <refinement_scale>2.0</refinement_scale>
     </ThreeDTiles>
 
     <prestige:grime name="Grime">

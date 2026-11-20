@@ -26,6 +26,10 @@ namespace osgEarth { namespace Contrib
             META_LayerOptions(osgEarth, Options, VisibleLayer::Options);
             OE_OPTION(URI, url);
             OE_OPTION(float, maximumScreenSpaceError);
+            //! Case-sensitive content filename suffix selecting parents for the refinement scale.
+            OE_OPTION(std::string, refinementSuffix);
+            //! Multiplier on max_sse for matching parents; 1 uses the base SSE.
+            OE_OPTION(float, refinementScale, 1.0f);
             //! Lights content whose glTF materials are KHR_materials_unlit, generating any normals it is missing.
             //! Default is false, which respects the extension. Costs load time and memory on every tile.
             OE_OPTION(bool, ignoreUnlit, false);
@@ -48,6 +52,9 @@ namespace osgEarth { namespace Contrib
         //! The maximum screen space error for this layer
         float getMaximumScreenSpaceError() const;
         void setMaximumScreenSpaceError(float maximumScreenSpaceError);
+
+        //! Updates matching parents on the next cull and retains the setting across reopen. Ignores invalid scales.
+        void setRefinementScale(float scale);
 
         osgEarth::Contrib::ThreeDTiles::ThreeDTilesetNode* getTilesetNode() {
             return _tilesetNode.get();

@@ -21,6 +21,7 @@
 #include <osgEarth/Progress>
 
 #include <algorithm>
+#include <cmath>
 
 #include <osgDB/FileNameUtils>
 #include <osgDB/Registry>
@@ -772,6 +773,12 @@ ThreeDTileNode::ThreeDTileNode(ThreeDTilesetNode* tileset, Tile* tile, bool imme
     OE_PROFILING_ZONE;
     _hasContent = _tile->content().isSet() && _tile->content()->uri().isSet();
     _geometricError = *_tile->geometricError();
+    if (_hasContent && !_tile->children().empty() && !_tileset->_refinementSuffix.empty())
+    {
+        const auto& uri = _tile->content()->uri()->base();
+        const auto filename = osgDB::getSimpleFileName(uri.substr(0, uri.find_first_of("?#")));
+        _scaleRefinement = Strings::endsWith(filename, _tileset->_refinementSuffix);
+    }
     if (_tile->content().isSet())
     {
         OE_PROFILING_ZONE_TEXT(_tile->content()->uri()->full().c_str());
@@ -1498,8 +1505,10 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
 
         resolveContent();
 
-        // Compute the SSE
+        // Normalize to the base SSE so refinement, prefetch and request priority all use the same tolerance.
         double error = computeScreenSpaceError(cv);
+        if (_scaleRefinement)
+            error /= _tileset->_refinementScale.load(std::memory_order_relaxed);
 
         updateTracking(cv);
 
@@ -1651,12 +1660,14 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
 }
 
 ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& authorizationHeader,
-    SceneGraphCallbacks* sceneGraphCallbacks, osgDB::Options* options, const ContentProcessor& processContent) :
+    SceneGraphCallbacks* sceneGraphCallbacks, osgDB::Options* options, const ContentProcessor& processContent,
+    const std::string& refinementSuffix) :
     _releaser(Registry::instance()->getObjectReleaser()->createClient("3D Tiles")),
     _processContent(processContent),
     _tileset(tileset),
     _options(options),
     _maximumScreenSpaceError(15.0f),
+    _refinementSuffix(refinementSuffix),
     _maxTiles(50),
     _maxAge(5.0f),
     _maxSimultaneousLoads(0u),
@@ -1840,12 +1851,18 @@ void ThreeDTilesetNode::dispatchRequests(
 
 float ThreeDTilesetNode::getMaximumScreenSpaceError() const
 {
-    return _maximumScreenSpaceError;
+    return _maximumScreenSpaceError.load(std::memory_order_relaxed);
 }
 
 void ThreeDTilesetNode::setMaximumScreenSpaceError(float maximumScreenSpaceError)
 {
-    _maximumScreenSpaceError = maximumScreenSpaceError;
+    _maximumScreenSpaceError.store(maximumScreenSpaceError, std::memory_order_relaxed);
+}
+
+void ThreeDTilesetNode::setRefinementScale(float scale)
+{
+    if (std::isfinite(scale) && scale > 0.0f)
+        _refinementScale.store(scale, std::memory_order_relaxed);
 }
 
 #ifdef OSGEARTH_3DTILES_DEBUG_VOLUMES

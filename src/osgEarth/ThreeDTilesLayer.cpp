@@ -8,6 +8,7 @@
 #include <osgEarth/Registry>
 #include <osgEarth/ThreeDTilesLayer>
 #include <osg/BlendFunc>
+#include <cmath>
 
 #define LC "[ThreeDTilesLayer] " << getName() << " : "
 
@@ -54,6 +55,8 @@ ThreeDTilesLayer::Options::getConfig() const
     Config conf = VisibleLayer::Options::getConfig();
     conf.set("url", _url);
     conf.set("max_sse", _maximumScreenSpaceError);
+    conf.set("refinement_suffix", refinementSuffix());
+    conf.set("refinement_scale", refinementScale());
     conf.set("ignore_unlit", ignoreUnlit());
     conf.set("nvgl", nvgl());
     conf.set("backface_culling", backfaceCulling());
@@ -66,6 +69,10 @@ ThreeDTilesLayer::Options::fromConfig( const Config& conf )
     _maximumScreenSpaceError.init(15.0f);
     conf.get("url", _url);
     conf.get("max_sse", _maximumScreenSpaceError);
+    conf.get("refinement_suffix", refinementSuffix());
+    conf.get("refinement_scale", refinementScale());
+    if (!std::isfinite(*refinementScale()) || *refinementScale() <= 0.0f)
+        refinementScale().unset();
     conf.get("ignore_unlit", ignoreUnlit());
     conf.get("nvgl", nvgl());
     conf.get("backface_culling", backfaceCulling());
@@ -142,7 +149,9 @@ ThreeDTilesLayer::openTileset(const URI& url, const std::string& authorizationHe
         readOptions->setOptionString(readOptions->getOptionString() + " gltfIgnoreUnlit");
     }
 
-    _tilesetNode = new ThreeDTilesetNode(tileset, authorizationHeader, getSceneGraphCallbacks(), readOptions.get(), processContent);
+    _tilesetNode = new ThreeDTilesetNode(tileset, authorizationHeader, getSceneGraphCallbacks(),
+        readOptions.get(), processContent, *options().refinementSuffix());
+    _tilesetNode->setRefinementScale(*options().refinementScale());
     if (textures.valid())
     {
         _tilesetNode->getOrCreateStateSet()->setAttribute(textures, osg::StateAttribute::ON);
@@ -182,6 +191,17 @@ ThreeDTilesLayer::setMaximumScreenSpaceError(float maximumScreenSpaceError)
     if (_tilesetNode)
     {
         _tilesetNode->setMaximumScreenSpaceError(maximumScreenSpaceError);
+    }
+}
+
+void
+ThreeDTilesLayer::setRefinementScale(float scale)
+{
+    if (std::isfinite(scale) && scale > 0.0f)
+    {
+        options().refinementScale() = scale;
+        if (_tilesetNode.valid())
+            _tilesetNode->setRefinementScale(scale);
     }
 }
 

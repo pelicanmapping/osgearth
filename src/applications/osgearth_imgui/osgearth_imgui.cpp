@@ -277,7 +277,7 @@ main(int argc, char** argv)
 #ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
         ui->add("Prestige", new osgEarthPrestige::LabelLayerGUI());
         ui->add("Prestige", new osgEarthPrestige::VegetationLayerGUI());
-        ui->add("Prestige", new EnvironmentGUI("Sky & Clouds", true));
+        ui->add("Prestige", new EnvironmentGUI("Sky & Lighting", true));
         ui->add("Prestige", new osgEarthPrestige::GrimeLayerGUI());
         ui->add("Prestige", new PrestigeAssetsGUI());
 #endif

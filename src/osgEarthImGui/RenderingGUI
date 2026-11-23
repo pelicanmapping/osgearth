@@ -422,22 +422,6 @@ namespace osgEarth
                         else
                             stateset(ri)->setDefine("OE_GPUCULL_DEBUG", "0");
                     }
-
-                    bool opaquePath = ChonkRenderBin::getOpaquePath();
-                    if (ImGui::Checkbox("Chonk opaque path (no discard)", &opaquePath))
-                        ChonkRenderBin::setOpaquePath(opaquePath);
-
-                    bool occlusion = ChonkRenderBin::getOcclusionCulling();
-                    if (ImGui::Checkbox("Chonk occlusion culling", &occlusion))
-                        ChonkRenderBin::setOcclusionCulling(occlusion);
-
-                    bool frontToBack = ChonkRenderBin::getFrontToBack();
-                    if (ImGui::Checkbox("Chonk front-to-back order", &frontToBack))
-                        ChonkRenderBin::setFrontToBack(frontToBack);
-
-                    bool depthBinning = ChonkRenderBin::getDepthBinning();
-                    if (ImGui::Checkbox("Chonk 8-band instance binning", &depthBinning))
-                        ChonkRenderBin::setDepthBinning(depthBinning);
                 }
 
                 ImGui::Separator();
@@ -447,35 +431,6 @@ namespace osgEarth
                         _overdraw->blend.store(_blend);
                     else if (!_renderMode.empty())
                         stateset(ri)->getOrCreateUniform("oe_render_blend", osg::Uniform::FLOAT)->set(_blend);
-                }
-
-                ImGui::Separator();
-
-                const osgViewer::ViewerBase::ThreadingModel models[] = {
-                    osgViewer::ViewerBase::SingleThreaded,
-                    osgViewer::ViewerBase::DrawThreadPerContext,
-                    osgViewer::ViewerBase::CullDrawThreadPerContext,
-                    osgViewer::ViewerBase::CullThreadPerCameraDrawThreadPerContext
-                };
-                const std::string modelNames[] = {
-                    "SingleThreaded",
-                    "DrawThreadPerContext",
-                    "CullDrawThreadPerContext",
-                    "CullThreadPerCameraDrawThreadPerContext"
-                };
-
-                auto vb = view(ri)->getViewerBase();
-                int tmi;
-                for (tmi = 0; tmi < 4; ++tmi)
-                    if (models[tmi] == vb->getThreadingModel())
-                        break;
-
-                ImGui::Text("OSG Threading Model: ");
-                ImGui::SameLine();
-                if (ImGui::Button(modelNames[tmi].c_str())) {
-                    auto new_tm = models[(tmi + 1) % 4];
-                    vb->addUpdateOperation(new OneTimer([vb, new_tm]() {
-                        vb->setThreadingModel(new_tm); }));
                 }
             }
             ImGui::End();
@@ -611,6 +566,22 @@ namespace osgEarth
 
                         ImGuiLTable::End();
                     }
+
+                    bool opaquePath = ChonkRenderBin::getOpaquePath();
+                    if (ImGui::Checkbox("Chonk opaque path (no discard)", &opaquePath))
+                        ChonkRenderBin::setOpaquePath(opaquePath);
+
+                    bool occlusion = ChonkRenderBin::getOcclusionCulling();
+                    if (ImGui::Checkbox("Chonk occlusion culling", &occlusion))
+                        ChonkRenderBin::setOcclusionCulling(occlusion);
+
+                    bool frontToBack = ChonkRenderBin::getFrontToBack();
+                    if (ImGui::Checkbox("Chonk front-to-back order", &frontToBack))
+                        ChonkRenderBin::setFrontToBack(frontToBack);
+
+                    bool depthBinning = ChonkRenderBin::getDepthBinning();
+                    if (ImGui::Checkbox("Chonk 8-band instance binning", &depthBinning))
+                        ChonkRenderBin::setDepthBinning(depthBinning);
                 }
             }
             ImGui::End();

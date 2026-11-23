@@ -348,16 +348,6 @@ namespace osgEarth
                     ImGuiLTable::End();
                 }
                 ImGui::Separator();
-
-                if (ImGuiLTable::Begin("FontScale"))
-                {
-                    if (ImGuiLTable::SliderFloat("Font Scale", &_fontScale, 0.5f, 2.5f, "%.2f", 0))
-                        dirtySettings();
-
-                    ImGuiLTable::End();
-                }
-
-                ImGui::Separator();
                 if (ImGuiLTable::Begin("caps"))
                 {
                     auto& caps = osgEarth::Registry::capabilities();
@@ -391,7 +381,19 @@ namespace osgEarth
                             [&](osg::GraphicsContext*) { return manualDPR; });
                     }
                 }
+#endif
 
+                ImGui::Separator();
+
+                if (ImGuiLTable::Begin("FontScale"))
+                {
+                    if (ImGuiLTable::SliderFloat("Font Scale", &_fontScale, 0.5f, 2.5f, "%.2f", 0))
+                        dirtySettings();
+
+                    ImGuiLTable::End();
+                }
+
+#ifdef _WIN32
                 //ImGui::Separator();
                 //drawICO(ri);
 

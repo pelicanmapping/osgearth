@@ -457,10 +457,6 @@ namespace osgEarth
 #endif
                 if (_first)
                 {
-                    findNode(_shadowCaster, ri);
-                    if (_shadowCaster.valid())
-                        _shadows = _shadowCaster->getEnabled();
-
                     if (_windLayer.valid()) _wind_power = _windLayer->getSpeedFactor();
 
                     // Preserve the scene's selected date/time when opening the
@@ -498,34 +494,39 @@ namespace osgEarth
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Scene lighting override. Atmosphere visibility is controlled separately.");
 
-                findNode(_shadowCaster, ri);
-                if (_shadowCaster.valid()) {
-                    ImGui::SameLine();
-                    _shadows = _shadowCaster->getEnabled();
-                    if (ImGui::Checkbox("Shadows", &_shadows))
-                    {
-                        bool enabled = _shadows;
-                        changeShadows(ri,[enabled](ShadowCaster& caster) { caster.setEnabled(enabled); });
-                    }
-                }
-                else if (ImGui::Button("Install shadows") && view(ri) && view(ri)->getViewerBase())
+                ImGui::SameLine();
+                _shadows = findNode(_shadowCaster, ri) && _shadowCaster->getEnabled();
+                if (ImGui::Checkbox("Shadows", &_shadows))
                 {
-                    osg::ref_ptr<MapNode> map = _mapNode.get();
-                    osg::ref_ptr<SkyNode> sky = _skyNode.get();
-                    // The viewer owns this update operation and may itself live on the stack.
-                    osg::observer_ptr<osgViewer::View> targetView = view(ri);
-                    targetView->getViewerBase()->addUpdateOperation(new OneTimer([map, sky, targetView]()
+                    if (_shadowCaster.valid())
                     {
-                        if (!targetView.valid() || findTopMostNodeOfType<ShadowCaster>(targetView->getSceneData())) return;
-                        int unit;
-                        if (!map->getTerrainEngine()->getResources()->reserveTextureImageUnit(unit,"ShadowCaster")) return;
-                        osg::ref_ptr<ShadowCaster> caster = new ShadowCaster;
-                        caster->setTextureImageUnit(unit);
-                        caster->setLight(sky->getSunLight());
-                        caster->getShadowCastingGroup()->addChild(map->getLayerNodeGroup());
-                        caster->getShadowCastingGroup()->addChild(map->getTerrainEngine()->getNode());
-                        insertParent(caster.get(),map.get());
-                    }));
+                        changeShadows(ri, [enabled = _shadows](ShadowCaster& caster) { caster.setEnabled(enabled); });
+                    }
+                    else if (_shadows && view(ri) && view(ri)->getViewerBase())
+                    {
+                        osg::ref_ptr<MapNode> map = _mapNode.get();
+                        osg::ref_ptr<SkyNode> sky = _skyNode.get();
+                        // The viewer owns this update operation and may itself live on the stack.
+                        osg::observer_ptr<osgViewer::View> targetView = view(ri);
+                        targetView->getViewerBase()->addUpdateOperation(new OneTimer([map, sky, targetView]()
+                        {
+                            if (!targetView.valid()) return;
+                            if (auto* existing = findTopMostNodeOfType<ShadowCaster>(targetView->getSceneData()))
+                            {
+                                existing->setEnabled(true);
+                                return;
+                            }
+                            int unit;
+                            if (!map->getTerrainEngine()->getResources()->reserveTextureImageUnit(unit, "ShadowCaster"))
+                                return;
+                            osg::ref_ptr<ShadowCaster> caster = new ShadowCaster;
+                            caster->setTextureImageUnit(unit);
+                            caster->setLight(sky->getSunLight());
+                            caster->getShadowCastingGroup()->addChild(map->getLayerNodeGroup());
+                            caster->getShadowCastingGroup()->addChild(map->getTerrainEngine()->getNode());
+                            insertParent(caster.get(), map.get());
+                        }));
+                    }
                 }
 
                 ImGui::SameLine();

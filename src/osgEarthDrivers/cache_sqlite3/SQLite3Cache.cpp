@@ -20,6 +20,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cctype>
+#include <filesystem>
 #include <list>
 #include <limits>
 #include <memory>
@@ -275,6 +276,8 @@ namespace
         Absent
     };
 
+    enum class OpenResult { Ready, Missing, Error };
+
     class DatabaseState : public std::enable_shared_from_this<DatabaseState>
     {
     public:
@@ -335,7 +338,7 @@ namespace
         {
             auto result = std::shared_ptr<DatabaseState>(
                 new DatabaseState(path, separate, options, pool, stats));
-            if (!result->initialize(error))
+            if (result->ensureOpen(!separate, &error) == OpenResult::Error)
                 return nullptr;
             return result;
         }
@@ -379,15 +382,7 @@ namespace
             mutation.object = object;
             mutation.timestamp = DateTime().asTimeStamp();
 
-            const bool synchronous = pool() == nullptr;
-            if (synchronous)
-                mutation.completion = std::make_shared<Completion>();
-
-            auto completion = mutation.completion;
-            if (!enqueue(std::move(mutation)))
-                return false;
-
-            return synchronous ? waitFor(completion) : true;
+            return submit(std::move(mutation));
         }
 
         bool remove(const std::string& bin, const std::string& key)
@@ -396,9 +391,7 @@ namespace
             mutation.type = MutationType::Remove;
             mutation.bin = bin;
             mutation.key = key;
-            mutation.completion = std::make_shared<Completion>();
-            auto completion = mutation.completion;
-            return enqueue(std::move(mutation)) && waitFor(completion);
+            return submit(std::move(mutation));
         }
 
         bool touch(const std::string& bin, const std::string& key)
@@ -407,9 +400,7 @@ namespace
             mutation.type = MutationType::Touch;
             mutation.bin = bin;
             mutation.key = key;
-            mutation.completion = std::make_shared<Completion>();
-            auto completion = mutation.completion;
-            return enqueue(std::move(mutation)) && waitFor(completion);
+            return submit(std::move(mutation));
         }
 
         bool clearBin(const std::string& bin)
@@ -417,18 +408,14 @@ namespace
             Mutation mutation;
             mutation.type = MutationType::ClearBin;
             mutation.bin = bin;
-            mutation.completion = std::make_shared<Completion>();
-            auto completion = mutation.completion;
-            return enqueue(std::move(mutation)) && waitFor(completion);
+            return submit(std::move(mutation));
         }
 
         bool clearAll()
         {
             Mutation mutation;
             mutation.type = MutationType::ClearAll;
-            mutation.completion = std::make_shared<Completion>();
-            auto completion = mutation.completion;
-            return enqueue(std::move(mutation)) && waitFor(completion);
+            return submit(std::move(mutation));
         }
 
         PendingStatus getPending(
@@ -451,8 +438,15 @@ namespace
             return PendingStatus::None;
         }
 
-        ReaderLease acquireReader()
+        // Only an absent database is a cache miss. Connection failures remain backend errors.
+        ReaderLease acquireReader(bool* missing = nullptr)
         {
+            const auto result = ensureOpen(false);
+            if (missing)
+                *missing = result == OpenResult::Missing;
+            if (result != OpenResult::Ready)
+                return ReaderLease();
+
             CacheStatsScope waitScope(_stats, CacheStatistics::Metric::ReaderWait);
             std::unique_lock<std::mutex> lock(_readerMutex);
             while (_idleReaders.empty() && _readerCount >= _maxReaders)
@@ -519,6 +513,10 @@ namespace
 
         bool compact()
         {
+            const auto result = ensureOpen(false);
+            if (result != OpenResult::Ready)
+                return result == OpenResult::Missing;
+
             drain();
             std::lock_guard<std::mutex> flushLock(_flushMutex);
             char* errMsg = nullptr;
@@ -589,7 +587,39 @@ namespace
         {
         }
 
-        bool initialize(std::string& error)
+        // Publish a prepared writer once per state. An absent file is rechecked on later calls
+        // since another cache instance can create it. Failed opens are retryable.
+        OpenResult ensureOpen(bool allowCreate, std::string* errorOut = nullptr)
+        {
+            if (_open.load(std::memory_order_acquire))
+                return OpenResult::Ready;
+            std::lock_guard<std::mutex> lock(_openMutex);
+            if (_open.load(std::memory_order_relaxed))
+                return OpenResult::Ready;
+
+            std::error_code ec;
+            const bool exists = std::filesystem::exists(std::filesystem::u8path(_path), ec);
+            if (!allowCreate && !exists && !ec)
+                return OpenResult::Missing;
+
+            std::string error;
+            if (!initialize(allowCreate, !exists && !ec, error))
+            {
+                if (errorOut)
+                    *errorOut = error;
+                else
+                    OE_WARN << LC << error << std::endl;
+                return OpenResult::Error;
+            }
+
+            _open.store(true, std::memory_order_release);
+            if (_separate)
+                OE_INFO << LC << "Opened SQLite cache bin at \"" << _path << "\"" << std::endl;
+            return OpenResult::Ready;
+        }
+
+        // Called under the open mutex. Only a shared cache or a record write may create the file.
+        bool initialize(bool allowCreate, bool newDatabase, std::string& error)
         {
             if (sqlite3_threadsafe() == 0)
             {
@@ -597,11 +627,10 @@ namespace
                 return false;
             }
 
-            const bool newDatabase = !osgDB::fileExists(_path);
             sqlite3* rawDb = nullptr;
             // Each connection is exclusively owned by the serialized writer or by
             // one reader lease, so SQLite's per-connection mutex is redundant.
-            const int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX;
+            const int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX | (allowCreate ? SQLITE_OPEN_CREATE : 0);
             int rc = sqlite3_open_v2(_path.c_str(), &rawDb, flags, nullptr);
             if (rc != SQLITE_OK)
             {
@@ -778,14 +807,15 @@ namespace
             _readerCV.notify_one();
         }
 
-        jobs::jobpool* pool() const
+        // Only a put can populate a missing bin. Maintenance on an empty bin succeeds immediately.
+        bool submit(Mutation&& mutation)
         {
-            std::lock_guard<std::mutex> lock(_queueMutex);
-            return _pool;
-        }
+            const bool put = mutation.type == MutationType::Put;
+            const auto result = ensureOpen(put);
+            if (result != OpenResult::Ready)
+                return result == OpenResult::Missing;
 
-        bool enqueue(Mutation&& mutation)
-        {
+            std::shared_ptr<Completion> completion;
             bool dispatch = false;
             bool synchronous = false;
             {
@@ -795,6 +825,13 @@ namespace
                     _queuedBytes + mutationSize > _maxQueueBytes)
                 {
                     _spaceCV.wait(lock);
+                }
+
+                synchronous = _pool == nullptr;
+                if (!put || synchronous)
+                {
+                    completion = std::make_shared<Completion>();
+                    mutation.completion = completion;
                 }
 
                 mutation.generation = ++_nextGeneration;
@@ -834,7 +871,6 @@ namespace
                 _queue.push_back(std::move(mutation));
                 if (_stats)
                     _stats->updateQueueHighWater(_queuedBytes, _queue.size());
-                synchronous = _pool == nullptr;
                 if (!synchronous && !_flushScheduled)
                 {
                     _flushScheduled = true;
@@ -847,7 +883,7 @@ namespace
             else if (synchronous)
                 flushOne();
 
-            return true;
+            return waitFor(completion);
         }
 
         void dispatchFlush()
@@ -1088,6 +1124,8 @@ namespace
         std::string _path;
         bool _separate = true;
         SQLite3CacheOptions _options;
+        std::mutex _openMutex;
+        std::atomic_bool _open{ false };
         std::unique_ptr<SQLiteConnection> _writer;
         std::shared_ptr<CacheStatistics> _stats;
 
@@ -1374,7 +1412,6 @@ namespace
             return nullptr;
         }
         registerState(state);
-        OE_INFO << LC << "Opened SQLite cache bin at \"" << path << "\"" << std::endl;
         return state;
     }
 
@@ -1497,9 +1534,16 @@ namespace
         }
 
         CacheStatsScope backendScope(_stats, CacheStatistics::Metric::BackendRead);
-        auto reader = _state->acquireReader();
+        bool missing;
+        auto reader = _state->acquireReader(&missing);
         if (!reader)
         {
+            if (missing)
+            {
+                backendScope.miss();
+                readScope.miss();
+                return ReadResult(ReadResult::RESULT_NOT_FOUND);
+            }
             backendScope.error();
             readScope.error();
             return ReadResult(ReadResult::RESULT_READER_ERROR);

@@ -45,7 +45,7 @@
          Schema: https://openmaptiles.org/docs/schema/#place -->
     <filters>
       <script><![CDATA[
-        ['country', 'state', 'province'].indexOf(feature.properties['class']) >= 0 ||
+        ['country', 'state', 'province'].includes(feature.properties['class']) ||
         (feature.properties['class'] === 'city' &&
          feature.properties.rank >= 1 && feature.properties.rank <= 10);
       ]]></script>
@@ -76,15 +76,15 @@
         text-fill: #e8e6deff;
         text-halo: #202832ff;
         text-halo-width: 1.5;
-        text-halo-softness: 0.51999998;
+        text-halo-softness: 0.5;
         text-halo-backdrop-type: outline;
       </style>
-      <style classes="city" min_level="6" max_level="13" priority="700">
+      <style classes="city" min_level="8" max_level="13" priority="700">
         text-size: 14;
         text-fill: #e8e6deff;
         text-halo: #202832ff;
-        text-halo-width: 1.64;
-        text-halo-softness: 0;
+        text-halo-width: 1.5;
+        text-halo-softness: 0.5;
         text-halo-backdrop-type: outline;
       </style>
     </styles>
@@ -94,6 +94,8 @@
   <ThreeDTiles name="Prestige Buildings" caching="true">
     <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/tileset.json</url>
     <max_sse>15</max_sse>
+    <refinement_suffix>_lod2.glb</refinement_suffix>
+    <refinement_scale>2.0</refinement_scale>
   </ThreeDTiles>
   
   <prestige:grime name="Grime">
@@ -116,6 +118,7 @@
     <smooth_feather>0.15</smooth_feather>
     <smooth_amount>0.15</smooth_amount>
   </prestige:grime>
+
   <XYZFeatures name="data:osm">
     <url>https://readymap.org/readymap/mbtiles/osm/{z}/{x}/{-y}.pbf</url>
     <min_level>14</min_level>
@@ -125,6 +128,7 @@
     <fid_attribute>@id</fid_attribute>
     <attribution>OpenStreetMap contributors</attribution>
   </XYZFeatures>
+
   <prestige:vegetation name="Prestige Vegetation">
     <sources>
       <source name="osm">
@@ -297,7 +301,10 @@
     <max_data_level>17</max_data_level>
     <tile_size>512</tile_size>
     <buffer_width>0m</buffer_width>
-    <material color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-color.png" packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-pbr.png" normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-normal.png" displacement="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-height.png" layout="orm" />
+    <material color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-color.png" 
+      packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-pbr.png" 
+      normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-normal.png"
+      displacement="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/asphalt-height.png" layout="orm" />
     <cache_policy usage="no_cache" />
   </prestige:surface_splatting>
 
@@ -357,55 +364,62 @@
       <material name="concrete" color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/concrete-color.png"
         normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/concrete-normal.png"
         packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/concrete-pbr.png" layout="orm" />
-      <material name="paint-white" color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-white-color.png"
-        normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-white-normal.png"
-        packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-white-pbr.png" layout="orm" />
-      <material name="paint-yellow" color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-yellow-color.png"
-        normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-yellow-normal.png"
-        packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/fil-weathered/paint-yellow-pbr.png" layout="orm" />
+      <material name="paint-white" color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/paint-white-color.png"
+        normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/paint-white-normal.png"
+        packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/paint-white-pbr.png" layout="orm" />
+      <material name="paint-yellow" color="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/paint-yellow-color.png"
+        normal="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/paint-yellow-normal.png"
+        packed="https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/roads/materials/paint-yellow-pbr.png" layout="orm" />
     </materials>
     <styles>
       <style type="text/css">
         <![CDATA[
           gutter {
-            stroke-material: concrete;
-            stroke-material-period: 1m;
             select: feature.properties.material === 'gutter';
             stroke: #aaa69c;
+            stroke-material: concrete;
+            stroke-material-period: 1m;
             stroke-width: feature.properties.width;
             stroke-width-units: meters;
             stroke-linecap: round;
             stroke-linejoin: round;
           }
           curb {
-            stroke-material: concrete;
-            stroke-material-period: 1m;
             select: feature.properties.material === 'curb';
             stroke: #cbc6b8;
             stroke-width: feature.properties.width;
             stroke-width-units: meters;
             stroke-linecap: round;
             stroke-linejoin: round;
+            stroke-material: concrete;
+            stroke-material-period: 1m;
           }
           white {
-            stroke-material: paint-white;
-            stroke-material-period: 1m;
-            select: feature.properties.material === 'white';
+            note: 'replace with feature.properties.kind when available';
+            select: feature.properties.material === 'white' && feature.properties.width > 0;
             stroke: #f2f2ee;
             stroke-width: feature.properties.width;
             stroke-width-units: meters;
             stroke-linecap: round;
             stroke-linejoin: round;
+            stroke-material: paint-white;
+            stroke-material-period: 1m;
           }
           yellow {
-            stroke-material: paint-yellow;
-            stroke-material-period: 1m;
             select: feature.properties.material === 'yellow';
             stroke: #e8c23a;
             stroke-width: feature.properties.width;
             stroke-width-units: meters;
             stroke-linecap: round;
             stroke-linejoin: round;
+            stroke-material: paint-yellow;
+            stroke-material-period: 1m;
+          }
+
+          white_shapes {
+            note: 'replace with feature.properties.kind when available, and use fill-material when implemented';
+            select: feature.properties.material === 'white' && !(feature.properties.width > 0);
+            fill: #ffffff;
           }
         ]]>
       </style>

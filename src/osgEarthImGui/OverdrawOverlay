@@ -113,15 +113,15 @@ out vec4 color;
 void main() {
     float w = texelFetch(weight, ivec2(gl_FragCoord.xy), 0).r;
     if (w == 1.0) discard;
-    vec3 band = vec3(1.0, 0.0, 0.0);           // 5+ hits
+    vec3 band = vec3(0.1, 0.1, 0.1);           // 5+ hits
     if (w > (0.5 + 0.25) * 0.5)
         band = vec3(0.0, 1.0, 0.0);            // 1 hit
     else if (w > (0.25 + 0.125) * 0.5)
-        band = vec3(1.0, 1.0, 0.0);            // 2 hits
+        band = vec3(0.0, 1.0, 1.0);            // 2 hits
     else if (w > (0.125 + 0.0625) * 0.5)
-        band = vec3(0.0, 1.0, 1.0);            // 3 hits
+        band = vec3(1.0, 1.0, 0.0);            // 3 hits
     else if (w > (0.0625 + 0.03125) * 0.5)
-        band = vec3(1.0, 0.0, 1.0);            // 4 hits
+        band = vec3(1.0, 0.0, 0.0);            // 4 hits
     color = vec4(band, strength);
 }
 )"));

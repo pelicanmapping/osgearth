@@ -363,18 +363,6 @@ namespace osgEarth
                 if (ImGui::RadioButton("Off", &_renderSelection, m++)) {
                     setRenderMode("", ri);
                 }
-                if (ImGui::RadioButton("Overdraw", &_renderSelection, m++))
-                    startOverdraw(ri);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Show fragment counts. Set Blend to 1 for pure diagnostic colors.");
-                if (_overdraw)
-                {
-                    ImGui::Indent();
-                    ImGui::TextUnformatted("1 lime   2 yellow   3 cyan   4 magenta   5+ red");
-                    if (ImGui::Checkbox("Count occluded surfaces", &_countOccluded))
-                        _overdraw->countOccluded.store(_countOccluded);
-                    ImGui::Unindent();
-                }
                 if (ImGui::RadioButton("Wireframe overlay", &_renderSelection, m++)) {
                     setRenderMode(render_outlines, ri);
                 }
@@ -389,6 +377,18 @@ namespace osgEarth
                 }
                 if (ImGui::RadioButton("Normals (model space)", &_renderSelection, m++)) {
                     setRenderMode(render_model_normals, ri);
+                }
+                if (ImGui::RadioButton("Overdraw", &_renderSelection, m++))
+                    startOverdraw(ri);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Show fragment counts. Set Blend to 1 for pure diagnostic colors.");
+                if (_overdraw)
+                {
+                    ImGui::Indent();
+                    ImGui::TextUnformatted("1:green 2:cyan 3:yellow 4:red 5:black");
+                    if (ImGui::Checkbox("Count occluded surfaces", &_countOccluded))
+                        _overdraw->countOccluded.store(_countOccluded);
+                    ImGui::Unindent();
                 }
                 if (ImGui::RadioButton("Terrain LOD", &_renderSelection, m++)) {
                     setRenderMode(render_lod, ri);

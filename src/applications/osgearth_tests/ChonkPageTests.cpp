@@ -119,18 +119,22 @@ TEST_CASE("Chonk page appends validate ranges state capacity and arenas", "[chon
     auto invalid = ChonkTest::mesh();
     (*static_cast<osg::DrawElementsUInt*>(invalid->getPrimitiveSet(0)))[0] = ~0u;
     REQUIRE(builder.addMesh(invalid) == ChonkGeometryPage::INVALID_MESH);
+    // Use a separate page so capacity cannot mask a state eligibility failure.
+    auto stateBuilder = factory.createGeometryPageBuilder();
+    const bool strict = ChonkTest::enforcesEligibility();
     auto blending = ChonkTest::mesh();
     blending->getOrCreateStateSet()->setMode(GL_BLEND, osg::StateAttribute::ON);
-    REQUIRE(builder.addMesh(blending) == ChonkGeometryPage::INVALID_MESH);
+    REQUIRE(stateBuilder.addMesh(blending) == (strict ? ChonkGeometryPage::INVALID_MESH : 0u));
     auto unsupported = ChonkTest::mesh();
     unsupported->getNormalArray()->setBinding(osg::Array::BIND_PER_PRIMITIVE_SET);
-    REQUIRE(builder.addMesh(unsupported) == ChonkGeometryPage::INVALID_MESH);
+    REQUIRE(stateBuilder.addMesh(unsupported) == (strict ? ChonkGeometryPage::INVALID_MESH : 1u));
     unsupported->getNormalArray()->setBinding(osg::Array::BIND_OVERALL);
     unsupported->getVertexArray()->setDataVariance(osg::Object::DYNAMIC);
-    REQUIRE(builder.addMesh(unsupported) == ChonkGeometryPage::INVALID_MESH);
+    REQUIRE(stateBuilder.addMesh(unsupported) == (strict ? ChonkGeometryPage::INVALID_MESH : 2u));
     auto textureState = ChonkTest::mesh();
     textureState->getOrCreateStateSet()->setTextureAttribute(0, new osg::TexMat());
-    REQUIRE(builder.addMesh(textureState) == ChonkGeometryPage::INVALID_MESH);
+    REQUIRE(stateBuilder.addMesh(textureState) == (strict ? ChonkGeometryPage::INVALID_MESH : 3u));
+
     REQUIRE(builder.addMesh(mesh) == 1);
     REQUIRE(builder.addMesh(mesh) == ChonkGeometryPage::INVALID_MESH);
     auto page = builder.finish();
@@ -518,9 +522,9 @@ TEST_CASE("Chonk singleton bypass reevaluates ordinary asset reloads", "[chonk][
     REQUIRE(reloaded.chonks == 0);
 }
 
-// Exercise the mixed scene converter, rather than calling Ripper
-// directly. Unknown uniforms, blending, and dynamic branches remain ordinary.
-TEST_CASE("Chonk scene conversion packs ordinary PBR geometry and retains fallback state", "[chonk][chonk-pages]")
+// Strict eligibility keeps blended and custom-uniform meshes on their original draw path.
+// Dynamic branches stay in the source graph under either policy.
+TEST_CASE("Chonk scene conversion packs ordinary PBR geometry according to the eligibility policy", "[chonk][chonk-pages]")
 {
     ChonkTest::UniqueScene scene(3, 1);
     installSceneMaterials(scene);
@@ -546,10 +550,11 @@ TEST_CASE("Chonk scene conversion packs ordinary PBR geometry and retains fallba
     ChonkTest::DrawCounts before, after;
     scene.root->accept(before); result->accept(after);
     REQUIRE(before.ordinary == 6);
-    REQUIRE(after.ordinary == 3);
+    const bool strict = ChonkTest::enforcesEligibility();
+    REQUIRE(after.ordinary == (strict ? 3u : 1u));
     REQUIRE(after.chonks == 2); // front faces and two-sided raster state
-    REQUIRE(after.batches == 3);
-    REQUIRE(after.placements == 3);
+    REQUIRE(after.batches == (strict ? 3u : 5u));
+    REQUIRE(after.placements == (strict ? 3u : 5u));
     REQUIRE(scene.root->getNumChildren() == 6);
     bool originalHint = true;
     REQUIRE(scene.meshes[0]->getUserValue(CHONK_HINT_LINEAR_COLOR, originalHint));

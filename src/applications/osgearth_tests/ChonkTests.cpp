@@ -379,8 +379,7 @@ TEST_CASE("Chonk external instance eligibility restrictions are opt-in", "[chonk
     source->addChild(external);
     osg::ref_ptr<TextureArena> arena = new TextureArena();
     auto factory = std::make_shared<ChonkFactory>(arena);
-    const char* value = std::getenv("OSGEARTH_CHONK_ENFORCE_ELIGIBILITY");
-    const bool enforce = value && std::string(value) == "1";
+    const bool enforce = ChonkTest::enforcesEligibility();
     auto prototype = factory->getOrCreateChonk(external->getExternalNode(), 1.0f);
     REQUIRE(bool(prototype) == !enforce);
     auto converted = ChonkFactory::convertExternalInstances(source, factory);

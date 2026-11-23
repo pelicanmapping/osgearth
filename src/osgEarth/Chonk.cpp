@@ -1005,8 +1005,8 @@ namespace
         }
     };
 
-    // Convert only the stock material state that Chonk encodes in its vertex
-    // and material tables. Unknown effects stay on their original scene path.
+    // Translate stock material state into Chonk encoding hints. The page builder applies
+    // the configured eligibility policy to the remaining local state.
     osg::ref_ptr<osg::Geometry> pageGeometry(osg::Geometry& source,
         const osg::StateSet* inherited, bool& twoSided)
     {

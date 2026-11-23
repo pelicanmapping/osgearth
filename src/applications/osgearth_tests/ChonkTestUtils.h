@@ -19,9 +19,18 @@
 #include <osgDB/WriteFile>
 #include <osgUtil/UpdateVisitor>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 namespace ChonkTest
 {
+    // Read the startup policy so fixtures can check strict and permissive conversion in separate runs.
+    inline bool enforcesEligibility()
+    {
+        const char* value = std::getenv("OSGEARTH_CHONK_ENFORCE_ELIGIBILITY");
+        return value && std::string(value) == "1";
+    }
+
     inline osg::ref_ptr<osg::Geometry> mesh(unsigned divisions = 1u)
     {
         osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry();

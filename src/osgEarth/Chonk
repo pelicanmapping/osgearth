@@ -189,8 +189,10 @@ namespace osgEarth
     };
 
     /** CPU-only, single-threaded page builder. Inputs are read without mutation.
-     * Unsupported local render state is rejected; place common shader/uniform/
-     * raster state above the consuming drawable. No geometry may change after finish.
+     * By default the caller is responsible for local render state that Chonk cannot encode.
+     * Set OSGEARTH_CHONK_ENFORCE_ELIGIBILITY=1 before startup to reject ineligible meshes.
+     * Place shared shader, uniform and raster state above the consuming drawable.
+     * Geometry is immutable after finish.
      */
     class OSGEARTH_EXPORT ChonkGeometryPageBuilder
     {
@@ -205,7 +207,7 @@ namespace osgEarth
         ChonkGeometryPageBuilder(ChonkGeometryPageBuilder&&) = default;
 
         //! Append one static object as one cullable mesh. Returns INVALID_MESH on
-        //! unsupported content, invalid indices, exhaustion, or a finished builder.
+        //! encoding failure, invalid indices, exhaustion, strict eligibility rejection, or a finished builder.
         //! Pixel limits affect this mesh only. Failure rolls back the append.
         ChonkGeometryPage::MeshId addMesh(osg::Node* node,
             float farPixelScale = 0.0f, float nearPixelScale = FLT_MAX);
@@ -278,8 +280,10 @@ namespace osgEarth
             osg::Node* node, std::shared_ptr<ChonkFactory> factory);
 
         //! Convert a loaded model/cell, packing compatible static ordinary meshes
-        //! as well as external instances. Preserve unsupported branches and track
-        //! external reloads on update traversal; never flatten paging boundaries.
+        //! as well as external instances. Converted draws may drop unsupported local render state.
+        //! Set OSGEARTH_CHONK_ENFORCE_ELIGIBILITY=1 before startup to leave ineligible draws
+        //! on their original path. Dynamic branches and paging boundaries retain their structure.
+        //! External reloads are tracked on update traversal.
         //! Leave a lone ordinary primitive set on its original draw path unless
         //! the model also contains an instance batch. Multiple primitive sets can
         //! still benefit from packing, even within one Geometry. Reloads recheck

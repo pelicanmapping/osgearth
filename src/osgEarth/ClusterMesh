@@ -92,9 +92,15 @@ namespace osgEarth
         {
             //! Triangle limit per cluster, clamped to [8, 256]. Smaller clusters follow the
             //! screen-space error more tightly at the price of more draw commands.
-            unsigned maxTrianglesPerCluster = 128u;
+            unsigned maxTrianglesPerCluster;
             //! Weight of normal deviation relative to positional error during simplification.
-            float normalWeight = 0.5f;
+            float normalWeight;
+
+            //! Defaults: 128 triangles per cluster and a normal weight of 0.5. They are set here
+            //! and not by member initializers because the default arguments below construct a
+            //! BuildOptions before the enclosing class is complete, where GCC and Clang do not
+            //! accept member initializers.
+            BuildOptions() : maxTrianglesPerCluster(128u), normalWeight(0.5f) { }
         };
 
         //! Build the hierarchy from indexed triangles. Sections must cover disjoint index

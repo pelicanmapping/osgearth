@@ -11,6 +11,7 @@
 #include <osgEarth/Chonk>
 #include <osgEarth/CullingUtils>
 #include <osg/Node>
+#include <atomic>
 
 namespace osgEarth
 {
@@ -119,6 +120,8 @@ namespace osgEarth
 
         using L2Cache = LRUCache<TileKey, osg::ref_ptr<osg::Node>>;
         mutable L2Cache _localcache{ 32u };
+        // Counts calls to dirty(), so that a tile built before one is never cached after it.
+        std::atomic<unsigned> _generation{ 0u };
         mutable Gate<TileKey> _gate;
     };
 }

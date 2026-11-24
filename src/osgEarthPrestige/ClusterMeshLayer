@@ -1,0 +1,174 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarthPrestige/Export>
+#include <osgEarth/ClusterMeshNode>
+#include <osgEarth/TiledModelLayer>
+#include <osgEarth/URI>
+#include <memory>
+#include <mutex>
+#include <vector>
+
+namespace osgEarthPrestige
+{
+    using namespace osgEarth;
+
+    /**
+     * Demonstration layer that scatters dense models over the terrain as cluster LOD meshes
+     * (see osgEarth::ClusterMeshNode). It pages tiles at one fixed level. Each tile places
+     * its share of every configured model at random, clamps the placements to the map's
+     * elevation, and hands them to a single ClusterMeshNode that culls and draws the
+     * instances of every loaded tile together.
+     *
+     * A model may ask for tiles a few levels finer than the layer's level. Such tiles load
+     * within a proportionally shorter range, which suits small, dense models like plants:
+     * they exist only near the camera, while rocks stay visible from far away.
+     *
+     * The placement of a tile depends only on its key, the seed, and the options, so the
+     * same instances come back whenever a tile is paged in again.
+     *
+     * Requires the bindless OpenGL 4.6 path (--nvgl). The models are converted on first
+     * use, on a paging thread; unless cluster_cache is off, each conversion is stored
+     * next to its model as an .oecm file and read back on later runs.
+     *
+     * Configure options before opening. The setters below belong on the update thread.
+     */
+    class OSGEARTHPRESTIGE_EXPORT ClusterMeshLayer : public TiledModelLayer
+    {
+    public:
+        //! One model to scatter. A file that holds several separate objects, such as the
+        //! variants of a plant, becomes one mesh per object and each placement picks one.
+        struct OSGEARTHPRESTIGE_EXPORT Model
+        {
+            optional<URI> url;
+            //! Placements per hectare where the model is thickest.
+            optional<float> density{ 10.0f };
+            //! Range of the uniform scale picked for each placement.
+            optional<float> minScale{ 1.0f };
+            optional<float> maxScale{ 1.0f };
+            //! Fraction of the model's height that goes underground, which hides the
+            //! gap under a model that stands on a slope.
+            optional<float> sink{ 0.0f };
+            //! Largest random lean away from vertical, in degrees.
+            optional<float> tilt{ 0.0f };
+            //! How strongly placements gather in patches: 0 spreads them evenly, 1 leaves
+            //! most of the ground empty.
+            optional<float> clumping{ 0.5f };
+            //! Approximate size of those patches, in meters.
+            optional<float> patchSize{ 40.0f };
+            //! How many levels finer than the layer's level this model's tiles are. Each
+            //! step halves the tile size and the distance the model loads within.
+            optional<unsigned> levelOffset{ 0u };
+
+            //! Serialize as a "model" element.
+            Config getConfig() const;
+            //! Read a "model" element; a relative url resolves against the earth file.
+            void fromConfig(const Config& conf);
+        };
+
+        struct OSGEARTHPRESTIGE_EXPORT Options : public TiledModelLayer::Options
+        {
+            META_LayerOptions(osgEarthPrestige, Options, TiledModelLayer::Options);
+            OE_OPTION(unsigned, level, 17u);
+            OE_OPTION(float, range, 1000.0f);
+            OE_OPTION(float, density, 1.0f);
+            OE_OPTION(unsigned, seed, 1u);
+            OE_OPTION(float, errorThreshold, 1.0f);
+            OE_OPTION(float, minInstancePixels, 2.0f);
+            OE_OPTION(bool, occlusionCulling, true);
+            OE_OPTION(unsigned, maxDrawnClusters, 4194304u);
+            OE_OPTION(unsigned, maxTextureSize, 4096u);
+            OE_OPTION(bool, clusterCache, true);
+            OE_OPTION_VECTOR(Model, models);
+
+            //! Serialize the scatter settings and the model list.
+            Config getConfig() const override;
+            //! Read the scatter settings and every "model" child of "models".
+            void fromConfig(const Config& conf);
+        };
+
+        META_Layer(osgEarthPrestige, ClusterMeshLayer, Options, TiledModelLayer, prestige:clustermesh);
+
+        //! The node that draws every tile's instances; null until the layer is initialized.
+        //! Its settings (error threshold, occlusion culling, debug view) may be changed live.
+        ClusterMeshNode* getClusterMeshNode() const { return _clusterNode.get(); }
+
+        //! Level of the tiles that hold the placements. Changing it rebuilds the layer.
+        void setLevel(unsigned value);
+        unsigned getLevel() const;
+
+        //! Distance in meters within which tiles of the layer's level load, measured from
+        //! the bounds of their parent tile. Tiles of finer levels load within half of it per
+        //! level. Applies to the camera-distance LOD method. Changing it rebuilds the layer.
+        void setRange(float meters);
+        float getRange() const;
+
+        //! Multiplier on every model's density. Changing it rebuilds the layer.
+        void setDensity(float value);
+        float getDensity() const;
+
+        //! Seed of the random placement. Changing it rebuilds the layer.
+        void setSeed(unsigned value);
+        unsigned getSeed() const;
+
+        //! Largest simplification error on screen, in pixels; see ClusterMeshNode.
+        void setErrorThreshold(float pixels);
+        float getErrorThreshold() const;
+
+        //! Smallest on-screen radius, in pixels, of an instance that still draws.
+        void setMinInstancePixels(float pixels);
+        float getMinInstancePixels() const;
+
+        //! Whether instances and clusters hidden behind other geometry are skipped.
+        void setOcclusionCulling(bool value);
+        bool getOcclusionCulling() const;
+
+    public: // TiledModelLayer
+        //! The map's profile, so the placement tiles line up with terrain tiles.
+        const Profile* getProfile() const override { return _profile.get(); }
+        //! The layer's level, which is the coarsest one with content.
+        unsigned getMinLevel() const override { return getLevel(); }
+        //! The finest level that a configured model asks for.
+        unsigned getMaxLevel() const override;
+
+    public: // Layer
+        //! Creates the ClusterMeshNode and applies the configured settings to it.
+        void init() override;
+        //! Fails unless at least one model is configured.
+        Status openImplementation() override;
+        //! Adopts the map's profile; reports an error when the bindless path is off.
+        void addedToMap(const Map* map) override;
+        //! Releases the models and their textures.
+        Status closeImplementation() override;
+
+    protected: // TiledModelLayer
+        //! Places and clamps one tile's instances. Runs on a paging thread. Returns null
+        //! for a tile without placements, on cancellation, and when no model could be loaded.
+        osg::ref_ptr<osg::Node> createTileImplementation(const TileKey& key, ProgressCallback* progress) const override;
+        //! Rebuilds the pager with this layer's load ranges, then puts the ClusterMeshNode
+        //! back next to it.
+        void create() override;
+
+        virtual ~ClusterMeshLayer() { }
+
+    private:
+        //! The converted meshes of one configured model.
+        struct Asset
+        {
+            Model model;
+            std::vector<ClusterMesh::Ptr> variants;
+        };
+
+        //! The converted models. The first call after open reads and converts them, while
+        //! other paging threads wait; models that fail to load are left out.
+        std::shared_ptr<const std::vector<Asset>> assets() const;
+
+        osg::ref_ptr<const Profile> _profile;
+        osg::ref_ptr<ClusterMeshNode> _clusterNode;
+        mutable std::mutex _assetsMutex;
+        mutable std::shared_ptr<const std::vector<Asset>> _assets;
+    };
+}

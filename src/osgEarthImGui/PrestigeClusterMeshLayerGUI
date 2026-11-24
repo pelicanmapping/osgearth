@@ -1,0 +1,145 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+#include <osgEarthImGui/ImGuiPanel>
+#include <osgEarthPrestige/ClusterMeshLayer>
+#include <algorithm>
+#include <vector>
+
+namespace osgEarthPrestige
+{
+    //! Edits a ClusterMeshLayer and shows the GPU counters of its ClusterMeshNode.
+    class ClusterMeshLayerGUI : public osgEarth::ImGuiPanel
+    {
+    public:
+        //! Creates a closed panel; ImGui restores its visibility from the saved settings.
+        ClusterMeshLayerGUI() : ImGuiPanel("Cluster Meshes") { }
+
+        //! Enables the menu entry when the current map contains a cluster mesh layer.
+        bool isAvailable(osg::RenderInfo& ri) const override
+        {
+            auto* map = findNode<osgEarth::MapNode>(ri);
+            return map && map->getMap()->getLayer<ClusterMeshLayer>() != nullptr;
+        }
+
+        //! Displays layer selection, the layer's controls, and its counters on the GUI thread.
+        void draw(osg::RenderInfo& ri) override
+        {
+            auto* map = findNode<osgEarth::MapNode>(ri);
+            if (!map) return;
+            std::vector<osg::ref_ptr<ClusterMeshLayer>> layers;
+            map->getMap()->getLayers(layers);
+            if (layers.empty()) return;
+            osg::ref_ptr<ClusterMeshLayer> layer;
+            _layer.lock(layer);
+            if (std::find(layers.begin(), layers.end(), layer) == layers.end()) layer = layers.front();
+            ImGui::SetNextWindowSize(ImVec2(520, 560), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin(name(), visible()))
+            {
+                if (ImGui::BeginCombo("Layer", layer->getName().c_str()))
+                {
+                    for (auto& candidate : layers)
+                    {
+                        ImGui::PushID(candidate.get());
+                        if (ImGui::Selectable(candidate->getName().c_str(), candidate == layer)) layer = candidate;
+                        ImGui::PopID();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGuiLTable::Begin("Cluster mesh properties");
+                bool enabled = layer->getVisible();
+                if (ImGuiLTable::Checkbox("Visible", &enabled)) layer->setVisible(enabled);
+                drawControls(layer.get());
+                ImGuiLTable::End();
+                drawStats(layer.get());
+            }
+            _layer = layer;
+            ImGui::End();
+        }
+
+        //! Draws the layer's controls inside the caller's property table. The node settings
+        //! apply at once; level, density, and seed rebuild the layer when the edit ends.
+        static void drawControls(ClusterMeshLayer* layer)
+        {
+            osgEarth::ClusterMeshNode* node = layer->getClusterMeshNode();
+            if (!node) return;
+
+            ImGuiLTable::Section("ClusterMeshLayer");
+            float threshold = layer->getErrorThreshold();
+            if (ImGuiLTable::SliderFloat("Error (px)", &threshold, 0.25f, 32.0f, "%.2f", ImGuiSliderFlags_Logarithmic))
+                layer->setErrorThreshold(threshold);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Largest simplification error allowed on screen. One pixel is visually lossless.");
+
+            float minPixels = layer->getMinInstancePixels();
+            if (ImGuiLTable::SliderFloat("Min size (px)", &minPixels, 0.0f, 32.0f, "%.1f", 0))
+                layer->setMinInstancePixels(minPixels);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Instances with a smaller radius on screen are not drawn. Zero draws them all.");
+
+            bool occlusion = layer->getOcclusionCulling();
+            if (ImGuiLTable::Checkbox("Occlusion", &occlusion))
+                layer->setOcclusionCulling(occlusion);
+
+            int debug = int(node->getDebug());
+            const char* modes[] = { "Shaded", "Clusters", "Triangles", "Instances" };
+            ImGui::TableNextColumn();
+            ImGui::Text("View");
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::Combo("##view", &debug, modes, 4))
+                node->setDebug(osgEarth::ClusterMeshNode::Debug(debug));
+
+            // These rebuild every tile, so wait for the end of the edit.
+            static float density = 0.0f, range = 0.0f;
+            static int level = 0, seed = 0;
+            if (!ImGui::IsAnyItemActive())
+            {
+                density = layer->getDensity();
+                range = layer->getRange();
+                level = int(layer->getLevel());
+                seed = int(layer->getSeed());
+            }
+            ImGuiLTable::SliderFloat("Density", &density, 0.0f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemDeactivatedAfterEdit()) layer->setDensity(density);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Multiplies every model's density. Rebuilds the layer.");
+            ImGuiLTable::SliderFloat("Range (m)", &range, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemDeactivatedAfterEdit()) layer->setRange(range);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Distance within which tiles of the layer's level load. Models on finer "
+                    "levels load within half of it per level. Rebuilds the layer.");
+            ImGuiLTable::SliderInt("Tile level", &level, 14, 19);
+            if (ImGui::IsItemDeactivatedAfterEdit()) layer->setLevel(unsigned(level));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Level of the tiles that hold the placements. Rebuilds the layer.");
+            ImGuiLTable::SliderInt("Seed", &seed, 0, 100);
+            if (ImGui::IsItemDeactivatedAfterEdit()) layer->setSeed(unsigned(seed));
+        }
+
+        //! Shows the counters read back from the GPU for the previous frame's main camera.
+        static void drawStats(ClusterMeshLayer* layer)
+        {
+            osgEarth::ClusterMeshNode* node = layer->getClusterMeshNode();
+            if (!node) return;
+            node->setCollectStats(true);
+            const auto stats = node->getStats();
+            ImGui::Separator();
+            ImGui::Text("Instances loaded: %u", stats.instances);
+            ImGui::Text("Source triangles: %.1f M", double(stats.sourceTriangles) * 1.0e-6);
+            ImGui::Text("Drawn triangles: %.2f M (%.4f%%)", double(stats.triangles) * 1.0e-6,
+                stats.sourceTriangles ? 100.0 * double(stats.triangles) / double(stats.sourceTriangles) : 0.0);
+            ImGui::Text("Drawn clusters: %u", stats.clusters);
+            ImGui::Text("Clusters tested: %u", stats.candidates);
+            ImGui::Text("Occluded: %u instances, %u clusters", stats.occludedInstances, stats.occludedClusters);
+            if (stats.overflowed)
+                ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Work lists overflowed; some clusters were skipped");
+            ImGui::Text("Frame: %.2f ms", 1000.0f / ImGui::GetIO().Framerate);
+        }
+
+    private:
+        osg::observer_ptr<ClusterMeshLayer> _layer;
+    };
+}

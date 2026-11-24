@@ -55,6 +55,7 @@ set(TARGET_SRC
     AssetCatalog.cpp
     VegetationLayer.cpp
     FeatureOverlay.cpp
+    ClusterMeshLayer.cpp
     ${SHADERS_CPP})
 
 set(TARGET_H
@@ -77,7 +78,8 @@ set(TARGET_H
     FeatureOverlay
     Scatter
     AssetCatalog
-    VegetationLayer)
+    VegetationLayer
+    ClusterMeshLayer)
 
 set(TARGET_PRIVATE_H
     CloudLayerRenderer.h PlacementLimits.h TreeCards.h PlaceholderAssets.h Grass.h AssetLighting.h

@@ -35,6 +35,7 @@
 #include <osgEarthImGui/PrestigeVegetationLayerGUI>
 #include <osgEarthImGui/PrestigeGrimeLayerGUI>
 #include <osgEarthImGui/PrestigeAssetsGUI>
+#include <osgEarthImGui/PrestigeClusterMeshLayerGUI>
 #endif
 
 #ifdef OSGEARTH_HAVE_GEOCODER
@@ -280,6 +281,7 @@ main(int argc, char** argv)
         ui->add("Prestige", new EnvironmentGUI("Sky & Lighting", true));
         ui->add("Prestige", new osgEarthPrestige::GrimeLayerGUI());
         ui->add("Prestige", new PrestigeAssetsGUI());
+        ui->add("Prestige", new osgEarthPrestige::ClusterMeshLayerGUI());
 #endif
 
 #ifdef OSGEARTH_HAVE_CESIUM_NODEKIT

@@ -19,6 +19,8 @@ namespace osgEarth { namespace Util
         std::string ChonkCulling;
         std::string ChonkScreenSize;
         std::string ChonkHiZ;
+        std::string ClusterMesh;
+        std::string ClusterMeshCull;
         std::string Decals_Headers;
         std::string Decals;
         std::string DecalsCulling;

@@ -50,6 +50,7 @@ set(STOCK_PANELS
     PrestigeVegetationLayerGUI
     PrestigeGrimeLayerGUI
     PrestigeAssetsGUI
+    PrestigeClusterMeshLayerGUI
     FeatureOverlayGUI
     
     # osgEarthCesium

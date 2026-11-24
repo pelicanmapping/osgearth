@@ -1,0 +1,156 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/Common>
+#include <osgEarth/ClusterMesh>
+#include <osg/Group>
+#include <osg/Matrixd>
+#include <osg/Matrixf>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+namespace osgEarth
+{
+    /**
+     * Draws any number of instances of ClusterMesh objects, choosing the level of detail
+     * of every cluster of every instance on the GPU each frame.
+     *
+     * For each camera, a compute pass rejects instances outside the view, finds the clusters
+     * whose simplification error is under a pixel threshold while their parents' error is
+     * over it, culls those against the view, and writes one indirect draw command per
+     * survivor. The node then draws them with one multi-draw call for opaque materials and
+     * one for alpha-tested materials. Triangle density therefore follows screen coverage
+     * rather than the size of the source data.
+     *
+     * Color cameras also cull what other geometry hides. The node first draws what the
+     * previous frame's depth predicts to be visible, then builds a depth pyramid from the
+     * frame so far, retests everything the prediction rejected, and draws the part that is
+     * visible after all. A wrong prediction costs a late draw, never a missing object.
+     * Terrain and anything else drawn before the node occludes too.
+     *
+     * Requirements: OpenGL 4.6 and bindless textures (the same as Chonk). The TextureArena
+     * that holds the meshes' materials must be installed in a StateSet at or above this node,
+     * and every mesh must use that arena. Lighting comes from whatever osgEarth lighting is
+     * installed above the node; the node feeds it albedo, normals, and oe_pbr.
+     *
+     * A node that covers a large area takes its instances in batches (createBatch). Each
+     * batch has a frame of its own, which the node composes with the camera in double
+     * precision, so one node can hold instances all over a planet. A batch also follows the
+     * scene graph: it draws while the node that stands for it is being culled, which lets a
+     * pager decide what is loaded and visible while a single cull and a single draw serve
+     * everything.
+     *
+     * add, clear, and the settings may change from the update traversal or while no frame
+     * is in progress, never concurrently with drawing. createBatch, and the destruction of
+     * the nodes it returns, are safe on any thread at any time.
+     */
+    class OSGEARTH_EXPORT ClusterMeshNode : public osg::Group
+    {
+    public:
+        //! Visualizations that replace the albedo; lighting still applies.
+        enum Debug { DEBUG_NONE = 0, DEBUG_CLUSTERS = 1, DEBUG_TRIANGLES = 2, DEBUG_INSTANCES = 3 };
+
+        //! GPU counters of the most recent cull for the main (non render-to-texture) camera.
+        struct Stats
+        {
+            unsigned instances = 0u;      // instances in the node, drawn or not
+            unsigned candidates = 0u;     // instance/cluster pairs that reached the cluster pass
+            unsigned clusters = 0u;       // clusters drawn
+            unsigned triangles = 0u;      // triangles drawn
+            unsigned occludedInstances = 0u; // whole instances that occlusion culling skipped
+            unsigned occludedClusters = 0u;  // clusters of visible instances that it skipped
+            std::uint64_t sourceTriangles = 0u; // triangles a full-detail draw of every instance would submit
+            // A GPU work list was too small and some clusters were skipped. Lasts a few frames
+            // while the lists grow, or for good once they have reached setMaxDrawnClusters.
+            bool overflowed = false;
+        };
+
+        ClusterMeshNode();
+
+        //! Adds one instance. The transform is relative to this node and may translate,
+        //! rotate, and scale; non-uniform scale makes the LOD error conservative for its
+        //! largest axis. Returns false, adding nothing, for a null or empty mesh, for a
+        //! transform that mirrors, is singular, or is not finite, or when the node's
+        //! buffers cannot hold the mesh.
+        bool add(ClusterMesh::Ptr mesh, const osg::Matrixf& transform);
+
+        //! Adds many instances of one mesh; cheaper than adding them one at a time. One
+        //! unacceptable transform rejects the whole call.
+        bool add(ClusterMesh::Ptr mesh, const std::vector<osg::Matrixf>& transforms);
+
+        //! A mesh and where it goes, relative to the frame of its batch. The transform obeys
+        //! the same rules as the one given to add.
+        struct Instance
+        {
+            ClusterMesh::Ptr mesh;
+            osg::Matrixf transform;
+        };
+
+        //! Adds instances that share a frame, and returns the node that stands for them.
+        //! The frame places the batch relative to this node; it must be a rotation and a
+        //! translation only. The instances draw in every frame in which a cull traversal
+        //! reaches the returned node, so add it to the scene graph in the same coordinate
+        //! system as this node (its bound is that of the instances, in this node's
+        //! coordinates). They are removed when the returned node is destroyed. Returns null,
+        //! adding nothing, when the list is empty or holds an instance that add would reject.
+        osg::ref_ptr<osg::Node> createBatch(const osg::Matrixd& frame, const std::vector<Instance>& instances);
+
+        //! Removes every instance and mesh. Nodes returned by createBatch stop drawing.
+        void clear();
+
+        std::size_t getNumInstances() const;
+
+        //! Largest simplification error, in pixels, allowed on screen. One pixel is visually
+        //! lossless; larger values trade detail for fewer triangles. Default is 1.
+        void setErrorThreshold(float pixels);
+        float getErrorThreshold() const;
+
+        //! Instances whose bounding sphere has a smaller radius on screen than this many
+        //! pixels are not drawn. It bounds the cost of distant instances, each of which
+        //! would otherwise draw its coarsest level. Zero, the default, draws everything.
+        void setMinInstancePixels(float pixels);
+        float getMinInstancePixels() const;
+
+        //! Whether color cameras skip instances and clusters hidden behind other geometry.
+        //! Output is unchanged. Perspective cameras only. Default is on.
+        void setOcclusionCulling(bool value);
+        bool getOcclusionCulling() const;
+
+        //! Upper bound on clusters drawn per camera for each of the opaque and alpha-tested
+        //! lists, in each of the two occlusion phases. The GPU command buffers start at
+        //! 262144 entries per list and grow toward this bound when a frame needs more, which
+        //! takes a few frames; they use about 150 bytes per entry. A frame that needs more
+        //! than the bound drops clusters and sets Stats::overflowed. Default is 4194304.
+        void setMaxDrawnClusters(unsigned value);
+        unsigned getMaxDrawnClusters() const;
+
+        void setDebug(Debug value);
+        Debug getDebug() const;
+
+        //! Enables per-frame readback of GPU counters, which costs a small buffer download.
+        void setCollectStats(bool value);
+        //! Counters from the last main-camera cull; zeros unless stats collection is on.
+        Stats getStats() const;
+
+    public: // osg::Node
+        //! Applies content changes made on other threads before the update traversal goes on.
+        void traverse(osg::NodeVisitor& nv) override;
+
+    protected:
+        virtual ~ClusterMeshNode();
+
+    private:
+        struct Impl;
+        class Pass;
+        class BatchNode;
+        std::shared_ptr<Impl> _impl;
+        osg::ref_ptr<osg::Uniform> _debugUniform;
+
+        //! Recompute the bounds and add or drop the alpha-tested pass after a content change.
+        void contentChanged();
+    };
+}

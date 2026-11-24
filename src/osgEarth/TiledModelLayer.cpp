@@ -121,6 +121,8 @@ TiledModelLayer::createTile(const TileKey& key, ProgressCallback* progress) cons
 
     NetworkMonitor::ScopedRequestLayer layerRequest(getName());
 
+    const unsigned generation = _generation;
+
     osg::ref_ptr<osg::Node> result;
 
     // check the L2 cache
@@ -235,7 +237,7 @@ TiledModelLayer::createTile(const TileKey& key, ProgressCallback* progress) cons
         }
     }
 
-    if (result.valid())
+    if (result.valid() && generation == _generation)
     {
         _localcache.insert(key, result);
     }
@@ -310,6 +312,11 @@ TiledModelLayer::removedFromMap(const Map* map)
 void TiledModelLayer::dirty()
 {
     super::dirty();
+
+    // A rebuild must not hand back tiles made before the change. Tiles still being built
+    // for the old graph see the new generation and stay out of the cache.
+    ++_generation;
+    _localcache.clear();
 
     _graphDirty = true;
 

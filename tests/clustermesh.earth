@@ -1,0 +1,93 @@
+<!--
+osgEarth Sample - Cluster LOD meshes (Nanite-style)
+
+Scatters Quixel Megascans rocks and plants over the terrain with the Prestige
+ClusterMeshLayer. Every instance is a multi-million-triangle scan (rocks) or a
+dense alpha-tested plant; the GPU picks the detail of each cluster each frame.
+
+Run with the bindless OpenGL 4.6 path:
+
+    osgearth_imgui clustermesh.earth --nvgl
+
+Open Prestige > Cluster Meshes for the controls and the GPU counters. Add
+--shadows for cast shadows.
+
+The models are not in the repository. ../data/megascans/README.md says how to
+download and prepare them. Loading them takes about 10 seconds. A model without
+its .oecm cache file is converted first, which adds a few seconds per million
+triangles.
+-->
+<map name="Cluster meshes" xmlns:prestige="osgEarthPrestige">
+
+    <xi:include href="readymap_imagery.xml"/>
+    <xi:include href="readymap_elevation.xml"/>
+
+    <prestige:clustermesh name="Rocks and plants">
+        <!-- Placement tiles: level 17 tiles are about 150 m across. They load when the
+             camera comes within "range" meters of their parent tile. -->
+        <level>17</level>
+        <range>1600</range>
+
+        <!-- Multiplies every model's density. -->
+        <density>1.0</density>
+        <seed>1</seed>
+
+        <!-- Largest simplification error on screen, in pixels. -->
+        <error_threshold>1.0</error_threshold>
+        <!-- Instances with a smaller radius on screen than this are not drawn. -->
+        <min_instance_pixels>3</min_instance_pixels>
+        <occlusion_culling>true</occlusion_culling>
+        <max_texture_size>4096</max_texture_size>
+
+        <!-- density: placements per hectare where the model is thickest.
+             clumping: 0 spreads placements evenly, 1 gathers them in sparse patches.
+             patch_size: size of those patches in meters.
+             sink: fraction of the model's height below ground. tilt: largest lean, degrees.
+             level_offset: use tiles this many levels finer than "level". Each step halves the
+             tile size and the range, so small dense models exist only near the camera. -->
+        <models>
+            <model url="../data/megascans/mossy_forest_boulder/mossy_forest_boulder_4k.glb"
+                   density="12" min_scale="0.5" max_scale="1.6" sink="0.2" tilt="12" clumping="0.7" patch_size="90"/>
+            <model url="../data/megascans/icelandic_rock_formation/icelandic_rock_formation_4k.glb"
+                   density="16" min_scale="0.6" max_scale="2.0" sink="0.15" tilt="10" clumping="0.7" patch_size="70"/>
+            <model url="../data/megascans/canyon_sandstone_boulder/canyon_sandstone_boulder_4k.glb"
+                   density="60" min_scale="0.3" max_scale="1.2" sink="0.2" tilt="25" clumping="0.6" patch_size="50"/>
+            <model url="../data/megascans/massive_nordic_coastal_cliff/massive_nordic_coastal_cliff_4k.glb"
+                   density="0.05" min_scale="0.3" max_scale="0.6" sink="0.25" tilt="0" clumping="0" patch_size="400"/>
+            <model url="../data/megascans/lady_fern/standard/lady_fern_2k.gltf" level_offset="2"
+                   density="2500" min_scale="0.6" max_scale="1.4" sink="0.03" tilt="5" clumping="0.6" patch_size="35"/>
+            <model url="../data/megascans/tundra_grass/standard/tundra_grass_2k.gltf" level_offset="2"
+                   density="25000" min_scale="0.8" max_scale="1.8" sink="0.03" tilt="5" clumping="0.4" patch_size="25"/>
+        </models>
+    </prestige:clustermesh>
+
+    <!-- Noon in New Zealand, where the viewpoints are. -->
+    <sky_simple hours="0.7"/>
+
+    <viewpoints home="0" time="2">
+        <viewpoint name="Among the rocks">
+            <heading>30</heading>
+            <pitch>-8</pitch>
+            <range>40m</range>
+            <long>170.25</long>
+            <lat>-44.10</lat>
+            <height>707</height>
+        </viewpoint>
+        <viewpoint name="Hillside">
+            <heading>-60</heading>
+            <pitch>-20</pitch>
+            <range>250m</range>
+            <long>170.25</long>
+            <lat>-44.10</lat>
+            <height>707</height>
+        </viewpoint>
+        <viewpoint name="Overview">
+            <heading>0</heading>
+            <pitch>-35</pitch>
+            <range>600m</range>
+            <long>170.25</long>
+            <lat>-44.10</lat>
+            <height>707</height>
+        </viewpoint>
+    </viewpoints>
+</map>

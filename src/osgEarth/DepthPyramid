@@ -1,0 +1,64 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/Common>
+#include <osg/Camera>
+#include <osg/Program>
+#include <osg/State>
+#include <osg/Vec2f>
+#include <osg/Vec4f>
+#include <cstdint>
+
+namespace osgEarth
+{
+    /**
+     * Farthest-depth pyramid of a camera's depth buffer, for GPU occlusion culling.
+     *
+     * Each texel of a level holds the farthest depth of the pixels it covers, so a compute
+     * shader can prove that a bounding volume is hidden with four texel fetches at the
+     * level where its screen box spans two texels. Level 0 is half the viewport size.
+     *
+     * Needs OpenGL 4.5 direct state access and bindless textures. Pyramids are kept per
+     * graphics context, camera, and owner, and are discarded for cameras that stop drawing.
+     */
+    class OSGEARTH_EXPORT DepthPyramid
+    {
+    public:
+        //! What build publishes for a culling shader.
+        struct Result
+        {
+            GLuint64 handle = 0; // resident bindless sampler handle of the pyramid
+            osg::Vec4f params; // viewport width and height, levels, +1 forward / -1 reverse
+            osg::Vec2f depthMapping; // scale and bias from clip-space Z/W to window depth, including glDepthRange
+        };
+
+        //! A new compute program that reduces one pyramid level per dispatch. The caller owns
+        //! it and must make it current before calling build.
+        static osg::Program* createProgram();
+
+        //! Copies the draw framebuffer's depth under the current viewport and reduces it into
+        //! the pyramid for (camera, owner). The program is the context's instance of a
+        //! createProgram program and must be current; it is still current on return. Call
+        //! on the camera's draw thread. The owner only tells apart pyramids that different
+        //! renderers build for one camera, and may be null. Returns false, publishing
+        //! nothing, when anything is unavailable: the camera has no copyable depth buffer,
+        //! the depth test is off or unusual, or the entry points are missing.
+        static bool build(osg::State& state, const osg::Program::PerContextProgram* program, const osg::Camera* camera,
+            const void* owner, unsigned frameNumber, Result& result);
+
+        //! Forgets one context's pyramids (every context's when state is null). The object
+        //! pool deletes their GL objects on the owning context, so any thread may call this.
+        static void release(osg::State* state);
+
+        //! Forgets every pyramid built for a non-null owner, in all contexts. An owner calls
+        //! this when it is destroyed. Any thread may call it.
+        static void releaseOwner(const void* owner);
+
+        //! A number that changes whenever any pyramid is discarded. A Result's handle is
+        //! safe to sample only while this still has the value it had when build returned.
+        static std::uint64_t generation();
+    };
+}

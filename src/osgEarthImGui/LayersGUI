@@ -54,6 +54,7 @@
 
 #ifdef OSGEARTH_HAVE_PRESTIGE_NODEKIT
 #include <osgEarthImGui/PrestigeGrimeLayerGUI>
+#include <osgEarthImGui/PrestigeClusterMeshLayerGUI>
 #include <osgEarthPrestige/SurfaceSplattingLayer>
 #endif
 
@@ -954,6 +955,12 @@ namespace osgEarth
                         if (grimeLayer)
                         {
                             osgEarthPrestige::GrimeLayerGUI::drawControls(grimeLayer);
+                        }
+
+                        auto clusterMeshLayer = dynamic_cast<osgEarthPrestige::ClusterMeshLayer*>(layer);
+                        if (clusterMeshLayer)
+                        {
+                            osgEarthPrestige::ClusterMeshLayerGUI::drawControls(clusterMeshLayer);
                         }
 
 #endif

@@ -72,6 +72,9 @@ set(TARGET_GLSL
     Chonk.Culling.glsl
     Chonk.ScreenSize.glsl
     Chonk.HiZ.glsl
+    ClusterMesh.glsl
+    ClusterMesh.Cull.glsl
+    DepthPyramid.glsl
     Decals.h.glsl
     Decals.glsl
     Decals.Culling.glsl
@@ -162,7 +165,10 @@ SET(TARGET_H
     Clamping
     ClampingTechnique
     ClipSpace
+    ClusterMesh
+    ClusterMeshNode
     ClusterNode
+    DepthPyramid
     Color
     ColorFilter
     Common
@@ -536,6 +542,9 @@ set(TARGET_SRC
     CircleNode.cpp
     ClampableNode.cpp
     ClampCallback.cpp
+    ClusterMesh.cpp
+    ClusterMeshNode.cpp
+    DepthPyramid.cpp
     Clamping.cpp
     ClampingTechnique.cpp
     ClipSpace.cpp
@@ -967,6 +976,8 @@ if(meshoptimizer_FOUND)
     message(STATUS "Found meshoptimizer")
     set(OSGEARTH_HAVE_MESH_OPTIMIZER ON)
     target_link_libraries(${LIB_NAME} PRIVATE meshoptimizer::meshoptimizer)
+    # clusterlod.h, the cluster LOD builder from the meshoptimizer repository
+    target_include_directories(${LIB_NAME} PRIVATE ${OSGEARTH_EMBEDDED_THIRD_PARTY_DIR})
 endif()
 
 if(SuperluminalAPI_FOUND)

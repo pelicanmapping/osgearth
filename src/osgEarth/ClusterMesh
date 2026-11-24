@@ -1,0 +1,170 @@
+/* osgEarth
+ * Copyright 2026 Pelican Mapping
+ * MIT License
+ */
+#pragma once
+
+#include <osgEarth/Common>
+#include <osgEarth/Chonk>
+#include <osg/BoundingBox>
+#include <osg/Vec2f>
+#include <osg/Vec3f>
+#include <osg/Vec4f>
+#include <osg/Vec4ub>
+#include <cstddef>
+#include <cstdint>
+#include <iosfwd>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace osgEarth
+{
+    /**
+     * Immutable triangle mesh with a cluster LOD hierarchy, in the style of Nanite.
+     *
+     * The source triangles are split into clusters of up to a few hundred triangles.
+     * Neighboring clusters are grouped, simplified together with their shared border
+     * locked, and split into new clusters; repeating that until one group remains
+     * yields a DAG whose levels halve the triangle count. Each cluster records the
+     * error of the simplification that produced it and the error of the coarser
+     * clusters that replace it, both monotonic along the DAG, so a renderer can choose
+     * every cluster independently and still get a crack-free cut at any view.
+     *
+     * All levels index one shared vertex buffer; simplification selects source
+     * vertices and never creates new ones.
+     */
+    class OSGEARTH_EXPORT ClusterMesh
+    {
+    public:
+        using Ptr = std::shared_ptr<const ClusterMesh>;
+
+        //! One vertex; matches the vertex layout declared in ClusterMeshNode.cpp.
+        struct Vertex
+        {
+            osg::Vec3f position;
+            GLuint normal = 0u; // signed normalized 10:10:10:2 (GL_INT_2_10_10_10_REV)
+            osg::Vec2f uv;
+            osg::Vec4ub color = osg::Vec4ub(255, 255, 255, 255);
+        };
+
+        //! Cluster::flags value for a material that can fail the alpha test.
+        static constexpr GLuint FLAG_ALPHA_TESTED = 1u;
+        //! Cluster::flags value for geometry whose albedo texture decodes sRGB on sampling,
+        //! so the shaded color must be encoded back to sRGB for the rest of the pipeline.
+        static constexpr GLuint FLAG_LINEAR_COLOR = 2u;
+
+        //! Cluster::material value for geometry without a material: no textures are sampled.
+        static constexpr GLuint NO_MATERIAL = ~0u;
+
+        //! Parent error of a cluster that nothing coarser replaces.
+        static constexpr float ROOT_ERROR = 3.0e38f;
+
+        //! One cluster. An 80-byte std430 record mirrored by ClusterMesh.Cull.glsl.
+        //! A cluster draws when its own error projects at or under the pixel threshold
+        //! while its parent's error projects over it. Errors and spheres are in mesh units.
+        struct Cluster
+        {
+            osg::Vec4f bounds;      // center and radius of this cluster's triangles, for visibility culling
+            osg::Vec4f lodSelf;     // center and radius of the group this cluster simplifies
+            osg::Vec4f lodParent;   // center and radius of the group whose simplification replaces it
+            GLfloat selfError = 0.0f;           // zero for source geometry
+            GLfloat parentError = ROOT_ERROR;
+            GLfloat prefixMinSelfError = 0.0f;  // least selfError among this cluster and those sorted before it
+            GLuint flags = 0u;
+            GLuint firstIndex = 0u;
+            GLuint indexCount = 0u;
+            GLuint material = 0u;   // MaterialArena ID, or NO_MATERIAL
+            GLuint baseVertex = 0u; // zero in a mesh; a renderer packing several meshes sets it
+        };
+
+        //! A run of source triangles that share one material.
+        struct Section
+        {
+            unsigned firstIndex = 0u;
+            unsigned indexCount = 0u;
+            ChonkMaterial::Ptr material; // may be empty for untextured geometry
+            bool alphaTested = false;
+            bool linearColor = false; // see FLAG_LINEAR_COLOR
+        };
+
+        struct BuildOptions
+        {
+            //! Triangle limit per cluster, clamped to [8, 256]. Smaller clusters follow the
+            //! screen-space error more tightly at the price of more draw commands.
+            unsigned maxTrianglesPerCluster;
+            //! Weight of normal deviation relative to positional error during simplification.
+            float normalWeight;
+
+            //! Defaults: 128 triangles per cluster and a normal weight of 0.5. They are set here
+            //! and not by member initializers because the default arguments below construct a
+            //! BuildOptions before the enclosing class is complete, where GCC and Clang do not
+            //! accept member initializers.
+            BuildOptions() : maxTrianglesPerCluster(128u), normalWeight(0.5f) { }
+        };
+
+        //! Build the hierarchy from indexed triangles. Sections must cover disjoint index
+        //! ranges; triangles outside every section are dropped. CPU only and reentrant.
+        //! Returns empty when no triangles survive or osgEarth was built without meshoptimizer.
+        static Ptr build(std::vector<Vertex> vertices, const std::vector<GLuint>& indices,
+            const std::vector<Section>& sections, const BuildOptions& options = BuildOptions());
+
+        //! Convert a loaded model. Textures and materials go into the factory's arena, which
+        //! must be the one installed above the ClusterMeshNode that draws the result.
+        //! The node's transforms are baked into the vertices. Returns empty on failure.
+        static Ptr create(osg::Node* node, ChonkFactory& factory, const BuildOptions& options = BuildOptions());
+
+        //! Same as create, but reuses a hierarchy stored at cachePath when it was built from
+        //! identical geometry and options, and writes one there after a fresh build.
+        //! An unreadable, stale, or unwritable cache only costs the rebuild.
+        static Ptr create(osg::Node* node, ChonkFactory& factory, const std::string& cachePath,
+            const BuildOptions& options = BuildOptions());
+
+        const std::vector<Vertex>& vertices() const { return _vertices; }
+        //! Triangle indices of every cluster at every level; clusters address ranges of it.
+        const std::vector<GLuint>& indices() const { return _indices; }
+        //! Clusters ordered by descending parentError, so coarse levels come first.
+        const std::vector<Cluster>& clusters() const { return _clusters; }
+
+        //! Sphere (center, radius) enclosing the geometry and every cluster's LOD spheres.
+        const osg::Vec4f& boundingSphere() const { return _sphere; }
+        const osg::BoundingBoxf& boundingBox() const { return _box; }
+
+        //! Triangle count of the full-detail source mesh.
+        unsigned numSourceTriangles() const { return _numSourceTriangles; }
+        //! Whether any cluster uses an alpha-tested material.
+        bool hasAlphaTest() const { return _hasAlphaTest; }
+
+        //! Appends the indices (into clusters()) of the cut for a uniform error budget in
+        //! mesh units, ignoring the view: zero selects the source geometry and ROOT_ERROR
+        //! the coarsest level. Useful for picking proxies and for validating a hierarchy.
+        void selectCut(float error, std::vector<unsigned>& output) const;
+
+    private:
+        //! Meshes are created by build and are immutable afterwards.
+        ClusterMesh() = default;
+
+        //! Shared implementation of build and create; an empty cachePath disables the cache.
+        static Ptr build(std::vector<Vertex> vertices, const std::vector<GLuint>& indices,
+            const std::vector<Section>& sections, const BuildOptions& options, const std::string& cachePath);
+        //! Run the hierarchy build. Leaves each cluster's material holding its section index.
+        bool buildClusters(std::vector<Vertex> vertices, const std::vector<GLuint>& indices,
+            const std::vector<Section>& sections, const BuildOptions& options);
+        //! Replace section indices with material IDs and flags, then derive the bounds.
+        void bindSections(const std::vector<Section>& sections);
+        //! Serialize geometry and clusters, tagged with a hash of their inputs; no materials.
+        bool write(std::ostream& out, std::uint64_t sourceHash) const;
+        //! Replace this mesh's geometry with a stream written for the same sourceHash.
+        //! Returns false and leaves the mesh empty when the stream is damaged or stale.
+        bool read(std::istream& in, std::uint64_t sourceHash, std::size_t numSections);
+
+        std::vector<Vertex> _vertices;
+        std::vector<GLuint> _indices;
+        std::vector<Cluster> _clusters;
+        std::vector<ChonkMaterial::Ptr> _materials; // keeps the cluster material IDs alive
+        osg::Vec4f _sphere;
+        osg::BoundingBoxf _box;
+        unsigned _numSourceTriangles = 0u;
+        bool _hasAlphaTest = false;
+    };
+}

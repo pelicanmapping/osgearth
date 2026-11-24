@@ -25,6 +25,7 @@ Let's get started!
 * [Procedural Volumetric Clouds](clouds.md)
 * [Sun Shadows](shadows.md)
 * [Chonk Multi-view Rendering](chonk-multiview.md)
+* [Cluster Meshes for Dense Models](cluster-meshes.md)
 * [Environment Variables](envvars.md)
 * [FAQ](faq.md)
 * [Release Notes](releasenotes.md)

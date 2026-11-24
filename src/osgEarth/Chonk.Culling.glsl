@@ -230,6 +230,7 @@ uniform float OE_LOD_SCALE_UNIFORM;
 
 
 #pragma include Chonk.ScreenSize.glsl
+#pragma include DepthPyramid.glsl
 
 // True when a view-space sphere lies wholly outside the left, right, bottom or top plane of a
 // perspective frustum. The planes pass through the eye, so this holds for spheres that reach the
@@ -246,49 +247,15 @@ bool outsideSidePlanes(in vec3 c, in float r, in mat4 proj)
     return false;
 }
 
-// Window-space depth of a point at view distance w (> 0), matching the depth buffer's mapping.
-// Vertex-only log depth rasterizes at or beyond this value at every pixel (log(1+1/u) is convex
-// in u = 1/w, which is what the rasterizer interpolates), so comparing it stays conservative.
-float windowDepth(float w, mat4 proj)
-{
-#if defined(OE_LOG_DEPTH_BUFFER)
-    float far = proj[3][2] / (proj[2][2] + 1.0);
-  #if OE_LOG_DEPTH_BUFFER == 2
-    return log(w*0.001 + 1.0) / log(far*0.001 + 1.0); // per-fragment log depth
-  #else
-    float ndc = 2.0 * log2(w + 1.0) / log2(far + 1.0) - 1.0; // per-vertex log depth
-    return ndc * oe_chonk_hiz_depth_mapping.x + oe_chonk_hiz_depth_mapping.y;
-  #endif
-#else
-    float ndc = (proj[2][2]*(-w) + proj[3][2])/w;
-    return ndc * oe_chonk_hiz_depth_mapping.x + oe_chonk_hiz_depth_mapping.y;
-#endif
-}
-
 // True when a view-space sphere lies behind this frame's depth pyramid at every pixel it can
-// cover. Samples the 2x2 texels spanning its screen box at the level where the box fits in two.
+// cover. LL and UR are its clip-space box from compute_clip_mbb.
 bool occludedByHiZ(vec4 center_view, float r, mat4 proj, vec4 LL, vec4 UR)
 {
-    float w = -(center_view.z + r); // view distance to the sphere's nearest point
-    if (abs(oe_chonk_hiz_params.w) < 0.5 || proj[3][3] > 0.01 || w <= 0.0 || LL.x < -1e5)
+    if (LL.x < -1e5)
         return false;
-    vec2 lo = clamp(LL.xy*0.5 + 0.5, 0.0, 1.0) * oe_chonk_hiz_params.xy * 0.5; // level-0 texels
-    vec2 hi = clamp(UR.xy*0.5 + 0.5, 0.0, 1.0) * oe_chonk_hiz_params.xy * 0.5;
-    int level = min(int(ceil(log2(max(max(hi.x - lo.x, hi.y - lo.y), 1.0)))),
-        int(oe_chonk_hiz_params.z) - 1);
-    ivec2 size = textureSize(oe_chonk_hiz, level);
-    ivec2 a = clamp(ivec2(lo / exp2(float(level))), ivec2(0), size - 1);
-    ivec2 b = clamp(ivec2(hi / exp2(float(level))), ivec2(0), size - 1);
-    vec4 depths = vec4(texelFetch(oe_chonk_hiz, a, level).r,
-        texelFetch(oe_chonk_hiz, ivec2(b.x, a.y), level).r,
-        texelFetch(oe_chonk_hiz, ivec2(a.x, b.y), level).r,
-        texelFetch(oe_chonk_hiz, b, level).r);
-    bool reverse = oe_chonk_hiz_params.w < 0.0;
-    float farthest = reverse ? min(min(depths.x, depths.y), min(depths.z, depths.w)) :
-        max(max(depths.x, depths.y), max(depths.z, depths.w));
-    // The margin covers 24-bit depth quantization in either ordering.
-    float nearest = windowDepth(w, proj);
-    return reverse ? nearest < farthest - 1e-6 : nearest > farthest + 1e-6;
+    // The last argument is the view distance to the sphere's nearest point.
+    return oe_depthPyramid_occluded(oe_chonk_hiz, oe_chonk_hiz_params, oe_chonk_hiz_depth_mapping, proj,
+        LL.xy, UR.xy, -(center_view.z + r));
 }
 
 // Zeroes every list's instance count; command templates stay resident on the GPU.

@@ -12,9 +12,10 @@ Run with the bindless OpenGL 4.6 path:
 Open Prestige > Cluster Meshes for the controls and the GPU counters. Add
 --shadows for cast shadows.
 
-The models live in ../data/megascans. Loading them takes about 10 seconds. A
-model without its .oecm cache file is converted first, which adds a few seconds
-per million triangles.
+The models are not in the repository. ../data/megascans/README.md says how to
+download and prepare them. Loading them takes about 10 seconds. A model without
+its .oecm cache file is converted first, which adds a few seconds per million
+triangles.
 -->
 <map name="Cluster meshes" xmlns:prestige="osgEarthPrestige">
 

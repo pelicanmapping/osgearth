@@ -1,0 +1,5 @@
+# The models are downloaded from fab.com and prepared locally; see README.md.
+*
+!.gitignore
+!README.md
+!prepare.py

@@ -178,7 +178,9 @@ Each step of `level_offset` halves the tile size and the range. Give small, dens
 such as plants an offset of 2 or 3. They then exist only near the camera, and the number
 of loaded instances stays bounded while rocks remain visible from far away.
 
-`tests/clustermesh.earth` uses the layer with Quixel Megascans rocks and plants:
+`tests/clustermesh.earth` uses the layer with Quixel Megascans rocks and plants. The
+models are not in the repository. `data/megascans/README.md` lists the six files to
+download from fab.com, and `data/megascans/prepare.py` prepares them. Then run:
 
 ```
 osgearth_imgui clustermesh.earth --nvgl

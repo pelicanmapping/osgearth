@@ -379,7 +379,8 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         //! Loads the root, optionally converting models. A nonempty filename suffix enables per-parent SSE scaling.
         ThreeDTilesetNode(Tileset* tileset, const std::string& authorizationHeader,
             SceneGraphCallbacks* sceneGraphCallbacks, osgDB::Options* options,
-            const ContentProcessor& processContent = ContentProcessor(), const std::string& refinementSuffix = {});
+            const ContentProcessor& processContent = ContentProcessor(), const std::string& refinementSuffix = {},
+            bool shadowLODFromPrimaryView = false);
 
         float getMaximumScreenSpaceError() const;
         void setMaximumScreenSpaceError(float maximumScreenSpaceError);
@@ -472,6 +473,7 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         osg::ref_ptr<osgDB::Options> _options;
         std::atomic<float> _maximumScreenSpaceError;
         const std::string _refinementSuffix;
+        const bool _shadowLODFromPrimaryView;
         std::atomic<float> _refinementScale{ 1.0f };
 
         mutable std::mutex _mutex;
@@ -494,7 +496,7 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
 
         unsigned int _lastExpiredFrame;
 
-        double _sseDenominator;
+        std::atomic<double> _sseDenominator{ 1.0 };
 
         std::string _authorizationHeader;
 

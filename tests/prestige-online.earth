@@ -94,6 +94,7 @@
   <ThreeDTiles name="Prestige Buildings" caching="true">
     <url>https://pelican-prestige.s3.us-east-1.amazonaws.com/prestige/tileset.json</url>
     <max_sse>15</max_sse>
+    <shadow_lod_from_primary_view>true</shadow_lod_from_primary_view>
     <refinement_suffix>_lod2.glb</refinement_suffix>
     <refinement_scale>2.0</refinement_scale>
   </ThreeDTiles>

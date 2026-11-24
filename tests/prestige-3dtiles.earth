@@ -11,6 +11,7 @@
         <!-- At SSE 15, LOD0 starts around 250m in a 1080-pixel-high view. The 2x scale
              delays refinement of LOD2 parents until 30px while keeping LOD0 at its original range. -->
         <max_sse>15</max_sse>
+        <shadow_lod_from_primary_view>true</shadow_lod_from_primary_view>
         <refinement_suffix>_lod2.glb</refinement_suffix>
         <refinement_scale>2.0</refinement_scale>
     </ThreeDTiles>

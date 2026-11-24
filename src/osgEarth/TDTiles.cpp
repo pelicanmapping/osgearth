@@ -4,6 +4,7 @@
  */
 #include <osgEarth/Metrics>
 #include <osgEarth/TDTiles>
+#include <osgEarth/CameraUtils>
 #include <osgEarth/Utils>
 #include <osgEarth/Registry>
 #include <osgEarth/URI>
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 #include <osgDB/FileNameUtils>
 #include <osgDB/Registry>
@@ -55,6 +57,38 @@ using ICO = osgUtil::IncrementalCompileOperation;
 
 namespace
 {
+    // The shadow camera publishes this transform and lens for the view receiving its shadows.
+    struct PrimaryLODView
+    {
+        osg::Matrixd shadowToPrimary;
+        osg::Matrix projection;
+        osg::Vec2 viewport;
+        float lodScale;
+    };
+
+    // Read the same primary view used by the shadow shaders. Standalone shadow cameras can omit it.
+    std::optional<PrimaryLODView> getPrimaryLODView(const osg::Camera* camera, float lodScale)
+    {
+        if (!CameraUtils::isShadowCamera(camera))
+            return std::nullopt;
+
+        const auto* state = camera->getStateSet();
+        const auto* transform = state->getUniform("oe_shadowToPrimaryMatrix");
+        const auto* projection = state->getUniform("oe_primaryProjectionMatrix");
+        const auto* viewport = state->getUniform("oe_primaryViewport");
+        PrimaryLODView view;
+        if (!transform || !transform->get(view.shadowToPrimary) || !projection || !projection->get(view.projection) ||
+            !viewport || !viewport->get(view.viewport) || !(view.viewport.x() > 0 && view.viewport.y() > 0) ||
+            !view.shadowToPrimary.valid() || !view.projection.valid() || view.projection(1, 1) == 0.0 ||
+            !(ProjectionMatrix::isPerspective(view.projection) || ProjectionMatrix::isOrtho(view.projection)))
+            return std::nullopt;
+
+        view.lodScale = lodScale;
+        if (const auto* scale = state->getUniform("oe_primaryLODScale"))
+            scale->get(view.lodScale);
+        return view;
+    }
+
     // State shared by all tiles of one tileset during one cull traversal.
     struct CullContext
     {
@@ -62,6 +96,10 @@ namespace
 
         // Eye-to-world matrix of the camera being culled.
         osg::Matrixd inverseView;
+
+        // Only the SSE calculation uses the receiver view. Bounds and horizon tests use the caster view.
+        std::optional<PrimaryLODView> primaryLOD;
+        double sseDenominator = 1.0;
 
         // Occlusion by the planet, when the tileset is on a geocentric map.
         bool horizonValid = false;
@@ -1303,6 +1341,13 @@ bool ThreeDTileNode::prepareForRefine(osgUtil::CullVisitor* cv, double priority)
 double ThreeDTileNode::getDistanceToTile(osgUtil::CullVisitor* cv)
 {
     osg::Matrixd modelView(*cv->getModelViewMatrix());
+    float lodScale = cv->getLODScale();
+    if (s_cullContext && s_cullContext->tileset == _tileset && s_cullContext->primaryLOD)
+    {
+        const auto& view = *s_cullContext->primaryLOD;
+        modelView *= view.shadowToPrimary;
+        lodScale = view.lodScale;
+    }
     double distance;
 
     if (_boundingBox.valid())
@@ -1326,7 +1371,7 @@ double ThreeDTileNode::getDistanceToTile(osgUtil::CullVisitor* cv)
             0.0);
     }
 
-    return distance * cv->getLODScale();
+    return distance * lodScale;
 }
 
 double ThreeDTileNode::computeLoadPriority(const osg::Matrixd& modelView, double error) const
@@ -1341,21 +1386,25 @@ double ThreeDTileNode::computeLoadPriority(const osg::Matrixd& modelView, double
 
 double ThreeDTileNode::computeScreenSpaceError(osgUtil::CullVisitor* cv)
 {
-    double distance = osg::maximum(getDistanceToTile(cv), 0.0000001);
-    const osg::Matrix& proj = cv->getCurrentCamera()->getProjectionMatrix();
+    const auto* camera = cv->getCurrentCamera();
+    const auto* view = s_cullContext && s_cullContext->tileset == _tileset && s_cullContext->primaryLOD ?
+        &*s_cullContext->primaryLOD : nullptr;
+    const osg::Matrix& proj = view ? view->projection : camera->getProjectionMatrix();
+    const auto* vp = camera->getViewport() ? camera->getViewport() : cv->getViewport();
+    if (!view && !vp)
+        return 0.0;
+    const double height = view ? view->viewport.y() : vp->height();
     if (ProjectionMatrix::isPerspective(proj))
     {
-        double height = cv->getCurrentCamera()->getViewport()->height();
+        double distance = osg::maximum(getDistanceToTile(cv), 0.0000001);
         return (_geometricError * height) / (distance * _tileset->getSSEDenominator());
     }
-    else // orthographic
-    {
-        const osg::Viewport* vp = cv->getCurrentCamera()->getViewport();
-        double L, R, B, T, N, F;
-        ProjectionMatrix::getOrtho(proj, L, R, B, T, N, F);
-        double pixelSize = std::max(T-B, R-L) / std::max(vp->width(), vp->height());
-        return _geometricError / pixelSize;
-    }
+
+    double L, R, B, T, N, F;
+    if (!ProjectionMatrix::getOrtho(proj, L, R, B, T, N, F))
+        return 0.0;
+    const double width = view ? view->viewport.x() : vp->width();
+    return _geometricError * std::max(width, height) / std::max(T-B, R-L);
 }
 
 bool ThreeDTileNode::unloadContent()
@@ -1661,21 +1710,21 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
 
 ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& authorizationHeader,
     SceneGraphCallbacks* sceneGraphCallbacks, osgDB::Options* options, const ContentProcessor& processContent,
-    const std::string& refinementSuffix) :
+    const std::string& refinementSuffix, bool shadowLODFromPrimaryView) :
     _releaser(Registry::instance()->getObjectReleaser()->createClient("3D Tiles")),
     _processContent(processContent),
     _tileset(tileset),
     _options(options),
     _maximumScreenSpaceError(15.0f),
     _refinementSuffix(refinementSuffix),
+    _shadowLODFromPrimaryView(shadowLODFromPrimaryView),
     _maxTiles(50),
     _maxAge(5.0f),
     _maxSimultaneousLoads(0u),
     _loadsInFlight(std::make_shared<std::atomic_uint>(0u)),
     _lastExpiredFrame(0),
     _authorizationHeader(authorizationHeader),
-    _sgCallbacks(sceneGraphCallbacks),
-	_sseDenominator(1.0)
+    _sgCallbacks(sceneGraphCallbacks)
 {
     ADJUST_UPDATE_TRAV_COUNT(this, +1);
     const char* c = ::getenv("OSGEARTH_3DTILES_CACHE_SIZE");
@@ -1879,7 +1928,9 @@ void ThreeDTilesetNode::setShowBoundingVolumes(bool showBoundingVolumes)
 
 double ThreeDTilesetNode::getSSEDenominator() const
 {
-	return _sseDenominator;
+    if (s_cullContext && s_cullContext->tileset == this)
+        return s_cullContext->sseDenominator;
+    return _sseDenominator.load(std::memory_order_relaxed);
 }
 
 SceneGraphCallbacks* ThreeDTilesetNode::getSceneGraphCallbacks(SceneGraphCallbacks* callbacks)
@@ -2006,6 +2057,8 @@ void ThreeDTilesetNode::traverse(osg::NodeVisitor& nv)
             _lastExpiredFrame = nv.getFrameStamp()->getFrameNumber();
         }
     }
+        const auto* camera = cv->getCurrentCamera();
+		const osg::Matrix& proj = camera->getProjectionMatrix();
 	else if (nv.getVisitorType() == nv.CULL_VISITOR)
 	{
 		osgUtil::CullVisitor* cv = static_cast<osgUtil::CullVisitor*>(&nv);
@@ -2016,7 +2069,17 @@ void ThreeDTilesetNode::traverse(osg::NodeVisitor& nv)
 
         CullContext context;
         context.tileset = this;
-        context.inverseView = cv->getCurrentCamera()->getInverseViewMatrix();
+        context.inverseView = camera->getInverseViewMatrix();
+        if (_shadowLODFromPrimaryView)
+            context.primaryLOD = getPrimaryLODView(camera, cv->getLODScale());
+
+        const osg::Matrix& proj = context.primaryLOD ? context.primaryLOD->projection : camera->getProjectionMatrix();
+        double fovy, ar, zn, zf;
+        if (ProjectionMatrix::getPerspective(proj, fovy, ar, zn, zf))
+        {
+            context.sseDenominator = 2.0 * tan(0.5 * deg2rad(fovy));
+            _sseDenominator.store(context.sseDenominator, std::memory_order_relaxed);
+        }
 
         // Horizon culling only applies to a tileset on a geocentric map.
         osg::ref_ptr<MapNode> mapNode;

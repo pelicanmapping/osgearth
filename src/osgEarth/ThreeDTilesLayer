@@ -26,6 +26,8 @@ namespace osgEarth { namespace Contrib
             META_LayerOptions(osgEarth, Options, VisibleLayer::Options);
             OE_OPTION(URI, url);
             OE_OPTION(float, maximumScreenSpaceError);
+            //! Select shadow caster detail from the primary view when the shadow camera supplies it.
+            OE_OPTION(bool, shadowLODFromPrimaryView, false);
             //! Case-sensitive content filename suffix selecting parents for the refinement scale.
             OE_OPTION(std::string, refinementSuffix);
             //! Multiplier on max_sse for matching parents; 1 uses the base SSE.

@@ -2061,15 +2061,10 @@ void ThreeDTilesetNode::traverse(osg::NodeVisitor& nv)
             _lastExpiredFrame = nv.getFrameStamp()->getFrameNumber();
         }
     }
-        const auto* camera = cv->getCurrentCamera();
-		const osg::Matrix& proj = camera->getProjectionMatrix();
 	else if (nv.getVisitorType() == nv.CULL_VISITOR)
 	{
 		osgUtil::CullVisitor* cv = static_cast<osgUtil::CullVisitor*>(&nv);
-		const osg::Matrix& proj = cv->getCurrentCamera()->getProjectionMatrix();
-        double fovy, ar, zn, zf;
-        if (ProjectionMatrix::getPerspective(proj, fovy, ar, zn, zf))
-            _sseDenominator = 2.0 * tan(0.5 * deg2rad(fovy));
+        const auto* camera = cv->getCurrentCamera();
 
         CullContext context;
         context.tileset = this;

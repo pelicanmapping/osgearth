@@ -66,12 +66,9 @@ namespace
         float lodScale;
     };
 
-    // Read the same primary view used by the shadow shaders. Standalone shadow cameras can omit it.
+    // Read the primary view supplied by a marked shadow camera. Standalone shadow cameras can omit it.
     std::optional<PrimaryLODView> getPrimaryLODView(const osg::Camera* camera, float lodScale)
     {
-        if (!CameraUtils::isShadowCamera(camera))
-            return std::nullopt;
-
         const auto* state = camera->getStateSet();
         const auto* transform = state->getUniform("oe_shadowToPrimaryMatrix");
         const auto* projection = state->getUniform("oe_primaryProjectionMatrix");
@@ -96,6 +93,8 @@ namespace
 
         // Eye-to-world matrix of the camera being culled.
         osg::Matrixd inverseView;
+
+        bool shadowPass = false;
 
         // Only the SSE calculation uses the receiver view. Bounds and horizon tests use the caster view.
         std::optional<PrimaryLODView> primaryLOD;
@@ -811,11 +810,14 @@ ThreeDTileNode::ThreeDTileNode(ThreeDTilesetNode* tileset, Tile* tile, bool imme
     OE_PROFILING_ZONE;
     _hasContent = _tile->content().isSet() && _tile->content()->uri().isSet();
     _geometricError = *_tile->geometricError();
-    if (_hasContent && !_tile->children().empty() && !_tileset->_refinementSuffix.empty())
+    const auto& scaleSuffix = _tileset->_refinementSuffix;
+    const auto& shadowStop = _tileset->_shadowLODStopToken;
+    if (_hasContent && !_tile->children().empty() && (!scaleSuffix.empty() || !shadowStop.empty()))
     {
         const auto& uri = _tile->content()->uri()->base();
         const auto filename = osgDB::getSimpleFileName(uri.substr(0, uri.find_first_of("?#")));
-        _scaleRefinement = Strings::endsWith(filename, _tileset->_refinementSuffix);
+        _scaleRefinement = !scaleSuffix.empty() && Strings::endsWith(filename, scaleSuffix);
+        _stopShadowRefinement = !shadowStop.empty() && filename.find(shadowStop) != std::string::npos;
     }
     if (_tile->content().isSet())
     {
@@ -1587,7 +1589,8 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
         const bool childrenCovering = covering || (!empty && _refine != REFINE_ADD);
         bool refine = false;
 
-        if (_children.valid() && _children->getNumChildren() > 0 && (covering || error > requestChildrenSSE))
+        const bool stopHere = _stopShadowRefinement && context && context->shadowPass;
+        if (!stopHere && _children.valid() && _children->getNumChildren() > 0 && (covering || error > requestChildrenSSE))
         {
             ScopedCovering scope(context, childrenCovering);
             bool areChildrenReady = true;
@@ -1710,7 +1713,7 @@ void ThreeDTileNode::traverse(osg::NodeVisitor& nv)
 
 ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& authorizationHeader,
     SceneGraphCallbacks* sceneGraphCallbacks, osgDB::Options* options, const ContentProcessor& processContent,
-    const std::string& refinementSuffix, bool shadowLODFromPrimaryView) :
+    const std::string& refinementSuffix, bool shadowLODFromPrimaryView, const std::string& shadowLODStopToken) :
     _releaser(Registry::instance()->getObjectReleaser()->createClient("3D Tiles")),
     _processContent(processContent),
     _tileset(tileset),
@@ -1718,6 +1721,7 @@ ThreeDTilesetNode::ThreeDTilesetNode(Tileset* tileset, const std::string& author
     _maximumScreenSpaceError(15.0f),
     _refinementSuffix(refinementSuffix),
     _shadowLODFromPrimaryView(shadowLODFromPrimaryView),
+    _shadowLODStopToken(shadowLODStopToken),
     _maxTiles(50),
     _maxAge(5.0f),
     _maxSimultaneousLoads(0u),
@@ -2070,7 +2074,9 @@ void ThreeDTilesetNode::traverse(osg::NodeVisitor& nv)
         CullContext context;
         context.tileset = this;
         context.inverseView = camera->getInverseViewMatrix();
-        if (_shadowLODFromPrimaryView)
+        context.shadowPass = (_shadowLODFromPrimaryView || !_shadowLODStopToken.empty()) &&
+            CameraUtils::isShadowCamera(camera);
+        if (context.shadowPass && _shadowLODFromPrimaryView)
             context.primaryLOD = getPrimaryLODView(camera, cv->getLODScale());
 
         const osg::Matrix& proj = context.primaryLOD ? context.primaryLOD->projection : camera->getProjectionMatrix();

@@ -347,6 +347,7 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         // tile every frame and each is several pointer hops into the parsed tile record.
         bool _hasContent = false;
         bool _scaleRefinement = false;
+        bool _stopShadowRefinement = false;
         double _geometricError = 0.0;
 
         // The content when it's an external tileset (owned by _content), so the cull needn't dynamic_cast it.
@@ -380,7 +381,7 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         ThreeDTilesetNode(Tileset* tileset, const std::string& authorizationHeader,
             SceneGraphCallbacks* sceneGraphCallbacks, osgDB::Options* options,
             const ContentProcessor& processContent = ContentProcessor(), const std::string& refinementSuffix = {},
-            bool shadowLODFromPrimaryView = false);
+            bool shadowLODFromPrimaryView = false, const std::string& shadowLODStopToken = {});
 
         float getMaximumScreenSpaceError() const;
         void setMaximumScreenSpaceError(float maximumScreenSpaceError);
@@ -474,6 +475,7 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         std::atomic<float> _maximumScreenSpaceError;
         const std::string _refinementSuffix;
         const bool _shadowLODFromPrimaryView;
+        const std::string _shadowLODStopToken;
         std::atomic<float> _refinementScale{ 1.0f };
 
         mutable std::mutex _mutex;

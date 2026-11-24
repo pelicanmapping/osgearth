@@ -56,6 +56,7 @@ ThreeDTilesLayer::Options::getConfig() const
     conf.set("url", _url);
     conf.set("max_sse", _maximumScreenSpaceError);
     conf.set("shadow_lod_from_primary_view", shadowLODFromPrimaryView());
+    conf.set("shadow_lod_stop_token", shadowLODStopToken());
     conf.set("refinement_suffix", refinementSuffix());
     conf.set("refinement_scale", refinementScale());
     conf.set("ignore_unlit", ignoreUnlit());
@@ -71,6 +72,7 @@ ThreeDTilesLayer::Options::fromConfig( const Config& conf )
     conf.get("url", _url);
     conf.get("max_sse", _maximumScreenSpaceError);
     conf.get("shadow_lod_from_primary_view", shadowLODFromPrimaryView());
+    conf.get("shadow_lod_stop_token", shadowLODStopToken());
     conf.get("refinement_suffix", refinementSuffix());
     conf.get("refinement_scale", refinementScale());
     if (!std::isfinite(*refinementScale()) || *refinementScale() <= 0.0f)
@@ -152,7 +154,8 @@ ThreeDTilesLayer::openTileset(const URI& url, const std::string& authorizationHe
     }
 
     _tilesetNode = new ThreeDTilesetNode(tileset, authorizationHeader, getSceneGraphCallbacks(),
-        readOptions.get(), processContent, *options().refinementSuffix(), *options().shadowLODFromPrimaryView());
+        readOptions.get(), processContent, *options().refinementSuffix(), *options().shadowLODFromPrimaryView(),
+        *options().shadowLODStopToken());
     _tilesetNode->setRefinementScale(*options().refinementScale());
     if (textures.valid())
     {

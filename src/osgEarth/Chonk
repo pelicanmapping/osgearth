@@ -302,11 +302,15 @@ namespace osgEarth
         //! Use the drawable overload to preserve InstanceGeometry placements.
         //! Returns false if the node contained no geometry, the material arena
         //! is full, or this Chonk already uses a different arena.
+        //! optimizeVertexOrder first reorders each source geometry's triangles and vertices
+        //! for the GPU's caches. That pass rewrites the source arrays and takes seconds per
+        //! million triangles; a caller that reorders the result itself turns it off.
         bool load(
             osg::Node* node,
             Chonk* chonk, 
             float far_pixel_scale,
-            float near_pixel_scale);
+            float near_pixel_scale,
+            bool optimizeVertexOrder = true);
 
         //! Pack ordinary geometry into pages with one culling bound per geometry,
         //! retaining explicit InstanceGeometry placements. Common render state

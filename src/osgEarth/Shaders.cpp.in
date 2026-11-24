@@ -32,6 +32,13 @@ namespace osgEarth { namespace Util
 
         ChonkHiZ = "Chonk.HiZ.glsl";
         _sources[ChonkHiZ] = @Chonk.HiZ.glsl@;
+        _sources["DepthPyramid.glsl"] = @DepthPyramid.glsl@;
+
+        // Cluster LOD meshes
+        ClusterMesh = "ClusterMesh.glsl";
+        _sources[ClusterMesh] = @ClusterMesh.glsl@;
+        ClusterMeshCull = "ClusterMesh.Cull.glsl";
+        _sources[ClusterMeshCull] = @ClusterMesh.Cull.glsl@;
 
         // Decaling headers
         Decals_Headers = "Decals.h.glsl";

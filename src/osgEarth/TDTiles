@@ -381,7 +381,7 @@ namespace osgEarth { namespace Contrib { namespace ThreeDTiles
         ThreeDTilesetNode(Tileset* tileset, const std::string& authorizationHeader,
             SceneGraphCallbacks* sceneGraphCallbacks, osgDB::Options* options,
             const ContentProcessor& processContent = ContentProcessor(), const std::string& refinementSuffix = {},
-            bool shadowLODFromPrimaryView = false, const std::string& shadowLODStopToken = {});
+            bool shadowLODFromPrimaryView = true, const std::string& shadowLODStopToken = {});
 
         float getMaximumScreenSpaceError() const;
         void setMaximumScreenSpaceError(float maximumScreenSpaceError);

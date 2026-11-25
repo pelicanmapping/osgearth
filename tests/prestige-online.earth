@@ -485,5 +485,25 @@
       <height>31.28900847584009</height>
       <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
     </viewpoint>
+
+    <viewpoint name="Canadian Forest">
+      <heading>-155.015</heading>
+      <pitch>-8.02154</pitch>
+      <range>1471.77m</range>
+      <long>-117.8414628806407</long>
+      <lat>49.06729385740385</lat>
+      <height>907.8984432583675</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
+
+    <viewpoint name="Canadaian Forest 2"
+      <heading>-179.7</heading>
+      <pitch>-20.0357</pitch>
+      <range>4508.37m</range>
+      <long>-117.8386195055452</long>
+      <lat>49.06367247777782</lat>
+      <height>1092.525806273334</height>
+      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+    </viewpoint>
   </viewpoints>
 </map>

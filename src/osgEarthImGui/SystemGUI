@@ -73,19 +73,19 @@ namespace osgEarth
             int count = 0;
             int next = 0;
 
-            //! Append OSG's recent average in milliseconds, or show N/A until samples are available.
+            //! Draw the timing row only when OSG has a recent average for this attribute.
             void draw(const osg::Stats* stats)
             {
                 double seconds = 0.0;
-                char overlay[32] = "N/A";
-                if (stats && stats->getAveragedAttribute(attribute, seconds))
-                {
-                    const double ms = seconds * 1000.0;
-                    snprintf(overlay, sizeof(overlay), "%.1f ms", ms);
-                    samples[next] = static_cast<float>(ms);
-                    next = (next + 1) % frame_count;
-                    count = std::min(count + 1, frame_count);
-                }
+                if (!stats || !stats->getAveragedAttribute(attribute, seconds))
+                    return;
+
+                const double ms = seconds * 1000.0;
+                char overlay[32];
+                snprintf(overlay, sizeof(overlay), "%.1f ms", ms);
+                samples[next] = static_cast<float>(ms);
+                next = (next + 1) % frame_count;
+                count = std::min(count + 1, frame_count);
                 ImGui::PushStyleColor(ImGuiCol_PlotLines, color);
                 ImGuiLTable::PlotShaded(label, [](void* data, int index) { return static_cast<float*>(data)[index]; },
                     samples.data(), count, count == frame_count ? next : 0, overlay, 0.0f, 16.0f);
@@ -102,15 +102,51 @@ namespace osgEarth
             { "GPU", "GPU draw time taken", IM_COL32(255, 128, 0, 255) }
         };
         std::atomic_bool _timingsRequested{false};
-        bool _enabledEventStats = false;
-        bool _enabledUpdateStats = false;
-        bool _enabledRenderingStats = false;
-        bool _enabledGPUStats = false;
-
-        //! Check the native HUD when releasing shared stats groups between frames.
-        static bool nativeTimingHudActive(const osgViewer::Viewer& viewer)
+        struct TimingGroups
         {
-            for (const auto& handler : viewer.getEventHandlers())
+            struct Group
+            {
+                const char* name;
+                bool enabledByPanel = false;
+            };
+            Group groups[2];
+            osg::ref_ptr<osg::Stats> stats;
+
+            //! Check between frames whether the target changed or another consumer disabled collection.
+            bool needsSync(osg::Stats* target) const
+            {
+                return stats.get() != target || (target &&
+                    (!target->collectStats(groups[0].name) || !target->collectStats(groups[1].name)));
+            }
+
+            //! With graphics threads stopped, release our flags on the old source and enable missing groups on the new one.
+            void sync(osg::Stats* target, bool hudActive)
+            {
+                for (auto& group : groups)
+                {
+                    if (stats.get() != target)
+                    {
+                        if (group.enabledByPanel && !hudActive)
+                            stats->collectStats(group.name, false);
+                        group.enabledByPanel = false;
+                    }
+                    if (target && !target->collectStats(group.name))
+                    {
+                        target->collectStats(group.name, true);
+                        group.enabledByPanel = true;
+                    }
+                }
+                stats = target;
+            }
+        };
+        TimingGroups _viewerTimingGroups{ { { "event" }, { "update" } } };
+        TimingGroups _cameraTimingGroups{ { { "rendering" }, { "gpu" } } };
+        bool _usingSyncedStats = false;
+
+        //! Check one view's native HUD before releasing timing groups that the HUD may also need.
+        static bool nativeTimingHudActive(const osgViewer::View& view)
+        {
+            for (const auto& handler : view.getEventHandlers())
             {
                 const auto* hud = dynamic_cast<const osgViewer::StatsHandler*>(handler.get());
                 const auto* camera = hud ? hud->getCamera() : nullptr;
@@ -290,41 +326,54 @@ namespace osgEarth
 #endif
         }
 
-        //! Called by the viewer between frames. Collect timings only while the plots are being drawn.
-        void syncTimingCollection(osgViewer::Viewer& viewer)
+        //! Call once between frames on the viewer thread, including while hidden. The camera selects
+        //! the Cull, Draw and GPU source. Event and Update come from the owning viewer.
+        void syncTimingCollection(osgViewer::ViewerBase& viewer, osg::Camera& camera)
         {
             const bool requested = _timingsRequested.exchange(false, std::memory_order_relaxed);
-            if (!requested && !_enabledEventStats && !_enabledUpdateStats && !_enabledRenderingStats && !_enabledGPUStats)
+            if (!requested && !_usingSyncedStats)
                 return;
 
-            auto* viewerStats = viewer.getViewerStats();
-            auto* stats = viewer.getCamera()->getStats();
-            const bool hudActive = !requested && nativeTimingHudActive(viewer);
-            const bool event = viewerStats && viewerStats->collectStats("event");
-            const bool update = viewerStats && viewerStats->collectStats("update");
-            const bool rendering = stats && stats->collectStats("rendering");
-            const bool gpu = stats && stats->collectStats("gpu");
-            const bool changeEvent = viewerStats && (requested ? !event : (_enabledEventStats && !hudActive && event));
-            const bool changeUpdate = viewerStats && (requested ? !update : (_enabledUpdateStats && !hudActive && update));
-            const bool changeRendering = stats &&
-                (requested ? !rendering : (_enabledRenderingStats && !hudActive && rendering));
-            const bool changeGPU = stats && (requested ? !gpu : (_enabledGPUStats && !hudActive && gpu));
+            auto* viewerStats = requested ? viewer.getViewerStats() : nullptr;
+            auto* cameraStats = requested ? camera.getStats() : nullptr;
+            if (requested == _usingSyncedStats &&
+                !_viewerTimingGroups.needsSync(viewerStats) && !_cameraTimingGroups.needsSync(cameraStats))
+                return;
 
-            if (changeEvent || changeUpdate || changeRendering || changeGPU)
+            bool hudActive = false;
+            if ((_viewerTimingGroups.stats && _viewerTimingGroups.stats.get() != viewerStats) ||
+                (_cameraTimingGroups.stats && _cameraTimingGroups.stats.get() != cameraStats))
             {
-                // OSG's collection flag setters are unsynchronized.
-                const bool threaded = viewer.areThreadsRunning();
-                if (threaded) viewer.stopThreading();
-                if (changeEvent) viewerStats->collectStats("event", requested);
-                if (changeUpdate) viewerStats->collectStats("update", requested);
-                if (changeRendering) stats->collectStats("rendering", requested);
-                if (changeGPU) stats->collectStats("gpu", requested);
-                if (threaded) viewer.startThreading();
+                osgViewer::ViewerBase::Views views;
+                viewer.getViews(views, false);
+                for (const auto* view : views)
+                {
+                    if (view && nativeTimingHudActive(*view))
+                    {
+                        hudActive = true;
+                        break;
+                    }
+                }
             }
-            _enabledEventStats = requested && (_enabledEventStats || changeEvent);
-            _enabledUpdateStats = requested && (_enabledUpdateStats || changeUpdate);
-            _enabledRenderingStats = requested && (_enabledRenderingStats || changeRendering);
-            _enabledGPUStats = requested && (_enabledGPUStats || changeGPU);
+
+            // Both the OSG collection flags and the draw thread's stats bindings change here.
+            const bool threaded = viewer.areThreadsRunning();
+            if (threaded) viewer.stopThreading();
+            if (_cameraTimingGroups.stats && cameraStats && _cameraTimingGroups.stats.get() != cameraStats)
+            {
+                for (auto& plot : _cameraPlots)
+                    plot.count = plot.next = 0;
+            }
+            _viewerTimingGroups.sync(viewerStats, hudActive);
+            _cameraTimingGroups.sync(cameraStats, hudActive);
+            _usingSyncedStats = requested;
+            if (threaded) viewer.startThreading();
+        }
+
+        //! Use the main camera for callers with a single-view Viewer.
+        void syncTimingCollection(osgViewer::Viewer& viewer)
+        {
+            syncTimingCollection(viewer, *viewer.getCamera());
         }
 
         void load(const Config& conf) override
@@ -379,10 +428,12 @@ namespace osgEarth
                     _timingsRequested.store(true, std::memory_order_relaxed);
                     auto* currentView = view(ri);
                     auto* viewer = currentView->getViewerBase();
-                    const auto* viewerStats = viewer ? viewer->getViewerStats() : nullptr;
+                    const auto* viewerStats = _usingSyncedStats ? _viewerTimingGroups.stats.get() :
+                        (viewer ? viewer->getViewerStats() : nullptr);
                     for (auto& plot : _viewerPlots)
                         plot.draw(viewerStats);
-                    const auto* stats = currentView->getCamera()->getStats();
+                    const auto* stats = _usingSyncedStats ? _cameraTimingGroups.stats.get() :
+                        currentView->getCamera()->getStats();
                     for (auto& plot : _cameraPlots)
                         plot.draw(stats);
 

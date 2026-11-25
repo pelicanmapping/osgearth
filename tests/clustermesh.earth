@@ -7,10 +7,10 @@ dense alpha-tested plant; the GPU picks the detail of each cluster each frame.
 
 Run with the bindless OpenGL 4.6 path:
 
-    osgearth_imgui clustermesh.earth --nvgl
+    osgearth_imgui clustermesh.earth - -nvgl
 
 Open Prestige > Cluster Meshes for the controls and the GPU counters. Add
---shadows for cast shadows.
+- -shadows for cast shadows.
 
 The models are not in the repository. ../data/megascans/README.md says how to
 download and prepare them. Loading them takes about 10 seconds. A model without
@@ -47,13 +47,13 @@ triangles.
              tile size and the range, so small dense models exist only near the camera. -->
         <models>
             <model url="../data/megascans/mossy_forest_boulder/mossy_forest_boulder_4k.glb"
-                   density="12" min_scale="0.5" max_scale="1.6" sink="0.2" tilt="12" clumping="0.7" patch_size="90"/>
+                   density="12" min_scale="1.0" max_scale="1.6" sink="0.2" tilt="12" clumping="0.7" patch_size="90"/>
             <model url="../data/megascans/icelandic_rock_formation/icelandic_rock_formation_4k.glb"
-                   density="16" min_scale="0.6" max_scale="2.0" sink="0.15" tilt="10" clumping="0.7" patch_size="70"/>
+                   density="16" min_scale="1.0" max_scale="2.0" sink="0.15" tilt="10" clumping="0.7" patch_size="70"/>
             <model url="../data/megascans/canyon_sandstone_boulder/canyon_sandstone_boulder_4k.glb"
-                   density="60" min_scale="0.3" max_scale="1.2" sink="0.2" tilt="25" clumping="0.6" patch_size="50"/>
+                   density="60" min_scale="1.0" max_scale="1.2" sink="0.2" tilt="25" clumping="0.6" patch_size="50"/>
             <model url="../data/megascans/massive_nordic_coastal_cliff/massive_nordic_coastal_cliff_4k.glb"
-                   density="0.05" min_scale="0.3" max_scale="0.6" sink="0.25" tilt="0" clumping="0" patch_size="400"/>
+                   density="0.05" min_scale="1.0" max_scale="1.6" sink="0.25" tilt="0" clumping="0" patch_size="400"/>
             <model url="../data/megascans/lady_fern/standard/lady_fern_2k.gltf" level_offset="2"
                    density="2500" min_scale="0.6" max_scale="1.4" sink="0.03" tilt="5" clumping="0.6" patch_size="35"/>
             <model url="../data/megascans/tundra_grass/standard/tundra_grass_2k.gltf" level_offset="2"

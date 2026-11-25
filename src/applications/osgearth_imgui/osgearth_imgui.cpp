@@ -334,7 +334,7 @@ main(int argc, char** argv)
         viewer.realize();
         while (!viewer.done())
         {
-            systemPanel->syncTimingCollection(viewer);
+            systemPanel->syncTimingCollection(viewer, *viewer.getCamera());
             viewer.frame();
             if (reload->reload(viewer))
                 installSelectTool(viewer, ui, MapNode::get(viewer.getSceneData()), selectTool);

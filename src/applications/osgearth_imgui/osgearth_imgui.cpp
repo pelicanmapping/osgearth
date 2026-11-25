@@ -269,7 +269,8 @@ main(int argc, char** argv)
         ui->add("Tools", new SearchGUI());
 #endif
         ui->add("Tools", new ShaderGUI(&arguments));
-        ui->add("Tools", new SystemGUI());
+        auto* systemPanel = new SystemGUI();
+        ui->add("Tools", systemPanel);
         ui->add("Tools", new TerrainGUI());
         ui->add("Tools", new TextureInspectorGUI());
         ui->add("Tools", new ViewpointsGUI());
@@ -333,6 +334,7 @@ main(int argc, char** argv)
         viewer.realize();
         while (!viewer.done())
         {
+            systemPanel->syncTimingCollection(viewer);
             viewer.frame();
             if (reload->reload(viewer))
                 installSelectTool(viewer, ui, MapNode::get(viewer.getSceneData()), selectTool);

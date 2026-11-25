@@ -22,6 +22,8 @@
 #include <osg/RenderInfo>
 #include <osg/ShapeDrawable>
 #include <osgViewer/View>
+#include <algorithm>
+#include <cmath>
 #include <memory>
 
 namespace osgEarth
@@ -378,6 +380,112 @@ namespace ImGuiLTable
         ImGui::PlotLines("", getter, data, values_count, values_offset, overlay, scale_min, scale_max);
     }
 
+    //! Draw a line with translucent fill to zero in a two-column table. Read the caller's circular buffer
+    //! through getter(data, index) during this call only. FLT_MAX requests an automatic axis bound.
+    static void PlotShaded(const char* label, float(*getter)(void*, int), void* data, int values_count,
+        int values_offset, const char* overlay = nullptr, float scale_min = FLT_MAX, float scale_max = FLT_MAX)
+    {
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(label);
+        if (!ImGui::TableNextColumn())
+            return;
+
+        const auto& style = ImGui::GetStyle();
+        ImGui::Dummy(ImVec2(std::max(1.0f, ImGui::GetContentRegionAvail().x), ImGui::GetFrameHeight()));
+        if (!ImGui::IsItemVisible())
+            return;
+
+        auto* draw = ImGui::GetWindowDrawList();
+        const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+        draw->AddRectFilled(min, max, ImGui::GetColorU32(ImGuiCol_FrameBg), style.FrameRounding);
+        if (style.FrameBorderSize > 0.0f)
+            draw->AddRect(min, max, ImGui::GetColorU32(ImGuiCol_Border), style.FrameRounding, 0, style.FrameBorderSize);
+
+        const ImVec2 lo(min.x + style.FramePadding.x, min.y + style.FramePadding.y);
+        const ImVec2 hi(max.x - style.FramePadding.x, max.y - style.FramePadding.y);
+        const float width = hi.x - lo.x;
+        if (getter && values_count > 0 && width >= 1.0f && hi.y > lo.y)
+        {
+            if (scale_min == FLT_MAX || scale_max == FLT_MAX)
+            {
+                float lowest = 0.0f, highest = 0.0f;
+                for (int i = 0; i < values_count; ++i)
+                {
+                    const float value = getter(data, i);
+                    if (std::isfinite(value))
+                    {
+                        lowest = std::min(lowest, value);
+                        highest = std::max(highest, value);
+                    }
+                }
+                if (scale_min == FLT_MAX) scale_min = lowest;
+                if (scale_max == FLT_MAX) scale_max = highest;
+            }
+
+            int offset = values_offset % values_count;
+            if (offset < 0) offset += values_count;
+            // Map a chronological index to storage without overflowing when the buffer wraps.
+            const auto sample = [&](int i) {
+                const int untilWrap = values_count - offset;
+                return getter(data, i < untilWrap ? offset + i : i - untilWrap);
+            };
+            const double range = static_cast<double>(scale_max) - scale_min;
+            const auto screenY = [&](double value) {
+                const double t = range > 0.0 ? std::clamp((value - scale_min) / range, 0.0, 1.0) : 0.0;
+                return hi.y - static_cast<float>(t) * (hi.y - lo.y);
+            };
+            const float zero = screenY(0.0);
+            const ImU32 fill = ImGui::GetColorU32(ImGuiCol_PlotLines, 0.4f);
+            const ImU32 line = ImGui::GetColorU32(ImGuiCol_PlotLines);
+            const int segments = std::min(values_count - 1, static_cast<int>(width));
+            const auto flags = draw->Flags;
+            // Adjacent filled segments share a vertical edge. Feathering it would leave visible seams.
+            draw->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+            float previousValue = sample(0);
+            ImVec2 previous(lo.x, screenY(previousValue));
+            for (int i = 1; i <= segments; ++i)
+            {
+                const double t = static_cast<double>(i) / segments;
+                const float value = sample(static_cast<int>(std::round(t * (values_count - 1))));
+                const ImVec2 point(lo.x + static_cast<float>(t) * width, screenY(value));
+                if (std::isfinite(previousValue) && std::isfinite(value))
+                {
+                    const ImVec2 left(previous.x, zero), right(point.x, zero);
+                    if ((previous.y < zero && point.y > zero) || (previous.y > zero && point.y < zero))
+                    {
+                        // Split at the crossing so the fill never folds over itself.
+                        const float fraction = (zero - previous.y) / (point.y - previous.y);
+                        const ImVec2 cross(left.x + fraction * (right.x - left.x), zero);
+                        draw->AddTriangleFilled(previous, cross, left, fill);
+                        draw->AddTriangleFilled(cross, point, right, fill);
+                    }
+                    else
+                        draw->AddQuadFilled(previous, point, right, left, fill);
+                    draw->AddLine(previous, point, line);
+                }
+                previous = point;
+                previousValue = value;
+            }
+            draw->Flags = flags;
+
+            if (ImGui::IsItemHovered() && ImGui::IsMouseHoveringRect(lo, hi))
+            {
+                const double t = std::clamp((ImGui::GetMousePos().x - lo.x) / width, 0.0f, 1.0f);
+                const int i = static_cast<int>(std::round(t * (values_count - 1)));
+                ImGui::SetTooltip("%d: %8.4g", i, sample(i));
+            }
+        }
+
+        if (overlay)
+        {
+            const float x = std::max(min.x, (min.x + max.x - ImGui::CalcTextSize(overlay).x) * 0.5f);
+            draw->PushClipRect(min, max, true);
+            draw->AddText(ImVec2(x, lo.y), ImGui::GetColorU32(ImGuiCol_Text), overlay);
+            draw->PopClipRect();
+        }
+    }
+
+    //! Close the two-column table opened by Begin.
     static void End()
     {
         ImGui::EndTable();

@@ -12,7 +12,13 @@
 #include <osgEarth/Registry>
 #include <osgEarth/Capabilities>
 #include <osgEarth/FeatureNode>
+#include <osg/Stats>
+#include <osg/Switch>
+#include <osgViewer/ViewerEventHandlers>
+#include <osgViewer/Viewer>
 #include <osgUtil/IncrementalCompileOperation>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <list>
 #include <vector>
@@ -58,6 +64,68 @@ namespace osgEarth
     class SystemGUI : public ImGuiPanel
     {
     private:
+        struct TimingPlot
+        {
+            const char* label;
+            std::string attribute;
+            ImU32 color;
+            std::array<float, frame_count> samples{};
+            int count = 0;
+            int next = 0;
+
+            //! Append OSG's recent average in milliseconds, or show N/A until samples are available.
+            void draw(const osg::Stats* stats)
+            {
+                double seconds = 0.0;
+                char overlay[32] = "N/A";
+                if (stats && stats->getAveragedAttribute(attribute, seconds))
+                {
+                    const double ms = seconds * 1000.0;
+                    snprintf(overlay, sizeof(overlay), "%.1f ms", ms);
+                    samples[next] = static_cast<float>(ms);
+                    next = (next + 1) % frame_count;
+                    count = std::min(count + 1, frame_count);
+                }
+                ImGui::PushStyleColor(ImGuiCol_PlotLines, color);
+                ImGuiLTable::PlotShaded(label, [](void* data, int index) { return static_cast<float*>(data)[index]; },
+                    samples.data(), count, count == frame_count ? next : 0, overlay, 0.0f, 16.0f);
+                ImGui::PopStyleColor();
+            }
+        };
+        TimingPlot _viewerPlots[2] = {
+            { "Event", "Event traversal time taken", IM_COL32(0, 255, 0, 255) },
+            { "Update", "Update traversal time taken", IM_COL32(255, 0, 255, 255) }
+        };
+        TimingPlot _cameraPlots[3] = {
+            { "Cull", "Cull traversal time taken", IM_COL32(0, 255, 255, 255) },
+            { "Draw", "Draw traversal time taken", IM_COL32(255, 255, 0, 255) },
+            { "GPU", "GPU draw time taken", IM_COL32(255, 128, 0, 255) }
+        };
+        std::atomic_bool _timingsRequested{false};
+        bool _enabledEventStats = false;
+        bool _enabledUpdateStats = false;
+        bool _enabledRenderingStats = false;
+        bool _enabledGPUStats = false;
+
+        //! Check the native HUD when releasing shared stats groups between frames.
+        static bool nativeTimingHudActive(const osgViewer::Viewer& viewer)
+        {
+            for (const auto& handler : viewer.getEventHandlers())
+            {
+                const auto* hud = dynamic_cast<const osgViewer::StatsHandler*>(handler.get());
+                const auto* camera = hud ? hud->getCamera() : nullptr;
+                if (!camera || !camera->getNodeMask() || camera->getNumChildren() == 0)
+                    continue;
+
+                // OSG's HUD switch has one child per visible StatsType, starting with FRAME_RATE.
+                const auto* pages = camera->getChild(0)->asSwitch();
+                constexpr unsigned timingPage = osgViewer::StatsHandler::VIEWER_STATS - osgViewer::StatsHandler::FRAME_RATE;
+                if (pages && pages->getNumChildren() > timingPage && pages->getValue(timingPage))
+                    return true;
+            }
+            return false;
+        }
+
         std::string _renderMode;
         bool _renderViewNormals;
         bool _renderModelNormals;
@@ -222,6 +290,43 @@ namespace osgEarth
 #endif
         }
 
+        //! Called by the viewer between frames. Collect timings only while the plots are being drawn.
+        void syncTimingCollection(osgViewer::Viewer& viewer)
+        {
+            const bool requested = _timingsRequested.exchange(false, std::memory_order_relaxed);
+            if (!requested && !_enabledEventStats && !_enabledUpdateStats && !_enabledRenderingStats && !_enabledGPUStats)
+                return;
+
+            auto* viewerStats = viewer.getViewerStats();
+            auto* stats = viewer.getCamera()->getStats();
+            const bool hudActive = !requested && nativeTimingHudActive(viewer);
+            const bool event = viewerStats && viewerStats->collectStats("event");
+            const bool update = viewerStats && viewerStats->collectStats("update");
+            const bool rendering = stats && stats->collectStats("rendering");
+            const bool gpu = stats && stats->collectStats("gpu");
+            const bool changeEvent = viewerStats && (requested ? !event : (_enabledEventStats && !hudActive && event));
+            const bool changeUpdate = viewerStats && (requested ? !update : (_enabledUpdateStats && !hudActive && update));
+            const bool changeRendering = stats &&
+                (requested ? !rendering : (_enabledRenderingStats && !hudActive && rendering));
+            const bool changeGPU = stats && (requested ? !gpu : (_enabledGPUStats && !hudActive && gpu));
+
+            if (changeEvent || changeUpdate || changeRendering || changeGPU)
+            {
+                // OSG's collection flag setters are unsynchronized.
+                const bool threaded = viewer.areThreadsRunning();
+                if (threaded) viewer.stopThreading();
+                if (changeEvent) viewerStats->collectStats("event", requested);
+                if (changeUpdate) viewerStats->collectStats("update", requested);
+                if (changeRendering) stats->collectStats("rendering", requested);
+                if (changeGPU) stats->collectStats("gpu", requested);
+                if (threaded) viewer.startThreading();
+            }
+            _enabledEventStats = requested && (_enabledEventStats || changeEvent);
+            _enabledUpdateStats = requested && (_enabledUpdateStats || changeUpdate);
+            _enabledRenderingStats = requested && (_enabledRenderingStats || changeRendering);
+            _enabledGPUStats = requested && (_enabledGPUStats || changeGPU);
+        }
+
         void load(const Config& conf) override
         {
             conf.get("System.fontScale", _fontScale);
@@ -260,6 +365,64 @@ namespace osgEarth
                 ImGui::Text(" Total: %.1lf MB", (double)pb / 1048576.0);
 
                 ImGui::Separator();
+
+                if (ImGuiLTable::Begin("SystemGUIPlots"))
+                {
+                    int f = frame_num++ % frame_count;
+                    auto now = std::chrono::steady_clock::now();
+                    frame_times[f] = now - t_previous;
+                    t_previous = now;
+                    auto avg_timing_ms = 1e-6 * (float)get_average_timing_ns(&frame_times, 120, f);
+                    snprintf( buf, sizeof(buf), "%.1f ms / %d fps", avg_timing_ms, (int)std::ceil(1000.0 / avg_timing_ms));
+                    ImGuiLTable::PlotShaded("Frame", get_timing_ms, &frame_times, frame_count, frame_num, buf, 0.0f, 32.0f);
+
+                    _timingsRequested.store(true, std::memory_order_relaxed);
+                    auto* currentView = view(ri);
+                    auto* viewer = currentView->getViewerBase();
+                    const auto* viewerStats = viewer ? viewer->getViewerStats() : nullptr;
+                    for (auto& plot : _viewerPlots)
+                        plot.draw(viewerStats);
+                    const auto* stats = currentView->getCamera()->getStats();
+                    for (auto& plot : _cameraPlots)
+                        plot.draw(stats);
+
+                    total_jobs[f] = jobs::get_metrics()->total();
+                    snprintf(buf, sizeof(buf), "%d", total_jobs[f]);
+                    ImGuiLTable::PlotShaded("Jobs", get_counts, &total_jobs, frame_count, frame_num, buf, 0u, 100u);
+
+                    auto pager = view(ri)->getDatabasePager();
+                    if (pager) {
+                        auto ico = pager->getIncrementalCompileOperation();
+                        if (ico) {
+                            ico_jobs[f] = ico->getToCompile().size();
+                            snprintf(buf, sizeof(buf), "%d", ico_jobs[f]);
+                            ImGuiLTable::PlotShaded("ICO", get_counts, &ico_jobs, frame_count, frame_num, buf, 0u, 4u);
+                        }
+                    }
+
+                    static unsigned zeroJobFrames = 0;
+                    static unsigned zeroJobFramesThreshold = 3;
+                    static std::chrono::steady_clock::time_point lastZeroJobTime = now;
+                    static long long surgeDuration_ms = 0;
+
+                    if (zeroJobFrames < zeroJobFramesThreshold)
+                        surgeDuration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastZeroJobTime).count();
+                    else
+                        lastZeroJobTime = now;
+
+                    if (total_jobs[f] == 0)
+                        ++zeroJobFrames;
+                    else
+                        zeroJobFrames = 0;
+
+                    ImGuiLTable::Text("Surge:", "%d ms", surgeDuration_ms);
+
+                    ImGuiLTable::Text("Canceled:", "%s", std::to_string(jobs::get_metrics()->total_canceled()).c_str());
+                    ImGuiLTable::End();
+                }
+
+                ImGui::Separator();
+
                 auto flags = ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg;
                 if (ImGui::BeginTable("thread pools", 6, flags))
                 {
@@ -303,51 +466,6 @@ namespace osgEarth
 
                 ImGui::Separator();
 
-                if (ImGuiLTable::Begin("SystemGUIPlots"))
-                {
-                    int f = frame_num++ % frame_count;
-                    auto now = std::chrono::steady_clock::now();
-                    frame_times[f] = now - t_previous;
-                    t_previous = now;
-                    auto avg_timing_ms = 1e-6 * (float)get_average_timing_ns(&frame_times, 120, f);
-                    snprintf( buf, sizeof(buf), "%.2f ms / %d fps", avg_timing_ms, (int)std::ceil(1000.0 / avg_timing_ms));
-                    ImGuiLTable::PlotLines("Frame", get_timing_ms, &frame_times, frame_count, frame_num, buf, 0.0f, 32.0f);
-
-                    total_jobs[f] = jobs::get_metrics()->total();
-                    snprintf(buf, sizeof(buf), "%d", total_jobs[f]);
-                    ImGuiLTable::PlotLines("Jobs", get_counts, &total_jobs, frame_count, frame_num, buf, 0u, 100u);
-
-                    auto pager = view(ri)->getDatabasePager();
-                    if (pager) {
-                        auto ico = pager->getIncrementalCompileOperation();
-                        if (ico) {
-                            ico_jobs[f] = ico->getToCompile().size();
-                            snprintf(buf, sizeof(buf), "%d", ico_jobs[f]);
-                            ImGuiLTable::PlotLines("ICO", get_counts, &ico_jobs, frame_count, frame_num, buf, 0u, 4u);
-                        }
-                    }
-
-                    static unsigned zeroJobFrames = 0;
-                    static unsigned zeroJobFramesThreshold = 3;
-                    static std::chrono::steady_clock::time_point lastZeroJobTime = now;
-                    static long long surgeDuration_ms = 0;
-
-                    if (zeroJobFrames < zeroJobFramesThreshold)
-                        surgeDuration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastZeroJobTime).count();
-                    else
-                        lastZeroJobTime = now;
-
-                    if (total_jobs[f] == 0)
-                        ++zeroJobFrames;
-                    else
-                        zeroJobFrames = 0;
-
-                    ImGuiLTable::Text("Surge:", "%d ms", surgeDuration_ms);
-
-                    ImGuiLTable::Text("Canceled:", "%s", std::to_string(jobs::get_metrics()->total_canceled()).c_str());
-                    ImGuiLTable::End();
-                }
-                ImGui::Separator();
                 if (ImGuiLTable::Begin("caps"))
                 {
                     auto& caps = osgEarth::Registry::capabilities();

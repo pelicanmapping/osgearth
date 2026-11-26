@@ -193,141 +193,106 @@ public:
 
   WriteResult writeImage(const osg::Image &img, std::ostream &fout, const Options *options) const
   {
-    int internalFormat = osg::Image::computeNumComponents(img.getPixelFormat());
+      int internalFormat = osg::Image::computeNumComponents(img.getPixelFormat());
+      bool flipImage = true;
 
-    osg::ref_ptr< osg::Image > flippedImage = new osg::Image(img);
-    flippedImage->flipVertical();
+      WebPConfig config;
+      WebPPicture picture;
+      WebPPreset preset = WEBP_PRESET_PHOTO;
 
-    WebPConfig config;
-    config.quality = 75;
-    config.method = 2;
+      if (img.getPixelFormat() == GL_LUMINANCE) {
+          preset = WEBP_PRESET_DEFAULT;
+      }
 
-    if (options)
-    {
-      std::istringstream iss(options->getOptionString());
-      std::string opt;
-      while (iss >> opt)
-      {
-        if (strcmp(opt.c_str(), "lossless") == 0)
-        {
+      if (!WebPPictureInit(&picture) || !WebPConfigInit(&config)) {
+          return WriteResult::ERROR_IN_WRITING_FILE;
+      }
+
+      if (!WebPConfigPreset(&config, preset, config.quality)) {
+          return WriteResult::ERROR_IN_WRITING_FILE;
+      }
+
+      if (options) {
+          std::istringstream iss(options->getOptionString());
+          std::string opt;
+          while (iss >> opt) {
+              if (strcmp(opt.c_str(), "WEBP_NO_FLIP") == 0) {
+                  flipImage = false;
+              }
+              if (strcmp(opt.c_str(), "WEBP_LOSSLESS") == 0) {
+                  config.lossless = 1;
+                  config.quality = 100;
+              }
+              else if (strcmp(opt.c_str(), "WEBP_HINT") == 0) {
+                  std::string v;
+                  iss >> v;
+                  if (strcmp(v.c_str(), "WEBP_HINT_PICTURE") == 0) {
+                      config.image_hint = WEBP_HINT_PICTURE;
+                  }
+                  else if (strcmp(v.c_str(), "WEBP_HINT_PHOTO") == 0) {
+                      config.image_hint = WEBP_HINT_PHOTO;
+                  }
+                  else if (strcmp(v.c_str(), "WEBP_HINT_GRAPH") == 0) {
+                      config.image_hint = WEBP_HINT_GRAPH;
+                  }
+              }
+              else if (strcmp(opt.c_str(), "WEBP_QUALITY") == 0) {
+                  float v;
+                  iss >> v;
+                  if (v >= 0.0 && v <= 100.0) {
+                      config.quality = v;
+                  }
+              }
+              else if (strcmp(opt.c_str(), "WEBP_METHOD") == 0) {
+                  int v;
+                  iss >> v;
+                  if (v >= 0 && v <= 6) {
+                      config.method = v;
+                  }
+              }
+          }
+      }
+
+      if (img.getPixelFormat() == GL_LUMINANCE) {
           config.lossless = 1;
-          config.quality = 100;
-        }
-        else if (strcmp(opt.c_str(), "hint") == 0)
-        {
-          std::string v;
-          iss >> v;
-          if (strcmp(v.c_str(), "picture") == 0)
-          {
-            config.image_hint = WEBP_HINT_PICTURE;
-          }
-          else if (strcmp(v.c_str(), "photo") == 0)
-          {
-            config.image_hint = WEBP_HINT_PHOTO;
-          }
-          else if (strcmp(v.c_str(), "graph") == 0)
-          {
-            config.image_hint = WEBP_HINT_GRAPH;
-          }
-        }
-        else if (strcmp(opt.c_str(), "quality") == 0)
-        {
-          float v;
-          iss >> v;
-          if (v >= 0.0 && v <= 100.0)
-          {
-            config.quality = v;
-          }
-        }
-        else if (strcmp(opt.c_str(), "method") == 0)
-        {
-          int v;
-          iss >> v;
-          if (v >= 0 && v <= 6)
-          {
-            config.method = v;
-          }
-        }
-      }
-    }
-
-    WebPPicture picture;
-    WebPPreset preset;
-
-    if (!WebPPictureInit(&picture) || !WebPConfigInit(&config))
-    {
-      return WriteResult::ERROR_IN_WRITING_FILE;
-    }
-
-    picture.width = img.s();
-    picture.height = img.t();
-
-    switch (img.getPixelFormat())
-    {
-    case (GL_RGB):
-      WebPPictureImportRGB(&picture, flippedImage->data(), img.getRowSizeInBytes());
-      break;
-    case (GL_RGBA):
-      WebPPictureImportRGBA(&picture, flippedImage->data(), img.getRowSizeInBytes());
-      break;
-    case (GL_LUMINANCE):
-      WebPPictureImportRGBX(&picture, flippedImage->data(), img.getRowSizeInBytes());
-      break;
-    default:
-      return WriteResult::ERROR_IN_WRITING_FILE;
-      break;
-    }
-
-    switch (img.getPixelFormat())
-    {
-    case (GL_RGB):
-    case (GL_RGBA):
-      preset = WEBP_PRESET_PHOTO;
-      if (!WebPConfigPreset(&config, preset, config.quality))
-      {
-        return WriteResult::ERROR_IN_WRITING_FILE;
       }
 
-      if (!WebPValidateConfig(&config))
-      {
-        return WriteResult::ERROR_IN_WRITING_FILE;
+      if (!WebPValidateConfig(&config)) {
+          return WriteResult::ERROR_IN_WRITING_FILE;
+      }
+
+      picture.width = img.s();
+      picture.height = img.t();
+
+      const unsigned char* imageData = img.data();
+      osg::ref_ptr< osg::Image > flippedImage;
+      if (flipImage) {
+          flippedImage = new osg::Image(img);
+          flippedImage->flipVertical();
+          imageData = flippedImage->data();
+      }
+
+      switch (img.getPixelFormat()) {
+      case(GL_RGB):
+          WebPPictureImportRGB(&picture, imageData, img.getRowSizeInBytes());
+          break;
+      case(GL_RGBA):
+          WebPPictureImportRGBA(&picture, imageData, img.getRowSizeInBytes());
+          break;
+      case(GL_LUMINANCE): // DEM ?! 
+          WebPPictureImportRGBX(&picture, imageData, img.getRowSizeInBytes());
+          break;
+      default: return WriteResult::ERROR_IN_WRITING_FILE; break;
       }
 
       picture.writer = ReaderWriterWebP::ostream_writer;
-      picture.custom_ptr = (void *)&fout;
-      if (!WebPEncode(&config, &picture))
-      {
-        return WriteResult::ERROR_IN_WRITING_FILE;
-      }
-      break;
-    case (GL_LUMINANCE):
-      preset = WEBP_PRESET_DEFAULT;
-      if (!WebPConfigPreset(&config, preset, config.quality))
-      {
-        return WriteResult::ERROR_IN_WRITING_FILE;
-      }
-      config.lossless = 1;
-
-      if (!WebPValidateConfig(&config))
-      {
-        return WriteResult::ERROR_IN_WRITING_FILE;
+      picture.custom_ptr = (void*)&fout;
+      if (!WebPEncode(&config, &picture)) {
+          return WriteResult::ERROR_IN_WRITING_FILE;
       }
 
-      picture.writer = ReaderWriterWebP::ostream_writer;
-      picture.custom_ptr = (void *)&fout;
-      if (!WebPEncode(&config, &picture))
-      {
-        return WriteResult::ERROR_IN_WRITING_FILE;
-      }
-      break;
-
-    default:
-      return WriteResult::ERROR_IN_WRITING_FILE;
-      break;
-    }
-
-    WebPPictureFree(&picture);
-    return WriteResult::FILE_SAVED;
+      WebPPictureFree(&picture);
+      return WriteResult::FILE_SAVED;
   }
 };
 
